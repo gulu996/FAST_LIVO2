@@ -1234,37 +1234,56 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
     int size = feats_undistort->points.size();
     PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
     static int scan_wait_num = 0;
-
+    
     if (img_en)
     {
-
       //global map
-      pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_wait_save_filter(new pcl::PointCloud<pcl::PointXYZRGB>);  
-      pcl::VoxelGrid<pcl::PointXYZRGB> downSizeFilterMap;
-      downSizeFilterMap.setInputCloud(laserCloudWorldRGB);  //当前帧
-      //downSizeFilterMap.setInputCloud(pcl_wait_save);     //整个地图
-      downSizeFilterMap.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
-      downSizeFilterMap.filter(*pcl_wait_save_filter);
-
-      //*pcl_wait_save += *laserCloudWorldRGB;        //总地图添加未过滤点云
-      //*pcl_wait_save += *pcl_wait_save_filter;        //     添加过滤后的点云
-
-      //pcl::toROSMsg(*pcl_wait_save, laserCloudmsg);   //发布
-      //pubLaserCloudMap.publish(laserCloudmsg);    
 
       if (global_map_pub)
       {
-        *pcl_wait_save += *pcl_wait_save_filter;        //     添加过滤后的点云
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_wait_save_filter(new pcl::PointCloud<pcl::PointXYZRGB>);  
+        pcl::VoxelGrid<pcl::PointXYZRGB> downSizeFilterMap;
+        downSizeFilterMap.setInputCloud(laserCloudWorldRGB);  //当前帧
+        //downSizeFilterMap.setInputCloud(pcl_wait_save);     //整个地图
+        downSizeFilterMap.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
+        downSizeFilterMap.filter(*pcl_wait_save_filter);
+        
+        //*pcl_wait_save += *laserCloudWorldRGB;          //总地图添加未过滤点云
+        *pcl_wait_save += *pcl_wait_save_filter;        //添加过滤后的点云
+
         pcl::toROSMsg(*pcl_wait_save, laserCloudmsg);   //发布
         pubLaserCloudMap.publish(laserCloudmsg);
+      }
+      else
+      {
+        *pcl_wait_save += *laserCloudWorldRGB;
       }
     }
     else
     {
-      *pcl_wait_save_intensity += *pcl_w_wait_pub;
-    }
-    scan_wait_num++;
+      if (global_map_pub)
+      {
+        pcl::PointCloud<PointType>::Ptr pcl_wait_save_filter(new pcl::PointCloud<PointType>);
+        pcl::VoxelGrid<PointType> downSizeFilterMap;
+        downSizeFilterMap.setInputCloud(pcl_w_wait_pub);  //当前帧
+        //downSizeFilterMap.setInputCloud(pcl_wait_save);     //整个地图
+        downSizeFilterMap.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
+        downSizeFilterMap.filter(*pcl_wait_save_filter);
+        
+        //*pcl_wait_save_intensity += *pcl_w_wait_pub;          //总地图添加未过滤点云
+        *pcl_wait_save_intensity += *pcl_wait_save_filter;        //添加过滤后的点云
 
+        pcl::toROSMsg(*pcl_wait_save_intensity, laserCloudmsg);   //发布
+        pubLaserCloudMap.publish(laserCloudmsg);
+      }
+      else
+      {
+        *pcl_wait_save_intensity += *pcl_w_wait_pub;
+      }
+    }
+
+    scan_wait_num++;
+    
     if ((pcl_wait_save->size() > 0 || pcl_wait_save_intensity->size() > 0) && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval)
     {
       pcd_index++;

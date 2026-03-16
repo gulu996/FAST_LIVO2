@@ -7,13 +7,20 @@ common:
   ros_driver_bug_fix: false
 
 extrin_calib:
-  extrinsic_T: [-0.011, -0.02329, 0.04412]
-  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  Rcl: [ -0.011008,  -0.999940,   0.000187,
-          0.539054,  -0.006092,  -0.842250,
-          0.842200,  -0.009171,   0.539089]
-  Pcl: [  0.086367,  -0.365243,  -0.070319]
-  
+  #extrinsic_T: [-0.011, -0.02329, 0.04412]
+  #extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  #Rcl: [ -0.011008,  -0.999940,   0.000187,
+  #        0.539054,  -0.006092,  -0.842250,
+  #        0.842200,  -0.009171,   0.539089]
+  #Pcl: [  0.086367,  -0.365243,  -0.070319]
+
+  extrinsic_T: [0.08809, 0.01329, -0.25733]
+  extrinsic_R: [-0.8090170, 0.0000, -0.5877852, 0.0000, -1.0000, 0.0000, -0.5877852, 0.0000, 0.8090170]
+  Rcl: [ -0.023487,  -0.999710,   0.005250,
+       -0.013503,  -0.004934,  -0.999897,
+        0.999633,  -0.023556,  -0.013383]
+  Pcl: [ -0.001139,  -0.161932,   0.001251]
+ 
 time_offset: 
   imu_time_offset: 0.0
   img_time_offset: 0.1
@@ -78,7 +85,8 @@ evo:
 
 pcd_save:
   pcd_save_en: true
-  global_map_pub: true    #need to set pcd_save_en true
+  save_path: "/home/gulu/data"
+  global_map_pub: false    #need to set pcd_save_en true
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.1
   interval: -1
