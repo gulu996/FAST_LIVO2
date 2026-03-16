@@ -1884,6 +1884,8 @@ Eigen::Matrix3d VIOManager::Exp(const Eigen::Vector3d& w)
 
 void VIOManager::detect_qr(cv::Mat img)
 {
+  current_board_observations_.clear();
+
   std::vector<int> ids;
   std::vector<std::vector<cv::Point2f>> corners, rejectedCandidates;
   
@@ -1891,33 +1893,35 @@ void VIOManager::detect_qr(cv::Mat img)
   
   if (ids.empty()) 
   {
-    current_board_observations_.clear();
     return;
   }
   
   draw_qr(ids, corners, rejectedCandidates);
 
-  // 检查所有检测到的ID是否相同（应该都是同一个地标板的4个码）
-  int board_id = ids[0];
-  for (size_t i = 1; i < ids.size(); i++) 
+  // 采用首个ID作为地标键值。
+  const int board_id = ids[0];
+
+  bool all_same_id = true;
+  for (size_t i = 1; i < ids.size(); i++)
   {
-    if (ids[i] != board_id) 
+    if (ids[i] != board_id)
     {
-      printf("\033[1;45mDetected multiple board IDs: %d and %d. Should be the same!\033[0m\n", 
-              board_id, ids[i]);
-      return;
+      all_same_id = false;
+      break;
     }
   }
   
   std::vector<cv::Vec3d> rvecs, tvecs;
-  cv::aruco::estimatePoseSingleMarkers(corners, 0.16, cameraMatrix_, distCoeffs_, rvecs, tvecs);
+  cv::aruco::estimatePoseSingleMarkers(corners, marker_size, cameraMatrix_, distCoeffs_, rvecs, tvecs);
   
   // 检查地标库中是否存在这个ID
   auto it = board_world_positions_.find(board_id);
   if (it == board_world_positions_.end()) 
   {
-    printf("\033[1;45mBoard ID %d not found in world positions!\033[0m\n", board_id);
-    return;
+    // 若不存在，则创建占位，避免后续观测被直接丢弃
+    board_world_positions_[board_id] = Eigen::Vector3d::Zero();
+    board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
+    board_world_flag_[board_id] = false;
   }
   
   // 收集该地标板的所有Aruco码观测
@@ -1948,17 +1952,34 @@ void VIOManager::detect_qr(cv::Mat img)
     cv::drawFrameAxes(img_cp, cameraMatrix_, distCoeffs_, rvecs[i], tvecs[i], 0.1);
   }
   
-  // 从Aruco码计算板子中心点
+  // 从Aruco码计算板子中心点（优先多码几何）
   Eigen::Vector3d board_center;
   Eigen::Matrix3d board_rotation;
   int valid_count = 0;
 
-  computeBoardCenterFromArucoMarkers(aruco_obs, board_center, board_rotation, valid_count);
-
-  if (valid_count < 4) 
+  if (all_same_id)
   {
-    printf("\033[1;45mFailed to compute board center for ID %d!\033[0m\n", board_id);
-    return;
+    // 自制板模式：四角Aruco码ID相同，无法通过ID映射角点，直接用多码中心平均。
+    computeSimpleAverage(aruco_obs, board_center, board_rotation, valid_count);
+    if (valid_count >= 2)
+    {
+      printf("\033[1;32m[Aruco] Same-ID board %d observed with %d markers (center average mode).\033[0m\n",
+             board_id, valid_count);
+    }
+  }
+  else
+  {
+    // 传统模式：不同ID对应板上固定位置，做几何解算。
+    computeBoardCenterFromArucoMarkers(aruco_obs, board_center, board_rotation, valid_count);
+  }
+
+  // 多码不可用时，回退为单码观测，避免长期无观测更新
+  if (valid_count < 1) 
+  {
+    board_center = aruco_obs.front().tvec;
+    board_rotation = aruco_obs.front().R_cam_marker;
+    valid_count = 1;
+    printf("\033[1;33m[Aruco] Fallback to single-marker observation for ID %d.\033[0m\n", board_id);
   }
   
   // 创建板子观测
@@ -2088,12 +2109,15 @@ void VIOManager::computeSimpleAverage(
     Eigen::Matrix3d& board_rotation,
     int& valid_count)
 {
-  if (valid_count < 4) 
+  if (aruco_obs.empty()) 
   {
     board_center = Eigen::Vector3d::Zero();
     board_rotation = Eigen::Matrix3d::Identity();
+    valid_count = 0;
     return;
   }
+
+  valid_count = static_cast<int>(aruco_obs.size());
 
   Eigen::Vector3d sum_tvec = Eigen::Vector3d::Zero();
   Eigen::Matrix3d sum_R = Eigen::Matrix3d::Zero();
@@ -2102,7 +2126,6 @@ void VIOManager::computeSimpleAverage(
   {
     sum_tvec += obs.tvec;
     sum_R += obs.R_cam_marker;
-    valid_count++;
   }
   
   board_center = sum_tvec / valid_count;
