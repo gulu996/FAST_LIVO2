@@ -24,6 +24,7 @@ which is included as part of this source code package.
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -49,6 +50,14 @@ typedef struct VoxelMapConfig
   double sliding_thresh;
   bool map_sliding_en;
   int half_map_size;
+
+  // config of long-term sparse visual map
+  bool long_term_visual_map_en;
+  int long_term_visual_max_voxels;
+
+  // config of lidar degeneracy detection
+  double degeneracy_ratio_thresh;
+  int degeneracy_min_effective_features;
 } VoxelMapConfig;
 
 typedef struct PointToPlane
@@ -192,6 +201,8 @@ public:
   int current_frame_id_ = 0;
   ros::Publisher voxel_map_pub_;
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map_;
+  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> long_term_visual_map_;
+  std::unordered_set<VOXEL_LOCATION> visual_observed_voxels_;
   
   PointCloudXYZI::Ptr feats_undistort_;
   PointCloudXYZI::Ptr feats_down_body_;
@@ -216,6 +227,8 @@ public:
   std::vector<M3D> body_cov_list_;
   std::vector<pointWithVar> pv_list_;
   std::vector<PointToPlane> ptpl_list_;
+  bool lidar_degenerated_ = false;
+  double lidar_constraint_ratio_ = 0.0;
 
   VoxelMapManager(VoxelMapConfig &config_setting, std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &voxel_map)
       : config_setting_(config_setting), voxel_map_(voxel_map)
@@ -244,6 +257,10 @@ public:
 
   void mapSliding();
   void clearMemOutOfMap(const int& x_max,const int& x_min,const int& y_max,const int& y_min,const int& z_max,const int& z_min );
+  void setVisualObservedVoxels(const std::vector<VOXEL_LOCATION> &observed_voxels);
+  void updateLidarDegeneracyStatus();
+  bool isLidarDegenerated() const;
+  double getLidarConstraintRatio() const;
 
 private:
   void GetUpdatePlane(const VoxelOctoTree *current_octo, const int pub_max_voxel_layer, std::vector<VoxelPlane> &plane_list);

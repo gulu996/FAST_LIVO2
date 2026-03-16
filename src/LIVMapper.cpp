@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <algorithm>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -114,6 +115,14 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
 
   nh.param<bool>("aruco_landmarks/aruco_landmarks_en", aruco_landmarks_en, false);
+
+  nh.param<bool>("adaptive_selector/en", adaptive_visual_selector_en, false);
+  nh.param<double>("adaptive_selector/keyframe_trans_thresh_min", keyframe_trans_thresh_min_, 0.05);
+  nh.param<double>("adaptive_selector/keyframe_trans_thresh_max", keyframe_trans_thresh_max_, 0.25);
+  nh.param<double>("adaptive_selector/keyframe_rot_thresh_min_deg", keyframe_rot_thresh_min_deg_, 1.5);
+  nh.param<double>("adaptive_selector/keyframe_rot_thresh_max_deg", keyframe_rot_thresh_max_deg_, 8.0);
+  nh.param<double>("adaptive_selector/keyframe_constraint_ratio_full", keyframe_constraint_ratio_full_, 0.2);
+  nh.param<int>("adaptive_selector/keyframe_max_skip_frames", keyframe_max_skip_frames_, 6);
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -305,7 +314,28 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
+  const bool use_visual_frame = shouldSelectVisualFrame();
+  if (!use_visual_frame)
+  {
+    if (imu_prop_enable)
+    {
+      ekf_finish_once = true;
+      latest_ekf_state = _state;
+      latest_ekf_time = LidarMeasures.last_lio_update_time;
+      state_update_flg = true;
+    }
+
+    publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+
+    euler_cur = RotMtoEuler(_state.rot_end);
+    fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
+             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
+    return;
+  }
+
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  updateVisualObservationHints();
 
   if (imu_prop_enable) 
   {
@@ -335,6 +365,66 @@ void LIVMapper::handleVIO()
             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 
+}
+
+bool LIVMapper::shouldSelectVisualFrame()
+{
+  if (!adaptive_visual_selector_en) return true;
+  if (!img_en) return false;
+
+  if (voxelmap_manager->isLidarDegenerated())
+  {
+    skipped_visual_frames_ = 0;
+    has_last_visual_keyframe_state_ = true;
+    last_visual_keyframe_state_ = _state;
+    return true;
+  }
+
+  if (!has_last_visual_keyframe_state_)
+  {
+    has_last_visual_keyframe_state_ = true;
+    last_visual_keyframe_state_ = _state;
+    skipped_visual_frames_ = 0;
+    return true;
+  }
+
+  const double ratio_full = std::max(1e-6, keyframe_constraint_ratio_full_);
+  const double constraint_ratio = std::max(0.0, std::min(1.0, voxelmap_manager->getLidarConstraintRatio() / ratio_full));
+  const double trans_thresh = keyframe_trans_thresh_min_ +
+                              constraint_ratio * (keyframe_trans_thresh_max_ - keyframe_trans_thresh_min_);
+  const double rot_thresh_deg = keyframe_rot_thresh_min_deg_ +
+                                constraint_ratio * (keyframe_rot_thresh_max_deg_ - keyframe_rot_thresh_min_deg_);
+
+  const double trans_delta = (_state.pos_end - last_visual_keyframe_state_.pos_end).norm();
+  Eigen::Matrix3d dR = last_visual_keyframe_state_.rot_end.transpose() * _state.rot_end;
+  const double rot_delta_deg = Eigen::AngleAxisd(dR).angle() * 57.29577951308232;
+
+  const bool reach_pose_keyframe = (trans_delta >= trans_thresh) || (rot_delta_deg >= rot_thresh_deg);
+  const bool reach_skip_limit = skipped_visual_frames_ >= keyframe_max_skip_frames_;
+
+  if (reach_pose_keyframe || reach_skip_limit)
+  {
+    last_visual_keyframe_state_ = _state;
+    skipped_visual_frames_ = 0;
+    return true;
+  }
+
+  skipped_visual_frames_++;
+  return false;
+}
+
+void LIVMapper::updateVisualObservationHints()
+{
+  std::vector<VOXEL_LOCATION> observed_voxels;
+  observed_voxels.reserve(vio_manager->feat_map.size());
+  for (const auto &kv : vio_manager->feat_map)
+  {
+    if (kv.second != nullptr && !kv.second->voxel_points.empty())
+    {
+      observed_voxels.push_back(kv.first);
+    }
+  }
+  voxelmap_manager->setVisualObservedVoxels(observed_voxels);
 }
 
 void LIVMapper::handleLIO() 
@@ -1288,24 +1378,24 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
     {
       pcd_index++;
       //string all_points_dir(string(string(ROOT_DIR) + "Log/PCD/") + to_string(pcd_index) + string(".pcd"));
-      //string all_points_dir(save_path + to_string(pcd_index) + string(".pcd"));
-      string all_points_dir(save_path + string("map_dense.pcd"));
+      string all_points_dir(save_path + to_string(pcd_index) + string(".pcd"));
+      /*string all_points_dir(save_path + string("map_dense.pcd"));
       string downsampled_points_dir(save_path + string("map.pcd"));
-      string downsampled_points_dir2(save_path + string("pose.pcd"));
+      string downsampled_points_dir2(save_path + string("pose.pcd"));*/
       pcl::PCDWriter pcd_writer;
       if (pcd_save_en)
       {
         cout << "current scan saved to /PCD/" << all_points_dir << endl;
         if (img_en)
         {
-          pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+          /*pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
           pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
           voxel_filter.setInputCloud(pcl_wait_save);
           voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
-          voxel_filter.filter(*downsampled_cloud);
+          voxel_filter.filter(*downsampled_cloud);*/
 
-          pcd_writer.writeBinary(downsampled_points_dir, *downsampled_cloud); // Save the raw point cloud data
-          pcd_writer.writeBinary(downsampled_points_dir2, *downsampled_cloud); 
+          //pcd_writer.writeBinary(downsampled_points_dir, *downsampled_cloud); // Save the raw point cloud data
+          //pcd_writer.writeBinary(downsampled_points_dir2, *downsampled_cloud); 
           pcd_writer.writeBinary(all_points_dir, *pcl_wait_save); // pcl::io::savePCDFileASCII(all_points_dir, *pcl_wait_save);
           PointCloudXYZRGB().swap(*pcl_wait_save);    //清空缓存
         }

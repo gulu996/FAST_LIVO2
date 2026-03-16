@@ -27,8 +27,8 @@ time_offset:
   exposure_time_init: 0.0
 
 preprocess:
-  point_filter_num: 1
-  filter_size_surf: 0.1
+  point_filter_num: 2
+  filter_size_surf: 0.15
   lidar_type: 1 # Livox Avia LiDAR
   scan_line: 4
   blind: 0.5
@@ -63,10 +63,24 @@ lio:
   max_points_num: 50
   layer_init_num: [5, 5, 5, 5, 5]
 
+  degeneracy_ratio_thresh: 0.10 # 激光退化判定阈值：法向分布最小/最大特征值比值低于该值视为退化
+  degeneracy_min_effective_features: 50 # 参与退化判定的最小有效平面约束数，低于该值直接按退化处理
+
 local_map:  
-  map_sliding_en: false
-  half_map_size: 100
-  sliding_thresh: 8
+  map_sliding_en: true
+  half_map_size: 50
+  sliding_thresh: 4
+  long_term_visual_map_en: false # 启用长期稀疏视觉地图：局部地图滑窗时保留有视觉观测的体素
+  long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
+
+adaptive_selector:
+  en: true # 自适应视觉选帧总开关：true 开启“退化全帧、非退化关键帧”策略
+  keyframe_trans_thresh_min: 0.05 # 平移关键帧最小阈值(米)：激光退化时趋向该值（更容易选中图像帧）
+  keyframe_trans_thresh_max: 0.12 # 平移关键帧最大阈值(米)：激光约束充足时趋向该值（更稀疏选帧）
+  keyframe_rot_thresh_min_deg: 1.5 # 旋转关键帧最小阈值(度)：退化时降低旋转门限
+  keyframe_rot_thresh_max_deg: 3.5 # 旋转关键帧最大阈值(度)：约束充足时提高旋转门限
+  keyframe_constraint_ratio_full: 0.2 # 约束强度归一化上限：特征值比值达到该值后按“最稀疏选帧”处理
+  keyframe_max_skip_frames: 2 # 最大连续跳过图像帧数，超过后强制选一帧防止长时间无视觉更新
 
 uav:
   imu_rate_odom: false

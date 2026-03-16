@@ -38,6 +38,8 @@ public:
   void savePCD();
   void print_landmarks();
   void processImu();
+  bool shouldSelectVisualFrame();
+  void updateVisualObservationHints();
   
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -187,5 +189,16 @@ public:
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
   bool global_map_pub = false;  
+
+  bool adaptive_visual_selector_en = true;
+  double keyframe_trans_thresh_min_ = 0.05;
+  double keyframe_trans_thresh_max_ = 0.25;
+  double keyframe_rot_thresh_min_deg_ = 1.5;
+  double keyframe_rot_thresh_max_deg_ = 8.0;
+  double keyframe_constraint_ratio_full_ = 0.2;
+  int keyframe_max_skip_frames_ = 6;
+  int skipped_visual_frames_ = 0;
+  bool has_last_visual_keyframe_state_ = false;
+  StatesGroup last_visual_keyframe_state_;
 };
 #endif

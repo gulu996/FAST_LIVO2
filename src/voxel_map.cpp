@@ -50,6 +50,12 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<bool>("local_map/map_sliding_en", voxel_config.map_sliding_en, false);
   nh.param<int>("local_map/half_map_size", voxel_config.half_map_size, 100);
   nh.param<double>("local_map/sliding_thresh", voxel_config.sliding_thresh, 8);
+
+  nh.param<bool>("local_map/long_term_visual_map_en", voxel_config.long_term_visual_map_en, true);
+  nh.param<int>("local_map/long_term_visual_max_voxels", voxel_config.long_term_visual_max_voxels, 5000);
+
+  nh.param<double>("lio/degeneracy_ratio_thresh", voxel_config.degeneracy_ratio_thresh, 0.06);
+  nh.param<int>("lio/degeneracy_min_effective_features", voxel_config.degeneracy_min_effective_features, 30);
 }
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
@@ -508,6 +514,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
   // cout << "[ Mapping ] ekf_time: " << ekf_time << "s, build_residual_time: " << build_residual_time << "s" << endl;
   // cout << "[ Mapping ] ave_ekf_time: " << ave_ekf_time << "s, ave_build_residual_time: " << ave_build_residual_time << "s" << endl;
+  updateLidarDegeneracyStatus();
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
@@ -661,6 +668,16 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
   #endif
   for (int i = 0; i < index.size(); i++)
   {
+    auto find_voxel_tree = [&](const VOXEL_LOCATION &loc) -> VoxelOctoTree *
+    {
+      auto local_it = voxel_map_.find(loc);
+      if (local_it != voxel_map_.end()) return local_it->second;
+      if (!config_setting_.long_term_visual_map_en) return nullptr;
+      auto long_it = long_term_visual_map_.find(loc);
+      if (long_it != long_term_visual_map_.end()) return long_it->second;
+      return nullptr;
+    };
+
     pointWithVar &pv = pv_list[i];
     float loc_xyz[3];
     for (int j = 0; j < 3; j++)
@@ -669,10 +686,9 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
       if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
     }
     VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
-    auto iter = voxel_map_.find(position);
-    if (iter != voxel_map_.end())
+    VoxelOctoTree *current_octo = find_voxel_tree(position);
+    if (current_octo != nullptr)
     {
-      VoxelOctoTree *current_octo = iter->second;
       PointToPlane single_ptpl;
       bool is_sucess = false;
       double prob = 0;
@@ -686,8 +702,8 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
         else if (loc_xyz[1] < (current_octo->voxel_center_[1] - current_octo->quater_length_)) { near_position.y = near_position.y - 1; }
         if (loc_xyz[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
         else if (loc_xyz[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
-        auto iter_near = voxel_map_.find(near_position);
-        if (iter_near != voxel_map_.end()) { build_single_residual(pv, iter_near->second, 0, is_sucess, prob, single_ptpl); }
+        VoxelOctoTree *near_octo = find_voxel_tree(near_position);
+        if (near_octo != nullptr) { build_single_residual(pv, near_octo, 0, is_sucess, prob, single_ptpl); }
       }
       if (is_sucess)
       {
@@ -750,6 +766,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
           single_ptpl.center_ = plane.center_;
           single_ptpl.d_ = plane.d_;
           single_ptpl.layer_ = current_layer;
+          single_ptpl.eigen_value_ = plane.min_eigen_value_;
           single_ptpl.dis_to_plane_ = plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_;
         }
         return;
@@ -942,14 +959,29 @@ void VoxelMapManager::mapSliding()
   clearMemOutOfMap((int64_t)loc_xyz[0] + config_setting_.half_map_size, (int64_t)loc_xyz[0] - config_setting_.half_map_size,
                     (int64_t)loc_xyz[1] + config_setting_.half_map_size, (int64_t)loc_xyz[1] - config_setting_.half_map_size,
                     (int64_t)loc_xyz[2] + config_setting_.half_map_size, (int64_t)loc_xyz[2] - config_setting_.half_map_size);
+
+  if (config_setting_.long_term_visual_map_en &&
+      static_cast<int>(long_term_visual_map_.size()) > config_setting_.long_term_visual_max_voxels)
+  {
+    int to_remove = static_cast<int>(long_term_visual_map_.size()) - config_setting_.long_term_visual_max_voxels;
+    for (auto it = long_term_visual_map_.begin(); it != long_term_visual_map_.end() && to_remove > 0;)
+    {
+      delete it->second;
+      it = long_term_visual_map_.erase(it);
+      --to_remove;
+    }
+  }
+
   double t_sliding_end = omp_get_wtime();
-  std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs"<<RESET<<"\n";
+  std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs, local="
+           << voxel_map_.size() << ", long_term_visual=" << long_term_visual_map_.size() << RESET <<"\n";
   return;
 }
 
 void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const int& y_max,const int& y_min,const int& z_max,const int& z_min )
 {
   int delete_voxel_cout = 0;
+  int transfer_voxel_count = 0;
   // double delete_time = 0;
   // double last_delete_time = 0;
   for (auto it = voxel_map_.begin(); it != voxel_map_.end(); )
@@ -957,7 +989,23 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
     const VOXEL_LOCATION& loc = it->first;
     bool should_remove = loc.x > x_max || loc.x < x_min || loc.y > y_max || loc.y < y_min || loc.z > z_max || loc.z < z_min;
     if (should_remove){
-      // last_delete_time = omp_get_wtime();
+      const bool has_visual_observation = visual_observed_voxels_.find(loc) != visual_observed_voxels_.end();
+      if (config_setting_.long_term_visual_map_en && has_visual_observation)
+      {
+        auto long_term_it = long_term_visual_map_.find(loc);
+        if (long_term_it != long_term_visual_map_.end())
+        {
+          delete long_term_it->second;
+          long_term_it->second = it->second;
+        }
+        else
+        {
+          long_term_visual_map_[loc] = it->second;
+        }
+        it = voxel_map_.erase(it);
+        ++transfer_voxel_count;
+        continue;
+      }
       delete it->second;
       it = voxel_map_.erase(it);
       // delete_time += omp_get_wtime() - last_delete_time;
@@ -966,6 +1014,68 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
       ++it;
     }
   }
-  std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
+  std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels, transfer "
+           <<transfer_voxel_count<<" to long-term visual map"<<RESET<<"\n";
   // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
+}
+
+void VoxelMapManager::setVisualObservedVoxels(const std::vector<VOXEL_LOCATION> &observed_voxels)
+{
+  visual_observed_voxels_.clear();
+  visual_observed_voxels_.reserve(observed_voxels.size());
+  for (const auto &loc : observed_voxels)
+  {
+    visual_observed_voxels_.insert(loc);
+  }
+}
+
+void VoxelMapManager::updateLidarDegeneracyStatus()
+{
+  if (effct_feat_num_ < config_setting_.degeneracy_min_effective_features || ptpl_list_.empty())
+  {
+    lidar_constraint_ratio_ = 0.0;
+    lidar_degenerated_ = true;
+    return;
+  }
+
+  Eigen::Matrix3d normal_cov = Eigen::Matrix3d::Zero();
+  int valid_normal_count = 0;
+  for (const auto &ptpl : ptpl_list_)
+  {
+    if (ptpl.normal_.norm() < 1e-6) continue;
+    Eigen::Vector3d n = ptpl.normal_.normalized();
+    normal_cov += n * n.transpose();
+    ++valid_normal_count;
+  }
+
+  if (valid_normal_count < config_setting_.degeneracy_min_effective_features)
+  {
+    lidar_constraint_ratio_ = 0.0;
+    lidar_degenerated_ = true;
+    return;
+  }
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(normal_cov);
+  if (es.info() != Eigen::Success)
+  {
+    lidar_constraint_ratio_ = 0.0;
+    lidar_degenerated_ = true;
+    return;
+  }
+
+  const Eigen::Vector3d evals = es.eigenvalues();
+  const double lambda_max = std::max(1e-6, evals[2]);
+  const double lambda_min = std::max(0.0, evals[0]);
+  lidar_constraint_ratio_ = lambda_min / lambda_max;
+  lidar_degenerated_ = lidar_constraint_ratio_ < config_setting_.degeneracy_ratio_thresh;
+}
+
+bool VoxelMapManager::isLidarDegenerated() const
+{
+  return lidar_degenerated_;
+}
+
+double VoxelMapManager::getLidarConstraintRatio() const
+{
+  return lidar_constraint_ratio_;
 }
