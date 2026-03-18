@@ -64,6 +64,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("vio/raycast_en", raycast_en, false);
   nh.param<bool>("vio/exposure_estimate_en", exposure_estimate_en, true);
   nh.param<double>("vio/inv_expo_cov", inv_expo_cov, 0.2);
+  nh.param<bool>("vio/visual_map_prune_en", visual_map_prune_en, true);
+  nh.param<int>("vio/visual_map_max_voxels", visual_map_max_voxels, 12000);
+  nh.param<int>("vio/visual_map_max_points_per_voxel", visual_map_max_points_per_voxel, 24);
+  nh.param<int>("vio/visual_map_max_total_points", visual_map_max_total_points, 180000);
   nh.param<int>("vio/grid_size", grid_size, 5);
   nh.param<int>("vio/grid_n_height", grid_n_height, 17);
   nh.param<int>("vio/patch_pyrimid_level", patch_pyrimid_level, 3);
@@ -102,6 +106,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
   nh.param<bool>("pcd_save/colmap_output_en", colmap_output_en, false);
   nh.param<double>("pcd_save/filter_size_pcd", filter_size_pcd, 0.5);
+  nh.param<int>("pcd_save/max_cache_points", pcd_cache_max_points, 300000);
   nh.param<vector<double>>("extrin_calib/extrinsic_T", extrinT, vector<double>());
   nh.param<vector<double>>("extrin_calib/extrinsic_R", extrinR, vector<double>());
   nh.param<vector<double>>("extrin_calib/Pcl", cameraextrinT, vector<double>());
@@ -154,6 +159,10 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->grid_n_height = grid_n_height;
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
+  vio_manager->visual_map_prune_en = visual_map_prune_en;
+  vio_manager->visual_map_max_voxels = visual_map_max_voxels;
+  vio_manager->visual_map_max_points_per_voxel = visual_map_max_points_per_voxel;
+  vio_manager->visual_map_max_total_points = visual_map_max_total_points;
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->aruco_landmarks_en = aruco_landmarks_en;
   vio_manager->initializeVIO(nh);
@@ -1348,6 +1357,14 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
       {
         *pcl_wait_save += *laserCloudWorldRGB;
       }
+      if (pcd_cache_max_points > 0 && pcl_wait_save->size() > static_cast<size_t>(pcd_cache_max_points))
+      {
+        size_t overflow = pcl_wait_save->size() - static_cast<size_t>(pcd_cache_max_points);
+        pcl_wait_save->points.erase(pcl_wait_save->points.begin(), pcl_wait_save->points.begin() + overflow);
+        pcl_wait_save->width = pcl_wait_save->points.size();
+        pcl_wait_save->height = 1;
+        pcl_wait_save->is_dense = false;
+      }
     }
     else
     {
@@ -1369,6 +1386,14 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
       else
       {
         *pcl_wait_save_intensity += *pcl_w_wait_pub;
+      }
+      if (pcd_cache_max_points > 0 && pcl_wait_save_intensity->size() > static_cast<size_t>(pcd_cache_max_points))
+      {
+        size_t overflow = pcl_wait_save_intensity->size() - static_cast<size_t>(pcd_cache_max_points);
+        pcl_wait_save_intensity->points.erase(pcl_wait_save_intensity->points.begin(), pcl_wait_save_intensity->points.begin() + overflow);
+        pcl_wait_save_intensity->width = pcl_wait_save_intensity->points.size();
+        pcl_wait_save_intensity->height = 1;
+        pcl_wait_save_intensity->is_dense = false;
       }
     }
 

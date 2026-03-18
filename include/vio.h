@@ -154,6 +154,11 @@ public:
   int max_iterations, total_points;
 
   double img_point_cov, outlier_threshold, ncc_thre;
+  bool visual_map_prune_en = true;
+  int visual_map_max_voxels = 12000;
+  int visual_map_max_points_per_voxel = 24;
+  int visual_map_max_total_points = 180000;
+  double visual_voxel_size = 0.5;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
@@ -208,6 +213,8 @@ public:
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   void insertPointIntoVoxelMap(VisualPoint *pt_new);
+  size_t getVisualPointCount() const;
+  void pruneVisualMap();
   void plotTrackedPoints();
   void updateFrameState(StatesGroup state);
   void projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);

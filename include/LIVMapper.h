@@ -112,6 +112,11 @@ public:
   int img_en = 1, imu_int_frame = 3;
   bool normal_en = true;
   bool exposure_estimate_en = false;
+  bool visual_map_prune_en = true;
+  int visual_map_max_voxels = 12000;
+  int visual_map_max_points_per_voxel = 24;
+  int visual_map_max_total_points = 180000;
+  int pcd_cache_max_points = 300000;
   double exposure_time_init = 0.0;
   bool inverse_composition_en = false;
   bool raycast_en = false;

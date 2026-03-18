@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include <algorithm>
 
 VIOManager::VIOManager()
 {
@@ -324,6 +325,98 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
     VOXEL_POINTS *ot = new VOXEL_POINTS(0);
     ot->voxel_points.push_back(pt_new);
     feat_map[position] = ot;
+  }
+}
+
+size_t VIOManager::getVisualPointCount() const
+{
+  size_t total = 0;
+  for (const auto &kv : feat_map)
+  {
+    if (kv.second != nullptr) total += kv.second->voxel_points.size();
+  }
+  return total;
+}
+
+void VIOManager::pruneVisualMap()
+{
+  if (!visual_map_prune_en || feat_map.empty()) return;
+
+  size_t removed_points = 0;
+  size_t removed_voxels = 0;
+
+  if (visual_map_max_points_per_voxel > 0)
+  {
+    for (auto &kv : feat_map)
+    {
+      VOXEL_POINTS *voxel = kv.second;
+      if (voxel == nullptr) continue;
+      auto &pts = voxel->voxel_points;
+      while (pts.size() > static_cast<size_t>(visual_map_max_points_per_voxel))
+      {
+        delete pts.front();
+        pts.erase(pts.begin());
+        ++removed_points;
+      }
+      voxel->count = pts.size();
+    }
+  }
+
+  size_t total_points = getVisualPointCount();
+  const bool over_voxel_limit = visual_map_max_voxels > 0 && feat_map.size() > static_cast<size_t>(visual_map_max_voxels);
+  const bool over_point_limit = visual_map_max_total_points > 0 && total_points > static_cast<size_t>(visual_map_max_total_points);
+  if (!over_voxel_limit && !over_point_limit)
+  {
+    if (removed_points > 0)
+    {
+      printf("[ VIO ] Prune visual map: remove %zu points, voxels=%zu, points=%zu\n", removed_points, feat_map.size(), total_points);
+    }
+    return;
+  }
+
+  V3D center(0, 0, 0);
+  if (state != nullptr) center = state->pos_end;
+
+  std::vector<std::pair<double, VOXEL_LOCATION>> ordered_voxels;
+  ordered_voxels.reserve(feat_map.size());
+  for (const auto &kv : feat_map)
+  {
+    const VOXEL_LOCATION &loc = kv.first;
+    V3D voxel_center((loc.x + 0.5) * visual_voxel_size,
+                     (loc.y + 0.5) * visual_voxel_size,
+                     (loc.z + 0.5) * visual_voxel_size);
+    ordered_voxels.emplace_back((voxel_center - center).squaredNorm(), loc);
+  }
+
+  std::sort(ordered_voxels.begin(), ordered_voxels.end(),
+            [](const std::pair<double, VOXEL_LOCATION> &a, const std::pair<double, VOXEL_LOCATION> &b)
+            {
+              return a.first > b.first;
+            });
+
+  for (const auto &item : ordered_voxels)
+  {
+    const bool still_over_voxels = visual_map_max_voxels > 0 && feat_map.size() > static_cast<size_t>(visual_map_max_voxels);
+    const bool still_over_points = visual_map_max_total_points > 0 && total_points > static_cast<size_t>(visual_map_max_total_points);
+    if (!still_over_voxels && !still_over_points) break;
+
+    auto it = feat_map.find(item.second);
+    if (it == feat_map.end() || it->second == nullptr) continue;
+
+    VOXEL_POINTS *voxel = it->second;
+    const size_t voxel_points = voxel->voxel_points.size();
+    delete voxel;
+    feat_map.erase(it);
+    if (total_points >= voxel_points) total_points -= voxel_points;
+    else total_points = 0;
+    ++removed_voxels;
+    removed_points += voxel_points;
+  }
+
+  if (removed_points > 0 || removed_voxels > 0)
+  {
+    printf("[ VIO ] Prune visual map: remove %zu points, %zu voxels, remain voxels=%zu, remain points=%zu\n",
+           removed_points, removed_voxels, feat_map.size(), total_points);
   }
 }
 
@@ -2430,6 +2523,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double t6 = omp_get_wtime();
 
   updateReferencePatch(feat_map);
+
+  pruneVisualMap();
 
   double t7 = omp_get_wtime();
   
