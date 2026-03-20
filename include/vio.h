@@ -114,13 +114,26 @@ public:
   cv::Ptr<cv::aruco::Dictionary> dictionary_;
   double marker_size;
   bool aruco_landmarks_en = false;
+  double aruco_min_quad_area_px = 300.0;
+  double aruco_pair_distance_rel_tol = 0.2;
+  double aruco_max_normal_diff_deg = 15.0;
+  double aruco_max_marker_depth_diff = 0.6;
+  double aruco_min_marker_depth = 0.1;
+  double aruco_max_marker_depth = 10.0;
+  double aruco_max_position_residual = 0.6;
+  double aruco_max_orientation_residual_deg = 25.0;
+  double aruco_position_noise_base = 0.01;
+  double aruco_orientation_noise_base = 0.1;
 
   struct BoardObservation 
   {
     int board_id;                     // 地标板子ID
     Eigen::Vector3d center_tvec;      // 地标中心点在相机坐标系下的位置
     Eigen::Matrix3d center_R_cam_board; // 地标中心点到相机的旋转
-    int valid_count;                  // 有效的Aruco码数量（1-4个）
+    int valid_count;                  // 有效的Aruco码数量（固定为4个）
+    bool geometry_valid = false;      // 同ID四码几何一致性是否通过
+    double center_spread_m = 0.0;     // 四码中心离散度（米）
+    double rotation_dispersion_deg = 0.0; // 四码姿态离散度（度）
     //double timestamp;
   };
 
