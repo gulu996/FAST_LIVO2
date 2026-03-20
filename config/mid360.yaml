@@ -120,6 +120,16 @@ aruco_landmarks:
   marker_size: 0.16
   delta_width_qr_center: 0.28 # Half the distance between the centers of two markers in the horizontal direction 
   delta_height_qr_center: 0.18 # Half the distance between the centers of two markers in the vertical direction
+  min_quad_area_px: 300.0 # 2D几何门控：四个二维码中心凸包最小面积（像素^2）
+  pair_distance_rel_tol: 0.2 # 3D几何门控：两两距离与理论矩形距离的相对误差上限
+  max_normal_diff_deg: 15.0 # 3D几何门控：四码法向与平均法向的最大夹角（度）
+  max_marker_depth_diff: 0.6 # 深度一致性门控：四码在相机坐标系z方向的最大离散（米）
+  min_marker_depth: 0.1 # 单码距离下限（米），过近容易估计不稳定
+  max_marker_depth: 10.0 # 单码距离上限（米），过远角点噪声占比高
+  max_position_residual: 0.6 # 更新门控：地标世界位置残差范数上限（米）
+  max_orientation_residual_deg: 25.0 # 更新门控：地标姿态残差上限（度）
+  position_noise_base: 0.01 # EKF观测噪声基值：位置分量（值越大越不信任二维码位置）
+  orientation_noise_base: 0.1 # EKF观测噪声基值：姿态分量（值越大越不信任二维码姿态）
   markers:
     - id: 1
       flag: 0      #0表示该地标的世界坐标无效
