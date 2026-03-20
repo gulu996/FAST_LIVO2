@@ -12,6 +12,9 @@ which is included as part of this source code package.
 
 #include "vio.h"
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
 
 VIOManager::VIOManager()
 {
@@ -79,6 +82,16 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     nh.param<double>("/aruco_landmarks/marker_size", marker_size, 0.16);
     nh.param<double>("/aruco_landmarks/delta_width_qr_center", board_config_.delta_width_qr_center, 0.28);
     nh.param<double>("/aruco_landmarks/delta_height_qr_center", board_config_.delta_height_qr_center, 0.18);
+    nh.param<double>("/aruco_landmarks/min_quad_area_px", aruco_min_quad_area_px, 300.0);
+    nh.param<double>("/aruco_landmarks/pair_distance_rel_tol", aruco_pair_distance_rel_tol, 0.2);
+    nh.param<double>("/aruco_landmarks/max_normal_diff_deg", aruco_max_normal_diff_deg, 15.0);
+    nh.param<double>("/aruco_landmarks/max_marker_depth_diff", aruco_max_marker_depth_diff, 0.6);
+    nh.param<double>("/aruco_landmarks/min_marker_depth", aruco_min_marker_depth, 0.1);
+    nh.param<double>("/aruco_landmarks/max_marker_depth", aruco_max_marker_depth, 10.0);
+    nh.param<double>("/aruco_landmarks/max_position_residual", aruco_max_position_residual, 0.6);
+    nh.param<double>("/aruco_landmarks/max_orientation_residual_deg", aruco_max_orientation_residual_deg, 25.0);
+    nh.param<double>("/aruco_landmarks/position_noise_base", aruco_position_noise_base, 0.01);
+    nh.param<double>("/aruco_landmarks/orientation_noise_base", aruco_orientation_noise_base, 0.1);
 
     aruco_relative_positions_[1] = Eigen::Vector3d(-board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);   // 左上
     aruco_relative_positions_[2] = Eigen::Vector3d(board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);    // 右上
@@ -86,6 +99,8 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     aruco_relative_positions_[4] = Eigen::Vector3d(board_config_.delta_width_qr_center, -board_config_.delta_height_qr_center, 0);   // 右下
 
     ROS_INFO("[Aruco] Marker size: %.3f meters", marker_size);
+    ROS_INFO("[Aruco] Same-ID gating: area>=%.1f px^2, pair tol<=%.2f, normal<=%.1f deg",
+         aruco_min_quad_area_px, aruco_pair_distance_rel_tol, aruco_max_normal_diff_deg);
     // 清空现有地标
     board_world_positions_.clear();
 
@@ -1954,6 +1969,147 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
+namespace
+{
+constexpr double kRadToDeg = 57.29577951308232;
+
+cv::Point2f markerCenter2D(const std::vector<cv::Point2f> &corner_pts)
+{
+  cv::Point2f center(0.0f, 0.0f);
+  for (const auto &pt : corner_pts) center += pt;
+  center *= 0.25f;
+  return center;
+}
+
+bool checkQuadGeometry2D(const std::vector<std::vector<cv::Point2f>> &corners,
+                         double min_area_px,
+                         double &quad_area_px)
+{
+  quad_area_px = 0.0;
+  if (corners.size() != 4) return false;
+
+  std::vector<cv::Point2f> centers;
+  centers.reserve(4);
+  for (const auto &corner_pts : corners)
+  {
+    if (corner_pts.size() != 4) return false;
+    centers.push_back(markerCenter2D(corner_pts));
+  }
+
+  std::vector<cv::Point2f> hull;
+  cv::convexHull(centers, hull);
+  if (hull.size() != 4) return false;
+
+  quad_area_px = std::fabs(cv::contourArea(hull));
+  return quad_area_px >= min_area_px;
+}
+
+bool checkPairwiseDistanceConsistency(const std::vector<Eigen::Vector3d> &points,
+                                      double dx,
+                                      double dy,
+                                      double rel_tol,
+                                      double &max_rel_err)
+{
+  max_rel_err = 0.0;
+  if (points.size() != 4) return false;
+
+  const double expected_dx = 2.0 * std::fabs(dx);
+  const double expected_dy = 2.0 * std::fabs(dy);
+  const double expected_diag = 2.0 * std::sqrt(dx * dx + dy * dy);
+
+  std::array<double, 6> expected = {
+      expected_dx, expected_dx,
+      expected_dy, expected_dy,
+      expected_diag, expected_diag};
+  std::sort(expected.begin(), expected.end());
+
+  std::array<double, 6> measured;
+  int idx = 0;
+  for (size_t i = 0; i < points.size(); i++)
+  {
+    for (size_t j = i + 1; j < points.size(); j++)
+    {
+      measured[idx++] = (points[i] - points[j]).norm();
+    }
+  }
+  std::sort(measured.begin(), measured.end());
+
+  for (size_t i = 0; i < expected.size(); i++)
+  {
+    const double denom = std::max(expected[i], 1e-6);
+    const double rel_err = std::fabs(measured[i] - expected[i]) / denom;
+    max_rel_err = std::max(max_rel_err, rel_err);
+    if (rel_err > rel_tol) return false;
+  }
+
+  return true;
+}
+
+bool checkNormalConsistency(const std::vector<VIOManager::ArucoObservation> &aruco_obs,
+                           double max_normal_diff_deg,
+                           double &observed_max_diff_deg)
+{
+  observed_max_diff_deg = 0.0;
+  if (aruco_obs.size() != 4) return false;
+
+  std::vector<Eigen::Vector3d> normals;
+  normals.reserve(4);
+
+  const Eigen::Vector3d ref_n = aruco_obs.front().R_cam_marker.col(2).normalized();
+  normals.push_back(ref_n);
+
+  for (size_t i = 1; i < aruco_obs.size(); i++)
+  {
+    Eigen::Vector3d n = aruco_obs[i].R_cam_marker.col(2).normalized();
+    if (n.dot(ref_n) < 0.0) n = -n;
+    normals.push_back(n);
+  }
+
+  Eigen::Vector3d avg_n = Eigen::Vector3d::Zero();
+  for (const auto &n : normals) avg_n += n;
+  if (avg_n.norm() < 1e-6) return false;
+  avg_n.normalize();
+
+  for (const auto &n : normals)
+  {
+    const double cos_angle = std::clamp(n.dot(avg_n), -1.0, 1.0);
+    const double diff_deg = std::acos(cos_angle) * kRadToDeg;
+    observed_max_diff_deg = std::max(observed_max_diff_deg, diff_deg);
+  }
+
+  return observed_max_diff_deg <= max_normal_diff_deg;
+}
+
+double computeCenterSpread(const std::vector<VIOManager::ArucoObservation> &aruco_obs,
+                           const Eigen::Vector3d &board_center)
+{
+  if (aruco_obs.empty()) return 0.0;
+
+  double sqr_sum = 0.0;
+  for (const auto &obs : aruco_obs)
+  {
+    sqr_sum += (obs.tvec - board_center).squaredNorm();
+  }
+  return std::sqrt(sqr_sum / static_cast<double>(aruco_obs.size()));
+}
+
+double computeRotationDispersionDeg(const std::vector<VIOManager::ArucoObservation> &aruco_obs,
+                                    const Eigen::Matrix3d &avg_rotation)
+{
+  if (aruco_obs.empty()) return 0.0;
+
+  double max_diff_deg = 0.0;
+  for (const auto &obs : aruco_obs)
+  {
+    const Eigen::Matrix3d delta_R = avg_rotation.transpose() * obs.R_cam_marker;
+    Eigen::AngleAxisd aa(delta_R);
+    const double diff_deg = std::fabs(aa.angle()) * kRadToDeg;
+    max_diff_deg = std::max(max_diff_deg, diff_deg);
+  }
+  return max_diff_deg;
+}
+} // namespace
+
 // 添加辅助函数：反对称矩阵
 Eigen::Matrix3d VIOManager::skewSymmetric(const Eigen::Vector3d& v)
 {
@@ -1991,103 +2147,145 @@ void VIOManager::detect_qr(cv::Mat img)
   
   draw_qr(ids, corners, rejectedCandidates);
 
-  // 采用首个ID作为地标键值。
-  const int board_id = ids[0];
+  // 仅支持4个同ID模式：检测数量和ID必须严格满足条件。
+  if (ids.size() != 4)
+  {
+    printf("\033[1;33m[Aruco] Skip: require exactly 4 markers, got %zu.\033[0m\n", ids.size());
+    return;
+  }
 
-  bool all_same_id = true;
+  const int board_id = ids[0];
   for (size_t i = 1; i < ids.size(); i++)
   {
     if (ids[i] != board_id)
     {
-      all_same_id = false;
-      break;
+      printf("\033[1;33m[Aruco] Skip: mixed IDs found, same-ID mode only.\033[0m\n");
+      return;
     }
   }
-  
+
+  double quad_area_px = 0.0;
+  if (!checkQuadGeometry2D(corners, aruco_min_quad_area_px, quad_area_px))
+  {
+    printf("\033[1;33m[Aruco] Skip board %d: invalid 2D quad geometry, area %.1f px^2.\033[0m\n",
+           board_id, quad_area_px);
+    return;
+  }
+
   std::vector<cv::Vec3d> rvecs, tvecs;
   cv::aruco::estimatePoseSingleMarkers(corners, marker_size, cameraMatrix_, distCoeffs_, rvecs, tvecs);
-  
+  if (rvecs.size() != 4 || tvecs.size() != 4)
+  {
+    printf("\033[1;33m[Aruco] Skip board %d: pose estimation size mismatch.\033[0m\n", board_id);
+    return;
+  }
+
   // 检查地标库中是否存在这个ID
   auto it = board_world_positions_.find(board_id);
-  if (it == board_world_positions_.end()) 
+  if (it == board_world_positions_.end())
   {
-    // 若不存在，则创建占位，避免后续观测被直接丢弃
     board_world_positions_[board_id] = Eigen::Vector3d::Zero();
     board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
     board_world_flag_[board_id] = false;
   }
-  
-  // 收集该地标板的所有Aruco码观测
+
   std::vector<ArucoObservation> aruco_obs;
-  for (size_t i = 0; i < ids.size(); i++) 
+  aruco_obs.reserve(4);
+  std::vector<Eigen::Vector3d> marker_positions;
+  marker_positions.reserve(4);
+
+  double min_marker_z = std::numeric_limits<double>::max();
+  double max_marker_z = -std::numeric_limits<double>::max();
+
+  for (size_t i = 0; i < 4; i++)
   {
     ArucoObservation obs;
-    obs.id = ids[i];  // 这个ID就是板子ID
-    //obs.timestamp = current_time;
-      
-    // 转换平移向量
+    obs.id = board_id;
     obs.tvec = Eigen::Vector3d(tvecs[i][0], tvecs[i][1], tvecs[i][2]);
-    
-    // 转换旋转矩阵
+
+    const double marker_distance = obs.tvec.norm();
+    if (marker_distance < aruco_min_marker_depth || marker_distance > aruco_max_marker_depth)
+    {
+      printf("\033[1;33m[Aruco] Skip board %d: marker distance %.3f m out of range.\033[0m\n",
+             board_id, marker_distance);
+      return;
+    }
+
+    min_marker_z = std::min(min_marker_z, obs.tvec.z());
+    max_marker_z = std::max(max_marker_z, obs.tvec.z());
+
     cv::Mat R_cam_marker_cv;
     cv::Rodrigues(rvecs[i], R_cam_marker_cv);
-    for (int row = 0; row < 3; row++) 
+    for (int row = 0; row < 3; row++)
     {
-      for (int col = 0; col < 3; col++) 
+      for (int col = 0; col < 3; col++)
       {
         obs.R_cam_marker(row, col) = R_cam_marker_cv.at<double>(row, col);
       }
     }
-      
+
     aruco_obs.push_back(obs);
-    
-    // 可视化
+    marker_positions.push_back(obs.tvec);
+
     cv::drawFrameAxes(img_cp, cameraMatrix_, distCoeffs_, rvecs[i], tvecs[i], 0.1);
   }
-  
-  // 从Aruco码计算板子中心点（优先多码几何）
+
+  if ((max_marker_z - min_marker_z) > aruco_max_marker_depth_diff)
+  {
+    printf("\033[1;33m[Aruco] Skip board %d: depth spread %.3f m too large.\033[0m\n",
+           board_id, max_marker_z - min_marker_z);
+    return;
+  }
+
+  double max_rel_pair_err = 0.0;
+  if (!checkPairwiseDistanceConsistency(marker_positions,
+                                        board_config_.delta_width_qr_center,
+                                        board_config_.delta_height_qr_center,
+                                        aruco_pair_distance_rel_tol,
+                                        max_rel_pair_err))
+  {
+    printf("\033[1;33m[Aruco] Skip board %d: pairwise distance inconsistency %.3f.\033[0m\n",
+           board_id, max_rel_pair_err);
+    return;
+  }
+
+  double max_normal_diff_deg = 0.0;
+  if (!checkNormalConsistency(aruco_obs, aruco_max_normal_diff_deg, max_normal_diff_deg))
+  {
+    printf("\033[1;33m[Aruco] Skip board %d: normal inconsistency %.2f deg.\033[0m\n",
+           board_id, max_normal_diff_deg);
+    return;
+  }
+
   Eigen::Vector3d board_center;
   Eigen::Matrix3d board_rotation;
   int valid_count = 0;
-
-  if (all_same_id)
+  computeSimpleAverage(aruco_obs, board_center, board_rotation, valid_count);
+  if (valid_count != 4)
   {
-    // 自制板模式：四角Aruco码ID相同，无法通过ID映射角点，直接用多码中心平均。
-    computeSimpleAverage(aruco_obs, board_center, board_rotation, valid_count);
-    if (valid_count >= 2)
-    {
-      printf("\033[1;32m[Aruco] Same-ID board %d observed with %d markers (center average mode).\033[0m\n",
-             board_id, valid_count);
-    }
-  }
-  else
-  {
-    // 传统模式：不同ID对应板上固定位置，做几何解算。
-    computeBoardCenterFromArucoMarkers(aruco_obs, board_center, board_rotation, valid_count);
+    printf("\033[1;33m[Aruco] Skip board %d: valid marker count = %d.\033[0m\n", board_id, valid_count);
+    return;
   }
 
-  // 多码不可用时，回退为单码观测，避免长期无观测更新
-  if (valid_count < 1) 
-  {
-    board_center = aruco_obs.front().tvec;
-    board_rotation = aruco_obs.front().R_cam_marker;
-    valid_count = 1;
-    printf("\033[1;33m[Aruco] Fallback to single-marker observation for ID %d.\033[0m\n", board_id);
-  }
-  
-  // 创建板子观测
   BoardObservation board_obs;
   board_obs.board_id = board_id;
   board_obs.center_tvec = board_center;
   board_obs.center_R_cam_board = board_rotation;
   board_obs.valid_count = valid_count;
-  //board_obs.timestamp = current_time;
-  
-  current_board_observations_.clear();
+  board_obs.geometry_valid = true;
+  board_obs.center_spread_m = computeCenterSpread(aruco_obs, board_center);
+  board_obs.rotation_dispersion_deg = computeRotationDispersionDeg(aruco_obs, board_rotation);
+
   current_board_observations_.push_back(board_obs);
-  
-  printf("[Aruco] Detected board %d with %d markers, center at [%.3f, %.3f, %.3f]\n",
-          board_id, valid_count, board_center.x(), board_center.y(), board_center.z());
+
+  printf("\033[1;32m[Aruco] Board %d accepted: center [%.3f, %.3f, %.3f], spread %.3f m, rot-disp %.2f deg, area %.1f px^2\033[0m\n",
+         board_id,
+         board_center.x(),
+         board_center.y(),
+         board_center.z(),
+         board_obs.center_spread_m,
+         board_obs.rotation_dispersion_deg,
+         quad_area_px);
 }
 
 void VIOManager::computeBoardCenterFromArucoMarkers(
@@ -2195,7 +2393,7 @@ void VIOManager::computeBoardCenterFromArucoMarkers(
   printf("  Average reprojection error: %.3f meters\n", total_error / valid_count);
 }
 
-// 简单平均法（回退方案）
+// 同ID四码中心与姿态估计
 void VIOManager::computeSimpleAverage(
     const std::vector<ArucoObservation>& aruco_obs,
     Eigen::Vector3d& board_center,
@@ -2227,9 +2425,6 @@ void VIOManager::computeSimpleAverage(
   // 正交化平均旋转矩阵
   Eigen::JacobiSVD<Eigen::Matrix3d> svd(sum_R, Eigen::ComputeFullU | Eigen::ComputeFullV);
   board_rotation = svd.matrixU() * svd.matrixV().transpose();
-  
-  printf("[Aruco] Computed board center from %d markers using simple average: [%.3f, %.3f, %.3f]\n",
-          valid_count, board_center.x(), board_center.y(), board_center.z());
 }
 
 void VIOManager::draw_qr(
@@ -2315,6 +2510,13 @@ void VIOManager::updateStateWithBoardObservation()
   
   // 由于同一时间只会看到一个地标板，直接取第一个观测
   const auto& board_obs = current_board_observations_[0];
+  if (board_obs.valid_count != 4 || !board_obs.geometry_valid)
+  {
+    printf("\033[1;33m[Aruco] Skip update: invalid board observation (count=%d, geometry=%d).\033[0m\n",
+           board_obs.valid_count, static_cast<int>(board_obs.geometry_valid));
+    return;
+  }
+
   int board_id = board_obs.board_id;
   
   auto flag_it = board_world_flag_.find(board_id);
@@ -2387,14 +2589,27 @@ void VIOManager::updateStateWithBoardObservation()
   
   // 计算误差
   V3D position_error = P_w_board_estimated - P_w_board;
+  const double position_error_norm = position_error.norm();
   printf("\033[1;32m  Position Error: [%.3f, %.3f, %.3f] meters, Norm: %.3fm\033[0m\n",
-        position_error.x(), position_error.y(), position_error.z(), position_error.norm());
+      position_error.x(), position_error.y(), position_error.z(), position_error_norm);
   
   // 计算姿态误差
   M3D orientation_error = R_w_board_estimated * R_w_board.transpose();
   Eigen::AngleAxisd angle_axis_error(orientation_error);
   double orientation_error_deg = angle_axis_error.angle() * 180.0 / M_PI;
   printf("\033[1;32m  Orientation Error: %.2f degrees\033[0m\n", orientation_error_deg);
+
+  if (position_error_norm > aruco_max_position_residual ||
+      orientation_error_deg > aruco_max_orientation_residual_deg)
+  {
+    printf("\033[1;33m[Aruco] Reject update for board %d: residual gate failed (pos %.3f/%.3f m, ori %.2f/%.2f deg).\033[0m\n",
+           board_id,
+           position_error_norm,
+           aruco_max_position_residual,
+           orientation_error_deg,
+           aruco_max_orientation_residual_deg);
+    return;
+  }
   
   // 计算距离（相机到地标的距离）
   double distance = board_obs.center_tvec.norm();
@@ -2432,12 +2647,8 @@ void VIOManager::updateStateWithBoardObservation()
   z_aruco.segment<3>(0) = position_residual;
   z_aruco.segment<3>(3) = orientation_residual;
   
-  // ============== 关键修改：使用computeProjectionJacobian计算更精确的雅可比矩阵 ==============
+  // ============== Aruco观测雅可比矩阵 ==============
   Eigen::MatrixXd H_aruco(6, 6);
-  
-  // 计算投影雅可比矩阵
-  MD(2, 3) J_proj;
-  computeProjectionJacobian(board_obs.center_tvec, J_proj);
   
   // 计算对相机位姿的雅可比矩阵
   M3D p_hat = skewSymmetric(board_obs.center_tvec);
@@ -2454,13 +2665,14 @@ void VIOManager::updateStateWithBoardObservation()
   H_aruco.block<3, 3>(3, 0) = J_ori_R;  // 姿态残差对旋转
   H_aruco.block<3, 3>(3, 3) = J_ori_t;  // 姿态残差对平移
   
-  // 如果需要考虑投影雅可比矩阵的影响，可以进一步改进：
-  // H_aruco.block<2, 6>(0, 0) = J_proj * H_aruco.block<3, 6>(0, 0);
-  
-  double weight = 1.0 / (board_obs.valid_count * 0.5 + 0.5);
+  // 如果后续需要图像域误差建模，可在此扩展投影链式雅可比。
+
+  double quality_weight = 1.0 + board_obs.center_spread_m + board_obs.rotation_dispersion_deg / 45.0;
+  quality_weight = std::max(1.0, quality_weight);
+
   Eigen::MatrixXd R_aruco = Eigen::MatrixXd::Zero(6, 6);
-  R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * 0.01 * weight;
-  R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * 0.1 * weight;
+  R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * aruco_position_noise_base * quality_weight;
+  R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * aruco_orientation_noise_base * quality_weight;
   
   Eigen::MatrixXd H_T = H_aruco.transpose();
   Eigen::MatrixXd S = H_aruco * state->cov.block<6, 6>(0, 0) * H_T + R_aruco;
@@ -2474,8 +2686,8 @@ void VIOManager::updateStateWithBoardObservation()
   Eigen::MatrixXd I_KH = Eigen::Matrix<double, 6, 6>::Identity() - K * H_aruco;
   state->cov.block<6, 6>(0, 0) = I_KH * state->cov.block<6, 6>(0, 0) * I_KH.transpose() + K * R_aruco * K.transpose();
   
-  printf("[Aruco] Updated with board %d, %d valid markers, residual norm: %.6f\n", 
-        board_id, board_obs.valid_count, z_aruco.norm());
+  printf("[Aruco] Updated with board %d, residual norm: %.6f, quality weight: %.3f\n", 
+         board_id, z_aruco.norm(), quality_weight);
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
