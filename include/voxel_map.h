@@ -58,6 +58,14 @@ typedef struct VoxelMapConfig
   // config of lidar degeneracy detection
   double degeneracy_ratio_thresh;
   int degeneracy_min_effective_features;
+
+  // config of adaptive ICP early-stop
+  int icp_min_iterations;
+  double icp_early_stop_residual_ratio;
+
+  // config of ICP stability guard
+  double icp_max_rot_step_deg;
+  double icp_max_trans_step_m;
 } VoxelMapConfig;
 
 typedef struct PointToPlane

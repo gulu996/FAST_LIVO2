@@ -7,20 +7,20 @@ common:
   ros_driver_bug_fix: false
 
 extrin_calib:
-  extrinsic_T: [-0.011, -0.02329, 0.04412]
-  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  Rcl: [ -0.011008,  -0.999940,   0.000187,
-          0.539054,  -0.006092,  -0.842250,
-          0.842200,  -0.009171,   0.539089]
-  Pcl: [  0.086367,  -0.365243,  -0.070319]
+  #extrinsic_T: [-0.011, -0.02329, 0.04412]
+  #extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  #Rcl: [ -0.011008,  -0.999940,   0.000187,
+  #        0.539054,  -0.006092,  -0.842250,
+  #        0.842200,  -0.009171,   0.539089]
+  #Pcl: [  0.086367,  -0.365243,  -0.070319]
 
 
-  #extrinsic_T: [0.08809, 0.01329, -0.25733]
-  #extrinsic_R: [-0.8090170, 0.0000, -0.5877852, 0.0000, -1.0000, 0.0000, -0.5877852, 0.0000, 0.8090170]
-  #Rcl: [ -0.023487,  -0.999710,   0.005250,
-  #     -0.013503,  -0.004934,  -0.999897,
-  #      0.999633,  -0.023556,  -0.013383]
-  #Pcl: [ -0.001139,  -0.161932,   0.001251]
+  extrinsic_T: [0.08809, 0.01329, -0.25733]
+  extrinsic_R: [-0.8090170, 0.0000, -0.5877852, 0.0000, -1.0000, 0.0000, -0.5877852, 0.0000, 0.8090170]
+  Rcl: [ -0.023487,  -0.999710,   0.005250,
+       -0.013503,  -0.004934,  -0.999897,
+        0.999633,  -0.023556,  -0.013383]
+  Pcl: [ -0.001139,  -0.161932,   0.001251]
  
 time_offset: 
   imu_time_offset: 0.0
@@ -29,7 +29,7 @@ time_offset:
 
 preprocess:
   point_filter_num: 2
-  filter_size_surf: 0.15
+  filter_size_surf: 0.20
   lidar_type: 1 # Livox Avia LiDAR
   scan_line: 4
   blind: 0.5
@@ -39,9 +39,9 @@ vio:
   outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
   img_point_cov: 100 # 100 1000 
   visual_map_prune_en: true
-  visual_map_max_voxels: 8000 # Jetson 8GB 建议值：限制视觉体素数量
+  visual_map_max_voxels: 5000 # Jetson 8GB 建议值：限制视觉体素数量
   visual_map_max_points_per_voxel: 16 # 每个视觉体素最多保留点数
-  visual_map_max_total_points: 100000 # 视觉点总量硬上限
+  visual_map_max_total_points: 60000 # 视觉点总量硬上限
   patch_size: 8
   patch_pyrimid_level: 4
   normal_en: true
@@ -59,11 +59,15 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 lio:
-  max_iterations: 5
+  max_iterations: 4
+  icp_min_iterations: 2 # ICP最小迭代次数：至少做2次以保证稳健性
+  icp_early_stop_residual_ratio: 0.02 # 残差相对改善低于该阈值且已收敛时提前停止
+  icp_max_rot_step_deg: 1.2 # ICP单次旋转更新上限（度），抑制异常匹配导致姿态突跳
+  icp_max_trans_step_m: 0.20 # ICP单次平移更新上限（米），抑制“轨迹上天”
   dept_err: 0.02
   beam_err: 0.15
   min_eigen_value: 0.005 # 0.005
-  voxel_size: 0.5
+  voxel_size: 0.6
   max_layer: 2
   max_points_num: 50
   layer_init_num: [5, 5, 5, 5, 5]
@@ -108,13 +112,13 @@ pcd_save:
   global_map_pub: true    #need to set pcd_save_en true
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.1
-  max_cache_points: 80000 # 缓存点云硬上限（RGB或强度）
+  max_cache_points: 60000 # 缓存点云硬上限（RGB或强度）
   interval: 20
   # how many LiDAR frames saved in each pcd file;
   # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
 
 aruco_landmarks:
-  aruco_landmarks_en: true
+  aruco_landmarks_en: false
   width: 0.8
   height: 0.6
   marker_size: 0.16

@@ -11,6 +11,8 @@ which is included as part of this source code package.
 */
 
 #include "voxel_map.h"
+#include <cmath>
+#include <limits>
 
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -56,6 +58,11 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
 
   nh.param<double>("lio/degeneracy_ratio_thresh", voxel_config.degeneracy_ratio_thresh, 0.06);
   nh.param<int>("lio/degeneracy_min_effective_features", voxel_config.degeneracy_min_effective_features, 30);
+
+  nh.param<int>("lio/icp_min_iterations", voxel_config.icp_min_iterations, 2);
+  nh.param<double>("lio/icp_early_stop_residual_ratio", voxel_config.icp_early_stop_residual_ratio, 0.03);
+  nh.param<double>("lio/icp_max_rot_step_deg", voxel_config.icp_max_rot_step_deg, 1.2);
+  nh.param<double>("lio/icp_max_trans_step_m", voxel_config.icp_max_trans_step_m, 0.20);
 }
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
@@ -375,6 +382,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   I_STATE.setIdentity();
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
+  const int min_icp_iterations = std::max(1, std::min(config_setting_.icp_min_iterations, config_setting_.max_iterations_));
+  const double residual_ratio_thresh = std::max(0.0, config_setting_.icp_early_stop_residual_ratio);
+  const double max_rot_step_deg = std::max(0.1, config_setting_.icp_max_rot_step_deg);
+  const double max_trans_step_m = std::max(0.01, config_setting_.icp_max_trans_step_m);
+  double last_avg_residual = std::numeric_limits<double>::infinity();
+
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
     double total_residual = 0.0;
@@ -407,8 +420,16 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
+
+    if (effct_feat_num_ == 0)
+    {
+      std::cout << "[ LIO ] No effective point-to-plane constraints, skip ICP update in this scan." << std::endl;
+      break;
+    }
+
+    const double avg_residual = total_residual / static_cast<double>(effct_feat_num_);
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
-         << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
+         << " effective feature num: " << effct_feat_num_ << " average residual: " << avg_residual << endl;
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -477,15 +498,46 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     VD(DIM_STATE)
     solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
     int minRow, minCol;
-    state_ += solution;
+
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);
+    const double rot_step_deg = rot_add.norm() * 57.3;
+    const double trans_step_m = t_add.norm();
+    double step_scale = 1.0;
+    if (rot_step_deg > max_rot_step_deg) { step_scale = std::min(step_scale, max_rot_step_deg / std::max(rot_step_deg, 1e-6)); }
+    if (trans_step_m > max_trans_step_m) { step_scale = std::min(step_scale, max_trans_step_m / std::max(trans_step_m, 1e-6)); }
+    if (step_scale < 1.0)
+    {
+      solution *= step_scale;
+      rot_add = solution.block<3, 1>(0, 0);
+      t_add = solution.block<3, 1>(3, 0);
+    }
+
+    state_ += solution;
     if ((rot_add.norm() * 57.3 < 0.01) && (t_add.norm() * 100 < 0.015)) { flg_EKF_converged = true; }
     V3D euler_cur = state_.rot_end.eulerAngles(2, 1, 0);
 
+    const bool has_last_residual = std::isfinite(last_avg_residual);
+    const double residual_improve_ratio =
+        has_last_residual ? (last_avg_residual - avg_residual) / std::max(last_avg_residual, 1e-6) : 1.0;
+    last_avg_residual = avg_residual;
+
+    const bool enough_constraints = effct_feat_num_ >= config_setting_.degeneracy_min_effective_features;
+    const bool reached_min_iters = (iterCount + 1) >= min_icp_iterations;
+    const bool tiny_residual_improvement = has_last_residual && (residual_improve_ratio >= -0.02) &&
+                                           (residual_improve_ratio <= residual_ratio_thresh);
+
     /*** Rematch Judgement ***/
 
-    if (flg_EKF_converged || ((rematch_num == 0) && (iterCount == (config_setting_.max_iterations_ - 2)))) { rematch_num++; }
+    if ((flg_EKF_converged && enough_constraints) || ((rematch_num == 0) && (iterCount == (config_setting_.max_iterations_ - 2))))
+    {
+      rematch_num++;
+    }
+
+    if (!EKF_stop_flg && reached_min_iters && enough_constraints && flg_EKF_converged && tiny_residual_improvement)
+    {
+      rematch_num = std::max(rematch_num, 2);
+    }
 
     /*** Convergence Judgements and Covariance Update ***/
     if (!EKF_stop_flg && (rematch_num >= 2 || (iterCount == config_setting_.max_iterations_ - 1)))
