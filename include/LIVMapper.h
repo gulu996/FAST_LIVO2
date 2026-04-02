@@ -205,5 +205,13 @@ public:
   int skipped_visual_frames_ = 0;
   bool has_last_visual_keyframe_state_ = false;
   StatesGroup last_visual_keyframe_state_;
+
+  int sub_lidar_queue_size_ = 128;
+  int sub_imu_queue_size_ = 512;
+  int sub_img_queue_size_ = 16;
+  int max_lidar_buffer_size_ = 32;
+  int max_imu_buffer_size_ = 3000;
+  int max_img_buffer_size_ = 12;
+  int max_prop_imu_buffer_size_ = 3000;
 };
 #endif

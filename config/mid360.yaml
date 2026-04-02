@@ -39,9 +39,9 @@ vio:
   outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
   img_point_cov: 100 # 100 1000 
   visual_map_prune_en: true
-  visual_map_max_voxels: 5000 # Jetson 8GB 建议值：限制视觉体素数量
-  visual_map_max_points_per_voxel: 16 # 每个视觉体素最多保留点数
-  visual_map_max_total_points: 60000 # 视觉点总量硬上限
+  visual_map_max_voxels: 3500 # Jetson 8GB 建议值：限制视觉体素数量
+  visual_map_max_points_per_voxel: 12 # 每个视觉体素最多保留点数
+  visual_map_max_total_points: 45000 # 视觉点总量硬上限
   patch_size: 8
   patch_pyrimid_level: 4
   normal_en: true
@@ -96,7 +96,7 @@ uav:
   gravity_align_en: true
 
 publish:
-  dense_map_en: true
+  dense_map_en: false
   pub_effect_point_en: false 
   pub_plane_en: false
   pub_scan_num: 1
@@ -111,8 +111,8 @@ pcd_save:
   save_path: "/home/jetson/data"
   global_map_pub: true    #need to set pcd_save_en true
   colmap_output_en: false # need to set interval = -1
-  filter_size_pcd: 0.1
-  max_cache_points: 60000 # 缓存点云硬上限（RGB或强度）
+  filter_size_pcd: 0.05
+  max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
   interval: 20
   # how many LiDAR frames saved in each pcd file;
   # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

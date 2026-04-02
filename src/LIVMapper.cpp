@@ -56,6 +56,13 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("common/img_en", img_en, 1);
   nh.param<int>("common/lidar_en", lidar_en, 1);
   nh.param<string>("common/img_topic", img_topic, "/left_camera/image");
+  nh.param<int>("common/sub_lidar_queue_size", sub_lidar_queue_size_, 128);
+  nh.param<int>("common/sub_imu_queue_size", sub_imu_queue_size_, 512);
+  nh.param<int>("common/sub_img_queue_size", sub_img_queue_size_, 16);
+  nh.param<int>("common/max_lidar_buffer_size", max_lidar_buffer_size_, 32);
+  nh.param<int>("common/max_imu_buffer_size", max_imu_buffer_size_, 3000);
+  nh.param<int>("common/max_img_buffer_size", max_img_buffer_size_, 12);
+  nh.param<int>("common/max_prop_imu_buffer_size", max_prop_imu_buffer_size_, 3000);
 
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
@@ -212,10 +219,10 @@ void LIVMapper::initializeFiles()
 void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it) 
 {
   sub_pcl = p_pre->lidar_type == AVIA ? 
-            nh.subscribe(lid_topic, 200000, &LIVMapper::livox_pcl_cbk, this): 
-            nh.subscribe(lid_topic, 200000, &LIVMapper::standard_pcl_cbk, this);
-  sub_imu = nh.subscribe(imu_topic, 200000, &LIVMapper::imu_cbk, this);
-  sub_img = nh.subscribe(img_topic, 200000, &LIVMapper::img_cbk, this);
+            nh.subscribe(lid_topic, sub_lidar_queue_size_, &LIVMapper::livox_pcl_cbk, this): 
+            nh.subscribe(lid_topic, sub_lidar_queue_size_, &LIVMapper::standard_pcl_cbk, this);
+  sub_imu = nh.subscribe(imu_topic, sub_imu_queue_size_, &LIVMapper::imu_cbk, this);
+  sub_img = nh.subscribe(img_topic, sub_img_queue_size_, &LIVMapper::img_cbk, this);
   
   pubLaserCloudFullRes = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100);
   pubNormal = nh.advertise<visualization_msgs::MarkerArray>("visualization_marker", 100);
@@ -848,6 +855,11 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
   p_pre->process(msg, ptr);
   lid_raw_data_buffer.push_back(ptr);
   lid_header_time_buffer.push_back(cur_head_time);
+  while (max_lidar_buffer_size_ > 0 && static_cast<int>(lid_raw_data_buffer.size()) > max_lidar_buffer_size_)
+  {
+    lid_raw_data_buffer.pop_front();
+    lid_header_time_buffer.pop_front();
+  }
   last_timestamp_lidar = cur_head_time;
 
   mtx_buffer.unlock();
@@ -891,6 +903,11 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_i
 
   lid_raw_data_buffer.push_back(ptr);
   lid_header_time_buffer.push_back(cur_head_time);
+  while (max_lidar_buffer_size_ > 0 && static_cast<int>(lid_raw_data_buffer.size()) > max_lidar_buffer_size_)
+  {
+    lid_raw_data_buffer.pop_front();
+    lid_header_time_buffer.pop_front();
+  }
   last_timestamp_lidar = cur_head_time;
 
   mtx_buffer.unlock();
@@ -937,12 +954,23 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
   last_timestamp_imu = timestamp;
 
   imu_buffer.push_back(msg);
+  while (max_imu_buffer_size_ > 0 && static_cast<int>(imu_buffer.size()) > max_imu_buffer_size_)
+  {
+    imu_buffer.pop_front();
+  }
   // cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
   mtx_buffer.unlock();
   if (imu_prop_enable)
   {
     mtx_buffer_imu_prop.lock();
-    if (imu_prop_enable && !p_imu->imu_need_init) { prop_imu_buffer.push_back(*msg); }
+    if (imu_prop_enable && !p_imu->imu_need_init)
+    {
+      prop_imu_buffer.push_back(*msg);
+      while (max_prop_imu_buffer_size_ > 0 && static_cast<int>(prop_imu_buffer.size()) > max_prop_imu_buffer_size_)
+      {
+        prop_imu_buffer.pop_front();
+      }
+    }
     newest_imu = *msg;
     new_imu = true;
     mtx_buffer_imu_prop.unlock();
@@ -1001,6 +1029,11 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   cv::Mat img_cur = getImageFromMsg(msg);
   img_buffer.push_back(img_cur);
   img_time_buffer.push_back(img_time_correct);
+  while (max_img_buffer_size_ > 0 && static_cast<int>(img_buffer.size()) > max_img_buffer_size_)
+  {
+    img_buffer.pop_front();
+    img_time_buffer.pop_front();
+  }
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
 
