@@ -165,8 +165,12 @@ public:
 
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
+  int min_retrieve_points = 30;
+  int min_update_meas = 600;
 
   double img_point_cov, outlier_threshold, ncc_thre;
+  double max_state_update_rot_deg = 0.8;
+  double max_state_update_trans_m = 0.08;
   bool visual_map_prune_en = true;
   int visual_map_max_voxels = 12000;
   int visual_map_max_points_per_voxel = 24;

@@ -80,6 +80,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("vio/patch_pyrimid_level", patch_pyrimid_level, 3);
   nh.param<int>("vio/patch_size", patch_size, 8);
   nh.param<double>("vio/outlier_threshold", outlier_threshold, 1000);
+  nh.param<int>("vio/min_retrieve_points", vio_min_retrieve_points_, 30);
+  nh.param<int>("vio/min_update_meas", vio_min_update_meas_, 600);
+  nh.param<double>("vio/max_state_update_rot_deg", vio_max_state_update_rot_deg_, 0.8);
+  nh.param<double>("vio/max_state_update_trans_m", vio_max_state_update_trans_m_, 0.08);
 
   nh.param<double>("time_offset/exposure_time_init", exposure_time_init, 0.0);
   nh.param<double>("time_offset/img_time_offset", img_time_offset, 0.0);
@@ -165,6 +169,10 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->grid_n_width = grid_n_width;
   vio_manager->grid_n_height = grid_n_height;
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
+  vio_manager->min_retrieve_points = vio_min_retrieve_points_;
+  vio_manager->min_update_meas = vio_min_update_meas_;
+  vio_manager->max_state_update_rot_deg = vio_max_state_update_rot_deg_;
+  vio_manager->max_state_update_trans_m = vio_max_state_update_trans_m_;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->visual_map_prune_en = visual_map_prune_en;
   vio_manager->visual_map_max_voxels = visual_map_max_voxels;

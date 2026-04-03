@@ -124,7 +124,11 @@ public:
   bool is_first_frame = false;
   bool aruco_landmarks_en = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
+  int vio_min_retrieve_points_ = 30;
+  int vio_min_update_meas_ = 600;
   double outlier_threshold;
+  double vio_max_state_update_rot_deg_ = 0.8;
+  double vio_max_state_update_trans_m_ = 0.08;
   double plot_time;
   int frame_cnt;
   double img_time_offset = 0.0;

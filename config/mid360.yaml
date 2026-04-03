@@ -44,6 +44,10 @@ preprocess:
 vio:
   max_iterations: 5
   outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+  min_retrieve_points: 35 # 每帧最少视觉跟踪点数，低于该值跳过视觉EKF更新
+  min_update_meas: 700 # 每层视觉EKF最少像素残差约束数，低于该值回退到旧状态
+  max_state_update_rot_deg: 0.8 # 视觉EKF单次旋转更新上限（度），防止遮挡导致姿态突跳
+  max_state_update_trans_m: 0.08 # 视觉EKF单次平移更新上限（米），防止“飞走”
   img_point_cov: 100 # 100 1000 
   visual_map_prune_en: true
   visual_map_max_voxels: 3500 # Jetson 8GB 建议值：限制视觉体素数量
@@ -103,7 +107,7 @@ uav:
   gravity_align_en: true
 
 publish:
-  dense_map_en: false
+  dense_map_en: true
   pub_effect_point_en: false 
   pub_plane_en: false
   pub_scan_num: 1

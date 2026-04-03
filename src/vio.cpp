@@ -1665,7 +1665,20 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       error += patch_error;
     }
 
+    if (n_meas < min_update_meas)
+    {
+      (*state) = old_state;
+      EKF_end = true;
+      break;
+    }
+
     error = error / n_meas;
+    if (!std::isfinite(error))
+    {
+      (*state) = old_state;
+      EKF_end = true;
+      break;
+    }
 
     compute_jacobian_time += omp_get_wtime() - t1;
 
@@ -1684,10 +1697,25 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       auto &&HTz = H_sub_T * z;
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-      auto solution = -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+        MD(DIM_STATE, 1) solution =
+          (-K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0)).eval();
+        V3D rot_add = solution.block<3, 1>(0, 0);
+        V3D t_add = solution.block<3, 1>(3, 0);
+      const double rot_step_deg = rot_add.norm() * 57.3;
+      const double trans_step_m = t_add.norm();
+      const double max_rot_step_deg = std::max(0.1, max_state_update_rot_deg);
+      const double max_trans_step_m = std::max(0.01, max_state_update_trans_m);
+      double step_scale = 1.0;
+      if (rot_step_deg > max_rot_step_deg) { step_scale = std::min(step_scale, max_rot_step_deg / std::max(rot_step_deg, 1e-6)); }
+      if (trans_step_m > max_trans_step_m) { step_scale = std::min(step_scale, max_trans_step_m / std::max(trans_step_m, 1e-6)); }
+      if (step_scale < 1.0)
+      {
+        solution *= step_scale;
+        rot_add = solution.block<3, 1>(0, 0);
+        t_add = solution.block<3, 1>(3, 0);
+      }
+
       (*state) += solution;
-      auto &&rot_add = solution.block<3, 1>(0, 0);
-      auto &&t_add = solution.block<3, 1>(3, 0);
 
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f)) { EKF_end = true; }
     }
@@ -1819,7 +1847,20 @@ void VIOManager::updateState(cv::Mat img, int level)
       error += patch_error;
     }
 
+    if (n_meas < min_update_meas)
+    {
+      (*state) = old_state;
+      EKF_end = true;
+      break;
+    }
+
     error = error / n_meas;
+    if (!std::isfinite(error))
+    {
+      (*state) = old_state;
+      EKF_end = true;
+      break;
+    }
     
     compute_jacobian_time += omp_get_wtime() - t1;
 
@@ -1852,9 +1893,23 @@ void VIOManager::updateState(cv::Mat img, int level)
       MD(DIM_STATE, 1)
       solution = -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
 
+      V3D rot_add = solution.block<3, 1>(0, 0);
+      V3D t_add = solution.block<3, 1>(3, 0);
+      const double rot_step_deg = rot_add.norm() * 57.3;
+      const double trans_step_m = t_add.norm();
+      const double max_rot_step_deg = std::max(0.1, max_state_update_rot_deg);
+      const double max_trans_step_m = std::max(0.01, max_state_update_trans_m);
+      double step_scale = 1.0;
+      if (rot_step_deg > max_rot_step_deg) { step_scale = std::min(step_scale, max_rot_step_deg / std::max(rot_step_deg, 1e-6)); }
+      if (trans_step_m > max_trans_step_m) { step_scale = std::min(step_scale, max_trans_step_m / std::max(trans_step_m, 1e-6)); }
+      if (step_scale < 1.0)
+      {
+        solution *= step_scale;
+        rot_add = solution.block<3, 1>(0, 0);
+        t_add = solution.block<3, 1>(3, 0);
+      }
+
       (*state) += solution;
-      auto &&rot_add = solution.block<3, 1>(0, 0);
-      auto &&t_add = solution.block<3, 1>(3, 0);
 
       auto &&expo_add = solution.block<1, 1>(6, 0);
       // if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f) && (expo_add.norm() < 0.001f)) EKF_end = true;
@@ -2712,6 +2767,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   retrieveFromVisualSparseMap(img, pg, feat_map);
   if (aruco_landmarks_en) detect_qr(img);
+
+  if (total_points < min_retrieve_points)
+  {
+    printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d).\n", total_points, min_retrieve_points);
+    return;
+  }
 
   double t2 = omp_get_wtime();
 
