@@ -67,7 +67,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
   nh.param<int>("vio/max_iterations", max_iterations, 5);
-  nh.param<double>("vio/img_point_cov", IMG_POINT_COV, 100);
+  IMG_POINT_COV = 100.0;
   nh.param<bool>("vio/raycast_en", raycast_en, false);
   nh.param<bool>("vio/exposure_estimate_en", exposure_estimate_en, true);
   nh.param<double>("vio/inv_expo_cov", inv_expo_cov, 0.2);
@@ -80,10 +80,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("vio/patch_pyrimid_level", patch_pyrimid_level, 3);
   nh.param<int>("vio/patch_size", patch_size, 8);
   nh.param<double>("vio/outlier_threshold", outlier_threshold, 1000);
-  nh.param<int>("vio/min_retrieve_points", vio_min_retrieve_points_, 30);
-  nh.param<int>("vio/min_update_meas", vio_min_update_meas_, 600);
-  nh.param<double>("vio/max_state_update_rot_deg", vio_max_state_update_rot_deg_, 0.8);
-  nh.param<double>("vio/max_state_update_trans_m", vio_max_state_update_trans_m_, 0.08);
+  vio_min_retrieve_points_ = 45;
+  vio_min_update_meas_ = 900;
+  vio_max_state_update_rot_deg_ = 0.8;
+  vio_max_state_update_trans_m_ = 0.08;
 
   nh.param<double>("time_offset/exposure_time_init", exposure_time_init, 0.0);
   nh.param<double>("time_offset/img_time_offset", img_time_offset, 0.0);
@@ -133,14 +133,93 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("aruco_landmarks/aruco_landmarks_en", aruco_landmarks_en, false);
 
   nh.param<bool>("adaptive_selector/en", adaptive_visual_selector_en, false);
-  nh.param<double>("adaptive_selector/keyframe_trans_thresh_min", keyframe_trans_thresh_min_, 0.05);
-  nh.param<double>("adaptive_selector/keyframe_trans_thresh_max", keyframe_trans_thresh_max_, 0.25);
-  nh.param<double>("adaptive_selector/keyframe_rot_thresh_min_deg", keyframe_rot_thresh_min_deg_, 1.5);
-  nh.param<double>("adaptive_selector/keyframe_rot_thresh_max_deg", keyframe_rot_thresh_max_deg_, 8.0);
-  nh.param<double>("adaptive_selector/keyframe_constraint_ratio_full", keyframe_constraint_ratio_full_, 0.2);
-  nh.param<int>("adaptive_selector/keyframe_max_skip_frames", keyframe_max_skip_frames_, 6);
+  keyframe_trans_thresh_min_ = 0.08;
+  keyframe_trans_thresh_max_ = 0.18;
+  keyframe_rot_thresh_min_deg_ = 1.2;
+  keyframe_rot_thresh_max_deg_ = 2.5;
+  keyframe_constraint_ratio_full_ = 0.2;
+  keyframe_max_skip_frames_ = 4;
+
+  keyframe_trans_thresh_min_nominal_ = keyframe_trans_thresh_min_;
+  keyframe_trans_thresh_max_nominal_ = keyframe_trans_thresh_max_;
+  keyframe_rot_thresh_min_deg_nominal_ = keyframe_rot_thresh_min_deg_;
+  keyframe_rot_thresh_max_deg_nominal_ = keyframe_rot_thresh_max_deg_;
+  keyframe_max_skip_frames_nominal_ = keyframe_max_skip_frames_;
+  vio_max_iterations_nominal_ = max_iterations;
+
+  nh.param<bool>("runtime_guard/enable", runtime_guard_en_, true);
+  frame_time_budget_s_ = 0.1;
+  runtime_over_budget_trigger_frames_ = 2;
+  runtime_recover_trigger_frames_ = 8;
+  vio_max_iterations_degraded_ = 2;
+  keyframe_trans_scale_degraded_ = 1.6;
+  keyframe_rot_scale_degraded_ = 1.6;
+  keyframe_max_skip_frames_degraded_ = 6;
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
+}
+
+void LIVMapper::updateRuntimeGuard(double frame_time_s)
+{
+  if (!runtime_guard_en_) return;
+
+  if (frame_time_s > frame_time_budget_s_)
+  {
+    runtime_over_budget_count_++;
+    runtime_under_budget_count_ = 0;
+  }
+  else
+  {
+    runtime_under_budget_count_++;
+    runtime_over_budget_count_ = 0;
+  }
+
+  if (!runtime_degraded_mode_ && runtime_over_budget_count_ >= std::max(1, runtime_over_budget_trigger_frames_))
+  {
+    runtime_degraded_mode_ = true;
+    runtime_over_budget_count_ = 0;
+    runtime_under_budget_count_ = 0;
+
+    if (vio_manager)
+    {
+      const int degraded_iters = std::max(1, std::min(vio_max_iterations_nominal_, vio_max_iterations_degraded_));
+      vio_manager->max_iterations = degraded_iters;
+    }
+
+    if (adaptive_visual_selector_en)
+    {
+      keyframe_trans_thresh_min_ = keyframe_trans_thresh_min_nominal_ * std::max(1.0, keyframe_trans_scale_degraded_);
+      keyframe_trans_thresh_max_ = keyframe_trans_thresh_max_nominal_ * std::max(1.0, keyframe_trans_scale_degraded_);
+      keyframe_rot_thresh_min_deg_ = keyframe_rot_thresh_min_deg_nominal_ * std::max(1.0, keyframe_rot_scale_degraded_);
+      keyframe_rot_thresh_max_deg_ = keyframe_rot_thresh_max_deg_nominal_ * std::max(1.0, keyframe_rot_scale_degraded_);
+      keyframe_max_skip_frames_ = std::max(keyframe_max_skip_frames_nominal_, keyframe_max_skip_frames_degraded_);
+      skipped_visual_frames_ = 0;
+    }
+
+    ROS_WARN("[RuntimeGuard] Enter degraded mode, frame_time=%.4f s > budget=%.4f s", frame_time_s, frame_time_budget_s_);
+    return;
+  }
+
+  if (runtime_degraded_mode_ && runtime_under_budget_count_ >= std::max(1, runtime_recover_trigger_frames_))
+  {
+    runtime_degraded_mode_ = false;
+    runtime_over_budget_count_ = 0;
+    runtime_under_budget_count_ = 0;
+
+    if (vio_manager)
+    {
+      vio_manager->max_iterations = std::max(1, vio_max_iterations_nominal_);
+    }
+
+    keyframe_trans_thresh_min_ = keyframe_trans_thresh_min_nominal_;
+    keyframe_trans_thresh_max_ = keyframe_trans_thresh_max_nominal_;
+    keyframe_rot_thresh_min_deg_ = keyframe_rot_thresh_min_deg_nominal_;
+    keyframe_rot_thresh_max_deg_ = keyframe_rot_thresh_max_deg_nominal_;
+    keyframe_max_skip_frames_ = keyframe_max_skip_frames_nominal_;
+    skipped_visual_frames_ = 0;
+
+    ROS_INFO("[RuntimeGuard] Recover nominal mode, frame_time=%.4f s", frame_time_s);
+  }
 }
 
 void LIVMapper::initializeComponents(ros::NodeHandle &nh) 
@@ -656,17 +735,40 @@ void LIVMapper::savePCD()
 
 void LIVMapper::print_landmarks()
 {
-  for (auto it = vio_manager->board_world_positions_.begin(); it != vio_manager->board_world_positions_.end(); ++it) 
+  if (vio_manager->board_world_flag_.empty())
   {
-    int id = it->first;
-    Eigen::Vector3d& position = it->second;
-    bool flag = vio_manager->board_world_flag_[id];  
-    
-    std::cout << YELLOW << "ID: " << id 
-              << ", Flag: " << (flag ? "true" : "false")
-              << ", Position: (" << position.x() << ", " 
-              << position.y() << ", " << position.z() << ")" << std::endl;
-  } 
+    std::cout << YELLOW << "[Aruco] No board entries to print." << RESET << std::endl;
+    return;
+  }
+
+  std::cout << YELLOW << "[Aruco] Final board first-observation positions:" << RESET << std::endl;
+
+  for (const auto& item : vio_manager->board_world_flag_)
+  {
+    const int id = item.first;
+    const bool initialized = item.second;
+
+    auto pos_it = vio_manager->board_world_positions_.find(id);
+    Eigen::Vector3d position = Eigen::Vector3d::Zero();
+    if (pos_it != vio_manager->board_world_positions_.end())
+    {
+      position = pos_it->second;
+    }
+
+    if (initialized)
+    {
+      std::cout << YELLOW << "  [INIT] Board " << id
+                << " -> (" << position.x() << ", "
+                << position.y() << ", " << position.z() << ")"
+                << RESET << std::endl;
+    }
+    else
+    {
+      std::cout << YELLOW << "  [UNINIT] Board " << id
+                << " -> not observed yet"
+                << RESET << std::endl;
+    }
+  }
 }
 
 void LIVMapper::run() 
@@ -692,17 +794,18 @@ void LIVMapper::run()
     stateEstimationAndMapping();
 
     double t2 = omp_get_wtime();
+    updateRuntimeGuard(t2 - t1);
 
     i ++;
     t = t + t2 - t1;
     if (i % 2 == 0)
-    {    
+    {
+      sum += t;
       printf("\033[1;45m+-------------------------------------------------------------+\033[0m\n");
       printf("\033[1;95m| %-29s | %-27d |\033[0m\n", "Frame number", i/2);
       printf("\033[1;95m| %-29s | %-27f |\033[0m\n", "Current frame time", t);
       printf("\033[1;95m| %-29s | %-27f |\033[0m\n", "Average frame time", sum / (i/2));
       printf("\033[1;45m+-------------------------------------------------------------+\033[0m\n");
-      sum += t;
       t = 0;
     }
   }

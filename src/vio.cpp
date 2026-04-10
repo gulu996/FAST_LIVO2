@@ -82,16 +82,16 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     nh.param<double>("/aruco_landmarks/marker_size", marker_size, 0.16);
     nh.param<double>("/aruco_landmarks/delta_width_qr_center", board_config_.delta_width_qr_center, 0.28);
     nh.param<double>("/aruco_landmarks/delta_height_qr_center", board_config_.delta_height_qr_center, 0.18);
-    nh.param<double>("/aruco_landmarks/min_quad_area_px", aruco_min_quad_area_px, 300.0);
-    nh.param<double>("/aruco_landmarks/pair_distance_rel_tol", aruco_pair_distance_rel_tol, 0.2);
-    nh.param<double>("/aruco_landmarks/max_normal_diff_deg", aruco_max_normal_diff_deg, 15.0);
-    nh.param<double>("/aruco_landmarks/max_marker_depth_diff", aruco_max_marker_depth_diff, 0.6);
-    nh.param<double>("/aruco_landmarks/min_marker_depth", aruco_min_marker_depth, 0.1);
-    nh.param<double>("/aruco_landmarks/max_marker_depth", aruco_max_marker_depth, 10.0);
-    nh.param<double>("/aruco_landmarks/max_position_residual", aruco_max_position_residual, 0.6);
-    nh.param<double>("/aruco_landmarks/max_orientation_residual_deg", aruco_max_orientation_residual_deg, 25.0);
-    nh.param<double>("/aruco_landmarks/position_noise_base", aruco_position_noise_base, 0.01);
-    nh.param<double>("/aruco_landmarks/orientation_noise_base", aruco_orientation_noise_base, 0.1);
+    aruco_min_quad_area_px = 300.0;
+    aruco_pair_distance_rel_tol = 0.2;
+    aruco_max_normal_diff_deg = 15.0;
+    aruco_max_marker_depth_diff = 0.6;
+    aruco_min_marker_depth = 0.1;
+    aruco_max_marker_depth = 10.0;
+    aruco_max_position_residual = 0.6;
+    aruco_max_orientation_residual_deg = 25.0;
+    aruco_position_noise_base = 0.01;
+    aruco_orientation_noise_base = 0.1;
 
     aruco_relative_positions_[1] = Eigen::Vector3d(-board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);   // 左上
     aruco_relative_positions_[2] = Eigen::Vector3d(board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);    // 右上
@@ -103,6 +103,8 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
          aruco_min_quad_area_px, aruco_pair_distance_rel_tol, aruco_max_normal_diff_deg);
     // 清空现有地标
     board_world_positions_.clear();
+    board_world_orientations_.clear();
+    board_world_flag_.clear();
 
     // 使用列表格式
     XmlRpc::XmlRpcValue markers_list;
@@ -112,32 +114,50 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
       for (int i = 0; i < markers_list.size(); i++) 
       {
         XmlRpc::XmlRpcValue marker = markers_list[i];
-        if (marker.hasMember("id") && marker.hasMember("position")) 
+        if (!marker.hasMember("id")) continue;
+
+        int id = static_cast<int>(marker["id"]);
+        int flag = 0;
+        if (marker.hasMember("flag"))
         {
-          int id = static_cast<int>(marker["id"]);
-          int flag = static_cast<int>(marker["flag"]);
-          if (flag)
-          {
-            board_world_flag_[id] = true;
-            XmlRpc::XmlRpcValue pos = marker["position"];
-            
-            if (pos.size() == 3) 
-            {
-              Eigen::Vector3d position(
-                static_cast<double>(pos[0]),
-                static_cast<double>(pos[1]), 
-                static_cast<double>(pos[2])
-              );
-              board_world_positions_[id] = position;
-              ROS_INFO("[Aruco] Loaded marker %d at [%.2f, %.2f, %.2f]", id, position.x(), position.y(), position.z());
-            }
-          }
-          else
+          flag = static_cast<int>(marker["flag"]);
+        }
+
+        board_world_orientations_[id] = Eigen::Matrix3d::Identity();
+
+        if (flag)
+        {
+          if (!marker.hasMember("position"))
           {
             board_world_flag_[id] = false;
             board_world_positions_[id] = Eigen::Vector3d::Zero();
-            ROS_INFO("[Aruco] Created marker %d at [0, 0, 0]", id);
+            ROS_WARN("[Aruco] Marker %d has flag=1 but no position, fallback to uninitialized.", id);
+            continue;
           }
+
+          XmlRpc::XmlRpcValue pos = marker["position"];
+          if (pos.size() != 3)
+          {
+            board_world_flag_[id] = false;
+            board_world_positions_[id] = Eigen::Vector3d::Zero();
+            ROS_WARN("[Aruco] Marker %d has invalid position size, fallback to uninitialized.", id);
+            continue;
+          }
+
+          board_world_flag_[id] = true;
+          Eigen::Vector3d position(
+            static_cast<double>(pos[0]),
+            static_cast<double>(pos[1]),
+            static_cast<double>(pos[2])
+          );
+          board_world_positions_[id] = position;
+          ROS_INFO("[Aruco] Loaded marker %d at [%.2f, %.2f, %.2f]", id, position.x(), position.y(), position.z());
+        }
+        else
+        {
+          board_world_flag_[id] = false;
+          board_world_positions_[id] = Eigen::Vector3d::Zero();
+          ROS_INFO("[Aruco] Created marker %d as uninitialized", id);
         }
       }
     }    
@@ -2163,6 +2183,89 @@ double computeRotationDispersionDeg(const std::vector<VIOManager::ArucoObservati
   }
   return max_diff_deg;
 }
+
+bool estimateBoardPoseFromCentersPnP(const std::vector<std::vector<cv::Point2f>> &corners,
+                                     double half_dx,
+                                     double half_dy,
+                                     const cv::Mat &camera_matrix,
+                                     const cv::Mat &dist_coeffs,
+                                     Eigen::Vector3d &board_center,
+                                     Eigen::Matrix3d &board_rotation,
+                                     double &mean_reproj_error_px)
+{
+  mean_reproj_error_px = std::numeric_limits<double>::infinity();
+  if (corners.size() != 4) return false;
+
+  std::vector<cv::Point2f> image_centers;
+  image_centers.reserve(4);
+  for (const auto &corner_pts : corners)
+  {
+    if (corner_pts.size() != 4) return false;
+    image_centers.push_back(markerCenter2D(corner_pts));
+  }
+
+  const std::vector<cv::Point3f> object_points = {
+      cv::Point3f(static_cast<float>(-half_dx), static_cast<float>(half_dy), 0.0f),
+      cv::Point3f(static_cast<float>(half_dx), static_cast<float>(half_dy), 0.0f),
+      cv::Point3f(static_cast<float>(-half_dx), static_cast<float>(-half_dy), 0.0f),
+      cv::Point3f(static_cast<float>(half_dx), static_cast<float>(-half_dy), 0.0f)};
+
+  std::array<int, 4> perm = {0, 1, 2, 3};
+  cv::Vec3d best_rvec(0, 0, 0);
+  cv::Vec3d best_tvec(0, 0, 0);
+  bool found = false;
+
+  do
+  {
+    std::vector<cv::Point2f> ordered_image_points = {
+        image_centers[perm[0]], image_centers[perm[1]], image_centers[perm[2]], image_centers[perm[3]]};
+
+    cv::Vec3d rvec(0, 0, 0), tvec(0, 0, 0);
+    const bool pnp_ok = cv::solvePnP(object_points,
+                                     ordered_image_points,
+                                     camera_matrix,
+                                     dist_coeffs,
+                                     rvec,
+                                     tvec,
+                                     false,
+                                     cv::SOLVEPNP_ITERATIVE);
+    if (!pnp_ok) continue;
+
+    cv::solvePnPRefineLM(object_points, ordered_image_points, camera_matrix, dist_coeffs, rvec, tvec);
+
+    std::vector<cv::Point2f> reproj_points;
+    cv::projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs, reproj_points);
+
+    double reproj_err_sum = 0.0;
+    for (size_t i = 0; i < reproj_points.size(); i++)
+    {
+      reproj_err_sum += cv::norm(reproj_points[i] - ordered_image_points[i]);
+    }
+    const double mean_err = reproj_err_sum / static_cast<double>(reproj_points.size());
+
+    if (!found || mean_err < mean_reproj_error_px)
+    {
+      found = true;
+      mean_reproj_error_px = mean_err;
+      best_rvec = rvec;
+      best_tvec = tvec;
+    }
+  } while (std::next_permutation(perm.begin(), perm.end()));
+
+  if (!found) return false;
+
+  cv::Mat R_cv;
+  cv::Rodrigues(best_rvec, R_cv);
+  for (int r = 0; r < 3; r++)
+  {
+    for (int c = 0; c < 3; c++)
+    {
+      board_rotation(r, c) = R_cv.at<double>(r, c);
+    }
+  }
+  board_center = Eigen::Vector3d(best_tvec[0], best_tvec[1], best_tvec[2]);
+  return true;
+}
 } // namespace
 
 // 添加辅助函数：反对称矩阵
@@ -2202,284 +2305,164 @@ void VIOManager::detect_qr(cv::Mat img)
   
   draw_qr(ids, corners, rejectedCandidates);
 
-  // 仅支持4个同ID模式：检测数量和ID必须严格满足条件。
-  if (ids.size() != 4)
+  std::map<int, std::vector<size_t>> grouped_indices;
+  for (size_t i = 0; i < ids.size(); i++)
   {
-    printf("\033[1;33m[Aruco] Skip: require exactly 4 markers, got %zu.\033[0m\n", ids.size());
-    return;
+    grouped_indices[ids[i]].push_back(i);
   }
 
-  const int board_id = ids[0];
-  for (size_t i = 1; i < ids.size(); i++)
+  for (const auto& group : grouped_indices)
   {
-    if (ids[i] != board_id)
+    const int board_id = group.first;
+    const std::vector<size_t>& indices = group.second;
+
+    if (indices.size() != 4)
     {
-      printf("\033[1;33m[Aruco] Skip: mixed IDs found, same-ID mode only.\033[0m\n");
-      return;
-    }
-  }
-
-  double quad_area_px = 0.0;
-  if (!checkQuadGeometry2D(corners, aruco_min_quad_area_px, quad_area_px))
-  {
-    printf("\033[1;33m[Aruco] Skip board %d: invalid 2D quad geometry, area %.1f px^2.\033[0m\n",
-           board_id, quad_area_px);
-    return;
-  }
-
-  std::vector<cv::Vec3d> rvecs, tvecs;
-  cv::aruco::estimatePoseSingleMarkers(corners, marker_size, cameraMatrix_, distCoeffs_, rvecs, tvecs);
-  if (rvecs.size() != 4 || tvecs.size() != 4)
-  {
-    printf("\033[1;33m[Aruco] Skip board %d: pose estimation size mismatch.\033[0m\n", board_id);
-    return;
-  }
-
-  // 检查地标库中是否存在这个ID
-  auto it = board_world_positions_.find(board_id);
-  if (it == board_world_positions_.end())
-  {
-    board_world_positions_[board_id] = Eigen::Vector3d::Zero();
-    board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
-    board_world_flag_[board_id] = false;
-  }
-
-  std::vector<ArucoObservation> aruco_obs;
-  aruco_obs.reserve(4);
-  std::vector<Eigen::Vector3d> marker_positions;
-  marker_positions.reserve(4);
-
-  double min_marker_z = std::numeric_limits<double>::max();
-  double max_marker_z = -std::numeric_limits<double>::max();
-
-  for (size_t i = 0; i < 4; i++)
-  {
-    ArucoObservation obs;
-    obs.id = board_id;
-    obs.tvec = Eigen::Vector3d(tvecs[i][0], tvecs[i][1], tvecs[i][2]);
-
-    const double marker_distance = obs.tvec.norm();
-    if (marker_distance < aruco_min_marker_depth || marker_distance > aruco_max_marker_depth)
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: marker distance %.3f m out of range.\033[0m\n",
-             board_id, marker_distance);
-      return;
+      printf("\033[1;33m[Aruco] Skip board %d: require exactly 4 same-ID markers, got %zu.\033[0m\n",
+             board_id, indices.size());
+      continue;
     }
 
-    min_marker_z = std::min(min_marker_z, obs.tvec.z());
-    max_marker_z = std::max(max_marker_z, obs.tvec.z());
-
-    cv::Mat R_cam_marker_cv;
-    cv::Rodrigues(rvecs[i], R_cam_marker_cv);
-    for (int row = 0; row < 3; row++)
+    std::vector<std::vector<cv::Point2f>> board_corners;
+    board_corners.reserve(4);
+    for (size_t idx : indices)
     {
-      for (int col = 0; col < 3; col++)
+      board_corners.push_back(corners[idx]);
+    }
+
+    double quad_area_px = 0.0;
+    if (!checkQuadGeometry2D(board_corners, aruco_min_quad_area_px, quad_area_px))
+    {
+      printf("\033[1;33m[Aruco] Skip board %d: invalid 2D quad geometry, area %.1f px^2.\033[0m\n",
+             board_id, quad_area_px);
+      continue;
+    }
+
+    std::vector<cv::Vec3d> rvecs, tvecs;
+    cv::aruco::estimatePoseSingleMarkers(board_corners, marker_size, cameraMatrix_, distCoeffs_, rvecs, tvecs);
+    if (rvecs.size() != 4 || tvecs.size() != 4)
+    {
+      printf("\033[1;33m[Aruco] Skip board %d: pose estimation size mismatch.\033[0m\n", board_id);
+      continue;
+    }
+
+    auto it = board_world_positions_.find(board_id);
+    if (it == board_world_positions_.end())
+    {
+      board_world_positions_[board_id] = Eigen::Vector3d::Zero();
+      board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
+      board_world_flag_[board_id] = false;
+      printf("\033[1;33m[Aruco] Auto-register board %d as uninitialized.\033[0m\n", board_id);
+    }
+
+    std::vector<ArucoObservation> aruco_obs;
+    aruco_obs.reserve(4);
+    std::vector<Eigen::Vector3d> marker_positions;
+    marker_positions.reserve(4);
+
+    double min_marker_z = std::numeric_limits<double>::max();
+    double max_marker_z = -std::numeric_limits<double>::max();
+    bool depth_valid = true;
+
+    for (size_t i = 0; i < 4; i++)
+    {
+      ArucoObservation obs;
+      obs.id = board_id;
+      obs.tvec = Eigen::Vector3d(tvecs[i][0], tvecs[i][1], tvecs[i][2]);
+
+      const double marker_distance = obs.tvec.norm();
+      if (marker_distance < aruco_min_marker_depth || marker_distance > aruco_max_marker_depth)
       {
-        obs.R_cam_marker(row, col) = R_cam_marker_cv.at<double>(row, col);
+        printf("\033[1;33m[Aruco] Skip board %d: marker distance %.3f m out of range.\033[0m\n",
+               board_id, marker_distance);
+        depth_valid = false;
+        break;
       }
+
+      min_marker_z = std::min(min_marker_z, obs.tvec.z());
+      max_marker_z = std::max(max_marker_z, obs.tvec.z());
+
+      cv::Mat R_cam_marker_cv;
+      cv::Rodrigues(rvecs[i], R_cam_marker_cv);
+      for (int row = 0; row < 3; row++)
+      {
+        for (int col = 0; col < 3; col++)
+        {
+          obs.R_cam_marker(row, col) = R_cam_marker_cv.at<double>(row, col);
+        }
+      }
+
+      aruco_obs.push_back(obs);
+      marker_positions.push_back(obs.tvec);
+
+      cv::drawFrameAxes(img_cp, cameraMatrix_, distCoeffs_, rvecs[i], tvecs[i], 0.1);
     }
+    if (!depth_valid) continue;
 
-    aruco_obs.push_back(obs);
-    marker_positions.push_back(obs.tvec);
-
-    cv::drawFrameAxes(img_cp, cameraMatrix_, distCoeffs_, rvecs[i], tvecs[i], 0.1);
-  }
-
-  if ((max_marker_z - min_marker_z) > aruco_max_marker_depth_diff)
-  {
-    printf("\033[1;33m[Aruco] Skip board %d: depth spread %.3f m too large.\033[0m\n",
-           board_id, max_marker_z - min_marker_z);
-    return;
-  }
-
-  double max_rel_pair_err = 0.0;
-  if (!checkPairwiseDistanceConsistency(marker_positions,
-                                        board_config_.delta_width_qr_center,
-                                        board_config_.delta_height_qr_center,
-                                        aruco_pair_distance_rel_tol,
-                                        max_rel_pair_err))
-  {
-    printf("\033[1;33m[Aruco] Skip board %d: pairwise distance inconsistency %.3f.\033[0m\n",
-           board_id, max_rel_pair_err);
-    return;
-  }
-
-  double max_normal_diff_deg = 0.0;
-  if (!checkNormalConsistency(aruco_obs, aruco_max_normal_diff_deg, max_normal_diff_deg))
-  {
-    printf("\033[1;33m[Aruco] Skip board %d: normal inconsistency %.2f deg.\033[0m\n",
-           board_id, max_normal_diff_deg);
-    return;
-  }
-
-  Eigen::Vector3d board_center;
-  Eigen::Matrix3d board_rotation;
-  int valid_count = 0;
-  computeSimpleAverage(aruco_obs, board_center, board_rotation, valid_count);
-  if (valid_count != 4)
-  {
-    printf("\033[1;33m[Aruco] Skip board %d: valid marker count = %d.\033[0m\n", board_id, valid_count);
-    return;
-  }
-
-  BoardObservation board_obs;
-  board_obs.board_id = board_id;
-  board_obs.center_tvec = board_center;
-  board_obs.center_R_cam_board = board_rotation;
-  board_obs.valid_count = valid_count;
-  board_obs.geometry_valid = true;
-  board_obs.center_spread_m = computeCenterSpread(aruco_obs, board_center);
-  board_obs.rotation_dispersion_deg = computeRotationDispersionDeg(aruco_obs, board_rotation);
-
-  current_board_observations_.push_back(board_obs);
-
-  printf("\033[1;32m[Aruco] Board %d accepted: center [%.3f, %.3f, %.3f], spread %.3f m, rot-disp %.2f deg, area %.1f px^2\033[0m\n",
-         board_id,
-         board_center.x(),
-         board_center.y(),
-         board_center.z(),
-         board_obs.center_spread_m,
-         board_obs.rotation_dispersion_deg,
-         quad_area_px);
-}
-
-void VIOManager::computeBoardCenterFromArucoMarkers(
-    const std::vector<ArucoObservation>& aruco_obs,
-    Eigen::Vector3d& board_center,
-    Eigen::Matrix3d& board_rotation,
-    int& valid_count)
-{
-  // 使用已知的相对位置信息进行精确计算
-  // 我们已知：P_camera_marker = P_camera_board + R_camera_board * P_board_marker
-  // 其中P_board_marker是已知的（aruco_relative_positions_）
-  
-  // 构建最小二乘问题
-  Eigen::MatrixXd A(12, 6); // 4个点 * 3维 = 12个方程，6个未知数（3个平移+3个旋转）
-  Eigen::VectorXd b(12);
-  A.setZero();
-  b.setZero();
-  
-  // 收集所有有效的观测和对应的相对位置
-  std::vector<Eigen::Vector3d> observed_positions;
-  std::vector<Eigen::Vector3d> relative_positions;
-  std::vector<int> marker_ids;
-  
-  for (const auto& obs : aruco_obs) 
-  {
-    // 有效性检查
-    if (obs.tvec.norm() > 10.0 || obs.tvec.norm() < 0.1) 
+    if ((max_marker_z - min_marker_z) > aruco_max_marker_depth_diff)
     {
-      printf("\033[1;33mMarker %d has invalid distance: %.3f meters\033[0m\n", 
-              obs.id, obs.tvec.norm());
+      printf("\033[1;33m[Aruco] Skip board %d: depth spread %.3f m too large.\033[0m\n",
+             board_id, max_marker_z - min_marker_z);
       continue;
     }
-    
-    // 检查是否有这个marker的相对位置信息
-    auto rel_pos_it = aruco_relative_positions_.find(obs.id);
-    if (rel_pos_it == aruco_relative_positions_.end()) 
+
+    double max_rel_pair_err = 0.0;
+    if (!checkPairwiseDistanceConsistency(marker_positions,
+                                          board_config_.delta_width_qr_center,
+                                          board_config_.delta_height_qr_center,
+                                          aruco_pair_distance_rel_tol,
+                                          max_rel_pair_err))
     {
-      printf("\033[1;33mNo relative position found for marker %d\033[0m\n", obs.id);
+      printf("\033[1;33m[Aruco] Skip board %d: pairwise distance inconsistency %.3f.\033[0m\n",
+             board_id, max_rel_pair_err);
       continue;
     }
-    
-    valid_count ++;
-    observed_positions.push_back(obs.tvec);
-    relative_positions.push_back(rel_pos_it->second);
-    marker_ids.push_back(obs.id);
-  }
-  
-  if (valid_count < 4) 
-  {
-    printf("\033[1;45mOnly %d valid markers, using simple average\033[0m\n", valid_count);
-    //computeSimpleAverage(aruco_obs, board_center, board_rotation, valid_count);
-    return;
-  }
-  
-  // 使用第一个观测作为初始猜测
-  Eigen::Matrix3d R0 = aruco_obs[0].R_cam_marker;
-  
-  // 构建线性系统
-  for (int i = 0; i < valid_count; i++) 
-  {
-    const Eigen::Vector3d& P_cam_marker = observed_positions[i];
-    const Eigen::Vector3d& P_board_marker = relative_positions[i];
-    
-    // 雅可比矩阵：对平移的导数
-    A.block<3, 3>(3*i, 0) = Eigen::Matrix3d::Identity();
-    
-    // 雅可比矩阵：对旋转的导数（使用李代数）
-    // d(R * P_board_marker)/dω ≈ -R0 * [P_board_marker]×
-    A.block<3, 3>(3*i, 3) = -R0 * skewSymmetric(P_board_marker);
-    
-    // 残差：P_cam_marker - (P_cam_board + R0 * P_board_marker)
-    b.segment<3>(3*i) = P_cam_marker - R0 * P_board_marker;
-  }
-  
-  // 求解最小二乘问题
-  Eigen::VectorXd x = A.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
-  
-  // 提取平移和旋转增量
-  Eigen::Vector3d delta_translation = x.head<3>();
-  Eigen::Vector3d delta_rotation = x.tail<3>();
-  
-  // 更新板子中心位置
-  board_center = delta_translation; // 注意：这里实际上是P_cam_board
-  
-  // 更新旋转矩阵
-  board_rotation = Exp(delta_rotation) * R0;
-  
-  // 正交化旋转矩阵
-  Eigen::JacobiSVD<Eigen::Matrix3d> svd(board_rotation, Eigen::ComputeFullU | Eigen::ComputeFullV);
-  board_rotation = svd.matrixU() * svd.matrixV().transpose();
-  
-  printf("[Aruco] Precisely computed board center from %d markers using known geometry\n", valid_count);
-  printf("  Board center in camera frame: [%.3f, %.3f, %.3f]\n", 
-          board_center.x(), board_center.y(), board_center.z());
-  
-  // 验证结果：计算重投影误差
-  double total_error = 0.0;
-  for (int i = 0; i < valid_count; i++) 
-  {
-    Eigen::Vector3d P_cam_marker_pred = board_center + board_rotation * relative_positions[i];
-    double error = (observed_positions[i] - P_cam_marker_pred).norm();
-    total_error += error;
-    printf("  Marker %d reprojection error: %.3f meters\n", marker_ids[i], error);
-  }
-  printf("  Average reprojection error: %.3f meters\n", total_error / valid_count);
-}
 
-// 同ID四码中心与姿态估计
-void VIOManager::computeSimpleAverage(
-    const std::vector<ArucoObservation>& aruco_obs,
-    Eigen::Vector3d& board_center,
-    Eigen::Matrix3d& board_rotation,
-    int& valid_count)
-{
-  if (aruco_obs.empty()) 
-  {
-    board_center = Eigen::Vector3d::Zero();
-    board_rotation = Eigen::Matrix3d::Identity();
-    valid_count = 0;
-    return;
-  }
+    double max_normal_diff_deg = 0.0;
+    if (!checkNormalConsistency(aruco_obs, aruco_max_normal_diff_deg, max_normal_diff_deg))
+    {
+      printf("\033[1;33m[Aruco] Skip board %d: normal inconsistency %.2f deg.\033[0m\n",
+             board_id, max_normal_diff_deg);
+      continue;
+    }
 
-  valid_count = static_cast<int>(aruco_obs.size());
+    Eigen::Vector3d board_center;
+    Eigen::Matrix3d board_rotation;
+    int valid_count = 4;
+    double board_reproj_error_px = 0.0;
+    if (!estimateBoardPoseFromCentersPnP(board_corners,
+                                         board_config_.delta_width_qr_center,
+                                         board_config_.delta_height_qr_center,
+                                         cameraMatrix_,
+                                         distCoeffs_,
+                                         board_center,
+                                         board_rotation,
+                                         board_reproj_error_px))
+    {
+      printf("\033[1;33m[Aruco] Skip board %d: joint board pose optimization failed.\033[0m\n", board_id);
+      continue;
+    }
 
-  Eigen::Vector3d sum_tvec = Eigen::Vector3d::Zero();
-  Eigen::Matrix3d sum_R = Eigen::Matrix3d::Zero();
-  
-  for (const auto& obs : aruco_obs) 
-  {
-    sum_tvec += obs.tvec;
-    sum_R += obs.R_cam_marker;
+    BoardObservation board_obs;
+    board_obs.board_id = board_id;
+    board_obs.center_tvec = board_center;
+    board_obs.center_R_cam_board = board_rotation;
+    board_obs.valid_count = valid_count;
+    board_obs.geometry_valid = true;
+    board_obs.center_spread_m = computeCenterSpread(aruco_obs, board_center);
+    board_obs.rotation_dispersion_deg = computeRotationDispersionDeg(aruco_obs, board_rotation);
+    current_board_observations_.push_back(board_obs);
+
+    printf("\033[1;32m[Aruco] Board %d accepted: center [%.3f, %.3f, %.3f], spread %.3f m, rot-disp %.2f deg, area %.1f px^2, reproj %.3f px\033[0m\n",
+           board_id,
+           board_center.x(),
+           board_center.y(),
+           board_center.z(),
+           board_obs.center_spread_m,
+           board_obs.rotation_dispersion_deg,
+           quad_area_px,
+           board_reproj_error_px);
   }
-  
-  board_center = sum_tvec / valid_count;
-  sum_R /= valid_count;
-  
-  // 正交化平均旋转矩阵
-  Eigen::JacobiSVD<Eigen::Matrix3d> svd(sum_R, Eigen::ComputeFullU | Eigen::ComputeFullV);
-  board_rotation = svd.matrixU() * svd.matrixV().transpose();
 }
 
 void VIOManager::draw_qr(
@@ -2562,187 +2545,157 @@ void VIOManager::draw_qr(
 void VIOManager::updateStateWithBoardObservation()
 {
   if (current_board_observations_.empty()) return;
-  
-  // 由于同一时间只会看到一个地标板，直接取第一个观测
-  const auto& board_obs = current_board_observations_[0];
-  if (board_obs.valid_count != 4 || !board_obs.geometry_valid)
-  {
-    printf("\033[1;33m[Aruco] Skip update: invalid board observation (count=%d, geometry=%d).\033[0m\n",
-           board_obs.valid_count, static_cast<int>(board_obs.geometry_valid));
-    return;
-  }
 
-  int board_id = board_obs.board_id;
-  
-  auto flag_it = board_world_flag_.find(board_id);
-  if (flag_it == board_world_flag_.end()) 
+  for (const auto& board_obs : current_board_observations_)
   {
-    printf("\033[1;45mBoard ID %d not in landmark library!\033[0m\n", board_id);
-    return;
-  }
-    
-  // 获取当前状态
-  M3D R_wi(state->rot_end);
-  V3D P_wi(state->pos_end);
-  
-  // 相机到IMU的外参变换
-  M3D R_ic = Rci.transpose();
-  V3D P_ic = -R_ic * Pci;
-  
-  // 计算相机在世界坐标系下的位姿
-  M3D R_wc = R_wi * R_ic;
-  V3D P_wc = P_wi + R_wi * P_ic;
-  
-  // 将板子中心点从相机坐标系转换到世界坐标系
-  V3D P_w_board_estimated = R_wc * board_obs.center_tvec + P_wc;
-  
-  // 计算板子在世界坐标系下的姿态
-  M3D R_w_board_estimated = R_wc * board_obs.center_R_cam_board;
+    if (board_obs.valid_count != 4 || !board_obs.geometry_valid)
+    {
+      printf("\033[1;33m[Aruco] Skip update: invalid board observation (count=%d, geometry=%d).\033[0m\n",
+             board_obs.valid_count, static_cast<int>(board_obs.geometry_valid));
+      continue;
+    }
 
-  // 检查是否是第一次观测到该地标
-  if (!flag_it->second) 
-  {
-    // ============== 第一次观测：初始化地标的世界坐标和姿态 ==============
-    printf("\033[1;33m===========================================\033[0m\n");
-    printf("\033[1;33m[Board %d] FIRST OBSERVATION - Initializing Landmark\033[0m\n", board_id);
-    
-    // 初始化地标的世界坐标和姿态
-    board_world_positions_[board_id] = P_w_board_estimated;
-    board_world_orientations_[board_id] = R_w_board_estimated;
-    
-    // 标记为已观测
-    board_world_flag_[board_id] = true;
-    
-    printf("\033[1;33m  Initialized world position: [%.3f, %.3f, %.3f] meters\033[0m\n", 
+    int board_id = board_obs.board_id;
+    auto flag_it = board_world_flag_.find(board_id);
+    if (flag_it == board_world_flag_.end())
+    {
+      board_world_flag_[board_id] = false;
+      board_world_positions_[board_id] = Eigen::Vector3d::Zero();
+      board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
+      flag_it = board_world_flag_.find(board_id);
+    }
+
+    M3D R_wi(state->rot_end);
+    V3D P_wi(state->pos_end);
+
+    M3D R_ic = Rci.transpose();
+    V3D P_ic = -R_ic * Pci;
+
+    M3D R_wc = R_wi * R_ic;
+    V3D P_wc = P_wi + R_wi * P_ic;
+
+    V3D P_w_board_estimated = R_wc * board_obs.center_tvec + P_wc;
+    M3D R_w_board_estimated = R_wc * board_obs.center_R_cam_board;
+
+    if (!flag_it->second)
+    {
+      printf("\033[1;33m===========================================\033[0m\n");
+      printf("\033[1;33m[Board %d] FIRST OBSERVATION - Initializing Landmark\033[0m\n", board_id);
+
+      board_world_positions_[board_id] = P_w_board_estimated;
+      board_world_orientations_[board_id] = R_w_board_estimated;
+      board_world_flag_[board_id] = true;
+
+      printf("\033[1;33m  Initialized world position: [%.3f, %.3f, %.3f] meters\033[0m\n",
+            P_w_board_estimated.x(), P_w_board_estimated.y(), P_w_board_estimated.z());
+
+      Eigen::Vector3d euler_angles = R_w_board_estimated.eulerAngles(0, 1, 2);
+      printf("\033[1;33m  Initialized orientation (RPY): [%.1f, %.1f, %.1f] degrees\033[0m\n",
+            euler_angles.x() * 180.0 / M_PI,
+            euler_angles.y() * 180.0 / M_PI,
+            euler_angles.z() * 180.0 / M_PI);
+
+      printf("\033[1;33m  Valid markers: %d\033[0m\n", board_obs.valid_count);
+      printf("\033[1;33m===========================================\033[0m\n");
+      continue;
+    }
+
+    const Eigen::Vector3d& P_w_board = board_world_positions_[board_id];
+    const Eigen::Matrix3d& R_w_board = board_world_orientations_[board_id];
+
+    printf("\033[1;32m===========================================\033[0m\n");
+    printf("\033[1;32m[Board %d] RE-OBSERVATION - Updating State\033[0m\n", board_id);
+    printf("\033[1;32m  Estimated:  [%.3f, %.3f, %.3f] meters\033[0m\n",
           P_w_board_estimated.x(), P_w_board_estimated.y(), P_w_board_estimated.z());
-    
-    // 输出姿态信息
-    Eigen::Vector3d euler_angles = R_w_board_estimated.eulerAngles(0, 1, 2);
-    printf("\033[1;33m  Initialized orientation (RPY): [%.1f, %.1f, %.1f] degrees\033[0m\n",
+    printf("\033[1;32m  Landmark:   [%.3f, %.3f, %.3f] meters\033[0m\n",
+          P_w_board.x(), P_w_board.y(), P_w_board.z());
+
+    V3D position_error = P_w_board_estimated - P_w_board;
+    const double position_error_norm = position_error.norm();
+    printf("\033[1;32m  Position Error: [%.3f, %.3f, %.3f] meters, Norm: %.3fm\033[0m\n",
+        position_error.x(), position_error.y(), position_error.z(), position_error_norm);
+
+    M3D orientation_error = R_w_board_estimated * R_w_board.transpose();
+    Eigen::AngleAxisd angle_axis_error(orientation_error);
+    double orientation_error_deg = angle_axis_error.angle() * 180.0 / M_PI;
+    printf("\033[1;32m  Orientation Error: %.2f degrees\033[0m\n", orientation_error_deg);
+
+    if (position_error_norm > aruco_max_position_residual ||
+        orientation_error_deg > aruco_max_orientation_residual_deg)
+    {
+      printf("\033[1;33m[Aruco] Reject update for board %d: residual gate failed (pos %.3f/%.3f m, ori %.2f/%.2f deg).\033[0m\n",
+             board_id,
+             position_error_norm,
+             aruco_max_position_residual,
+             orientation_error_deg,
+             aruco_max_orientation_residual_deg);
+      continue;
+    }
+
+    double distance = board_obs.center_tvec.norm();
+    printf("\033[1;32m  Distance from camera: %.3f meters\033[0m\n", distance);
+
+    Eigen::Vector3d euler_angles = R_w_board.eulerAngles(0, 1, 2);
+    printf("\033[1;32m  Landmark orientation (RPY): [%.1f, %.1f, %.1f] degrees\033[0m\n",
           euler_angles.x() * 180.0 / M_PI,
           euler_angles.y() * 180.0 / M_PI,
           euler_angles.z() * 180.0 / M_PI);
-    
-    printf("\033[1;33m  Valid markers: %d\033[0m\n", board_obs.valid_count);
-    printf("\033[1;33m===========================================\033[0m\n");
-    
-    // 第一次观测时不进行EKF更新，只是初始化地标
-    return;
+
+    printf("\033[1;32m  Valid markers: %d\033[0m\n", board_obs.valid_count);
+
+    int observed_count = 0;
+    for (const auto& flag : board_world_flag_)
+    {
+      if (flag.second) observed_count++;
+    }
+    printf("\033[1;32m  Total observed landmarks: %d/%zu\033[0m\n", observed_count, board_world_flag_.size());
+    printf("\033[1;32m===========================================\033[0m\n");
+
+    V3D position_residual = P_w_board - P_w_board_estimated;
+
+    M3D R_cw = R_wc.transpose();
+    M3D residual_R = board_obs.center_R_cam_board.transpose() * R_cw * R_w_board;
+    Eigen::AngleAxisd angle_axis(residual_R);
+    V3D orientation_residual = angle_axis.angle() * angle_axis.axis();
+
+    Eigen::VectorXd z_aruco(6);
+    z_aruco.segment<3>(0) = position_residual;
+    z_aruco.segment<3>(3) = orientation_residual;
+
+    Eigen::MatrixXd H_aruco(6, 6);
+    M3D p_hat = skewSymmetric(board_obs.center_tvec);
+    MD(3, 3) J_pos_R = -R_wc * p_hat;
+    MD(3, 3) J_pos_t = -M3D::Identity();
+    MD(3, 3) J_ori_R = -M3D::Identity();
+    MD(3, 3) J_ori_t = MD(3, 3)::Zero();
+
+    H_aruco.block<3, 3>(0, 0) = J_pos_R;
+    H_aruco.block<3, 3>(0, 3) = J_pos_t;
+    H_aruco.block<3, 3>(3, 0) = J_ori_R;
+    H_aruco.block<3, 3>(3, 3) = J_ori_t;
+
+    double quality_weight = 1.0 + board_obs.center_spread_m + board_obs.rotation_dispersion_deg / 45.0;
+    quality_weight = std::max(1.0, quality_weight);
+
+    Eigen::MatrixXd R_aruco = Eigen::MatrixXd::Zero(6, 6);
+    R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * aruco_position_noise_base * quality_weight;
+    R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * aruco_orientation_noise_base * quality_weight;
+
+    Eigen::MatrixXd H_T = H_aruco.transpose();
+    Eigen::MatrixXd S = H_aruco * state->cov.block<6, 6>(0, 0) * H_T + R_aruco;
+    Eigen::MatrixXd K = state->cov.block<6, 6>(0, 0) * H_T * S.inverse();
+
+    Eigen::VectorXd dx = K * z_aruco;
+
+    state->rot_end = state->rot_end * Exp(dx.head<3>());
+    state->pos_end += dx.tail<3>();
+
+    Eigen::MatrixXd I_KH = Eigen::Matrix<double, 6, 6>::Identity() - K * H_aruco;
+    state->cov.block<6, 6>(0, 0) = I_KH * state->cov.block<6, 6>(0, 0) * I_KH.transpose() + K * R_aruco * K.transpose();
+
+    printf("[Aruco] Updated with board %d, residual norm: %.6f, quality weight: %.3f\n",
+           board_id, z_aruco.norm(), quality_weight);
   }
-
-  // ============== 后续观测：使用地标进行状态更新 ==============
-  const Eigen::Vector3d& P_w_board = board_world_positions_[board_id]; // 已初始化的地标世界坐标
-  const Eigen::Matrix3d& R_w_board = board_world_orientations_[board_id]; // 已初始化的地标世界姿态
-  
-  // ============== 关键输出：地标中心点在世界坐标系下的位置 ==============
-  printf("\033[1;32m===========================================\033[0m\n");
-  printf("\033[1;32m[Board %d] RE-OBSERVATION - Updating State\033[0m\n", board_id);
-  printf("\033[1;32m  Estimated:  [%.3f, %.3f, %.3f] meters\033[0m\n", 
-        P_w_board_estimated.x(), P_w_board_estimated.y(), P_w_board_estimated.z());
-  printf("\033[1;32m  Landmark:   [%.3f, %.3f, %.3f] meters\033[0m\n", 
-        P_w_board.x(), P_w_board.y(), P_w_board.z());
-  
-  // 计算误差
-  V3D position_error = P_w_board_estimated - P_w_board;
-  const double position_error_norm = position_error.norm();
-  printf("\033[1;32m  Position Error: [%.3f, %.3f, %.3f] meters, Norm: %.3fm\033[0m\n",
-      position_error.x(), position_error.y(), position_error.z(), position_error_norm);
-  
-  // 计算姿态误差
-  M3D orientation_error = R_w_board_estimated * R_w_board.transpose();
-  Eigen::AngleAxisd angle_axis_error(orientation_error);
-  double orientation_error_deg = angle_axis_error.angle() * 180.0 / M_PI;
-  printf("\033[1;32m  Orientation Error: %.2f degrees\033[0m\n", orientation_error_deg);
-
-  if (position_error_norm > aruco_max_position_residual ||
-      orientation_error_deg > aruco_max_orientation_residual_deg)
-  {
-    printf("\033[1;33m[Aruco] Reject update for board %d: residual gate failed (pos %.3f/%.3f m, ori %.2f/%.2f deg).\033[0m\n",
-           board_id,
-           position_error_norm,
-           aruco_max_position_residual,
-           orientation_error_deg,
-           aruco_max_orientation_residual_deg);
-    return;
-  }
-  
-  // 计算距离（相机到地标的距离）
-  double distance = board_obs.center_tvec.norm();
-  printf("\033[1;32m  Distance from camera: %.3f meters\033[0m\n", distance);
-  
-  // 输出地标姿态信息
-  Eigen::Vector3d euler_angles = R_w_board.eulerAngles(0, 1, 2);
-  printf("\033[1;32m  Landmark orientation (RPY): [%.1f, %.1f, %.1f] degrees\033[0m\n",
-        euler_angles.x() * 180.0 / M_PI,
-        euler_angles.y() * 180.0 / M_PI,
-        euler_angles.z() * 180.0 / M_PI);
-  
-  printf("\033[1;32m  Valid markers: %d\033[0m\n", board_obs.valid_count);
-  
-  // 统计已观测的地标数量
-  int observed_count = 0;
-  for (const auto& flag : board_world_flag_) 
-  {
-    if (flag.second) observed_count++;
-  }
-  printf("\033[1;32m  Total observed landmarks: %d/%zu\033[0m\n", observed_count, board_world_flag_.size());
-  printf("\033[1;32m===========================================\033[0m\n");
-  
-  // ============== EKF更新部分 ==============
-  // 位置残差
-  V3D position_residual = P_w_board - P_w_board_estimated;
-  
-  // 姿态残差计算
-  M3D R_cw = R_wc.transpose();
-  M3D residual_R = board_obs.center_R_cam_board.transpose() * R_cw * R_w_board;
-  Eigen::AngleAxisd angle_axis(residual_R);
-  V3D orientation_residual = angle_axis.angle() * angle_axis.axis();
-  
-  Eigen::VectorXd z_aruco(6);
-  z_aruco.segment<3>(0) = position_residual;
-  z_aruco.segment<3>(3) = orientation_residual;
-  
-  // ============== Aruco观测雅可比矩阵 ==============
-  Eigen::MatrixXd H_aruco(6, 6);
-  
-  // 计算对相机位姿的雅可比矩阵
-  M3D p_hat = skewSymmetric(board_obs.center_tvec);
-  MD(3, 3) J_pos_R = -R_wc * p_hat;  // 位置对旋转的雅可比
-  MD(3, 3) J_pos_t = -M3D::Identity(); // 位置对平移的雅可比
-  
-  // 姿态残差对相机位姿的雅可比（简化处理）
-  MD(3, 3) J_ori_R = -M3D::Identity();
-  MD(3, 3) J_ori_t = MD(3, 3)::Zero();
-  
-  // 构建完整的雅可比矩阵
-  H_aruco.block<3, 3>(0, 0) = J_pos_R;  // 位置残差对旋转
-  H_aruco.block<3, 3>(0, 3) = J_pos_t;  // 位置残差对平移
-  H_aruco.block<3, 3>(3, 0) = J_ori_R;  // 姿态残差对旋转
-  H_aruco.block<3, 3>(3, 3) = J_ori_t;  // 姿态残差对平移
-  
-  // 如果后续需要图像域误差建模，可在此扩展投影链式雅可比。
-
-  double quality_weight = 1.0 + board_obs.center_spread_m + board_obs.rotation_dispersion_deg / 45.0;
-  quality_weight = std::max(1.0, quality_weight);
-
-  Eigen::MatrixXd R_aruco = Eigen::MatrixXd::Zero(6, 6);
-  R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * aruco_position_noise_base * quality_weight;
-  R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * aruco_orientation_noise_base * quality_weight;
-  
-  Eigen::MatrixXd H_T = H_aruco.transpose();
-  Eigen::MatrixXd S = H_aruco * state->cov.block<6, 6>(0, 0) * H_T + R_aruco;
-  Eigen::MatrixXd K = state->cov.block<6, 6>(0, 0) * H_T * S.inverse();
-  
-  Eigen::VectorXd dx = K * z_aruco;
-  
-  state->rot_end = state->rot_end * Exp(dx.head<3>());
-  state->pos_end += dx.tail<3>();
-  
-  Eigen::MatrixXd I_KH = Eigen::Matrix<double, 6, 6>::Identity() - K * H_aruco;
-  state->cov.block<6, 6>(0, 0) = I_KH * state->cov.block<6, 6>(0, 0) * I_KH.transpose() + K * R_aruco * K.transpose();
-  
-  printf("[Aruco] Updated with board %d, residual norm: %.6f, quality weight: %.3f\n", 
-         board_id, z_aruco.norm(), quality_weight);
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)

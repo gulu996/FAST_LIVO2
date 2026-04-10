@@ -40,6 +40,7 @@ public:
   void processImu();
   bool shouldSelectVisualFrame();
   void updateVisualObservationHints();
+  void updateRuntimeGuard(double frame_time_s);
   
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -124,8 +125,8 @@ public:
   bool is_first_frame = false;
   bool aruco_landmarks_en = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
-  int vio_min_retrieve_points_ = 30;
-  int vio_min_update_meas_ = 600;
+  int vio_min_retrieve_points_ = 45;
+  int vio_min_update_meas_ = 900;
   double outlier_threshold;
   double vio_max_state_update_rot_deg_ = 0.8;
   double vio_max_state_update_trans_m_ = 0.08;
@@ -142,7 +143,7 @@ public:
   vector<double> extrinR;
   vector<double> cameraextrinT;
   vector<double> cameraextrinR;
-  double IMG_POINT_COV;
+  double IMG_POINT_COV = 100.0;
 
   PointCloudXYZI::Ptr visual_sub_map;
   PointCloudXYZI::Ptr feats_undistort;
@@ -200,12 +201,31 @@ public:
   bool global_map_pub = false;  
 
   bool adaptive_visual_selector_en = true;
-  double keyframe_trans_thresh_min_ = 0.05;
-  double keyframe_trans_thresh_max_ = 0.25;
-  double keyframe_rot_thresh_min_deg_ = 1.5;
-  double keyframe_rot_thresh_max_deg_ = 8.0;
+  double keyframe_trans_thresh_min_ = 0.08;
+  double keyframe_trans_thresh_max_ = 0.18;
+  double keyframe_rot_thresh_min_deg_ = 1.2;
+  double keyframe_rot_thresh_max_deg_ = 2.5;
   double keyframe_constraint_ratio_full_ = 0.2;
-  int keyframe_max_skip_frames_ = 6;
+  int keyframe_max_skip_frames_ = 4;
+  double keyframe_trans_thresh_min_nominal_ = 0.08;
+  double keyframe_trans_thresh_max_nominal_ = 0.18;
+  double keyframe_rot_thresh_min_deg_nominal_ = 1.2;
+  double keyframe_rot_thresh_max_deg_nominal_ = 2.5;
+  int keyframe_max_skip_frames_nominal_ = 4;
+
+  bool runtime_guard_en_ = true;
+  double frame_time_budget_s_ = 0.1;
+  int runtime_over_budget_trigger_frames_ = 2;
+  int runtime_recover_trigger_frames_ = 8;
+  int vio_max_iterations_nominal_ = 5;
+  int vio_max_iterations_degraded_ = 2;
+  double keyframe_trans_scale_degraded_ = 1.6;
+  double keyframe_rot_scale_degraded_ = 1.6;
+  int keyframe_max_skip_frames_degraded_ = 6;
+  int runtime_over_budget_count_ = 0;
+  int runtime_under_budget_count_ = 0;
+  bool runtime_degraded_mode_ = false;
+
   int skipped_visual_frames_ = 0;
   bool has_last_visual_keyframe_state_ = false;
   StatesGroup last_visual_keyframe_state_;

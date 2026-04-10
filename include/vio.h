@@ -243,10 +243,6 @@ public:
   V3F getInterpolatedPixel(cv::Mat img, V2D pc);
   void detect_qr(cv::Mat img);
   void draw_qr(std::vector<int>& ids, std::vector<std::vector<cv::Point2f>>& corners, std::vector<std::vector<cv::Point2f>>& rejectedCandidates);
-  void computeBoardCenterFromArucoMarkers(const std::vector<ArucoObservation>& aruco_obs,
-                                          Eigen::Vector3d& board_center, Eigen::Matrix3d& board_rotation, int& valid_count);
-  void computeSimpleAverage(const std::vector<ArucoObservation>& aruco_obs,
-                            Eigen::Vector3d& board_center, Eigen::Matrix3d& board_rotation, int& valid_count);                                    
   void updateStateWithBoardObservation();
   Eigen::Matrix3d Exp(const Eigen::Vector3d& w);
   Eigen::Matrix3d skewSymmetric(const Eigen::Vector3d& v);

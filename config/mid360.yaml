@@ -22,6 +22,7 @@ extrin_calib:
   #      0.999633,  -0.023556,  -0.013383]
   #Pcl: [ -0.001139,  -0.161932,   0.001251]
 
+  #2600*2160
   extrinsic_T: [-0.011, -0.02329, 0.04412]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
   Rcl: [-0.020181 , -0.999125 ,  0.036652 ,
@@ -36,25 +37,20 @@ time_offset:
 
 preprocess:
   point_filter_num: 2
-  filter_size_surf: 0.20
+  filter_size_surf: 0.25
   lidar_type: 1 # Livox Avia LiDAR
   scan_line: 4
   blind: 0.5
 
 vio:
-  max_iterations: 5
+  max_iterations: 3
   outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
-  min_retrieve_points: 35 # 每帧最少视觉跟踪点数，低于该值跳过视觉EKF更新
-  min_update_meas: 700 # 每层视觉EKF最少像素残差约束数，低于该值回退到旧状态
-  max_state_update_rot_deg: 0.8 # 视觉EKF单次旋转更新上限（度），防止遮挡导致姿态突跳
-  max_state_update_trans_m: 0.08 # 视觉EKF单次平移更新上限（米），防止“飞走”
-  img_point_cov: 100 # 100 1000 
   visual_map_prune_en: true
-  visual_map_max_voxels: 3500 # Jetson 8GB 建议值：限制视觉体素数量
-  visual_map_max_points_per_voxel: 12 # 每个视觉体素最多保留点数
-  visual_map_max_total_points: 45000 # 视觉点总量硬上限
+  visual_map_max_voxels: 1800 # 降低视觉地图规模，优先实时性
+  visual_map_max_points_per_voxel: 8 # 每个视觉体素最多保留点数
+  visual_map_max_total_points: 18000 # 视觉点总量硬上限
   patch_size: 8
-  patch_pyrimid_level: 4
+  patch_pyrimid_level: 3
   normal_en: true
   raycast_en: false
   inverse_composition_en: false
@@ -70,37 +66,31 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 lio:
-  max_iterations: 4
-  icp_min_iterations: 2 # ICP最小迭代次数：至少做2次以保证稳健性
-  icp_early_stop_residual_ratio: 0.02 # 残差相对改善低于该阈值且已收敛时提前停止
+  max_iterations: 3
+  icp_min_iterations: 1 # ICP最小迭代次数：至少做1次
+  icp_early_stop_residual_ratio: 0.03 # 残差相对改善低于该阈值且已收敛时提前停止
   icp_max_rot_step_deg: 1.2 # ICP单次旋转更新上限（度），抑制异常匹配导致姿态突跳
   icp_max_trans_step_m: 0.20 # ICP单次平移更新上限（米），抑制“轨迹上天”
   dept_err: 0.02
   beam_err: 0.15
   min_eigen_value: 0.005 # 0.005
-  voxel_size: 0.6
+  voxel_size: 0.8
   max_layer: 2
   max_points_num: 50
   layer_init_num: [5, 5, 5, 5, 5]
 
-  degeneracy_ratio_thresh: 0.10 # 激光退化判定阈值：法向分布最小/最大特征值比值低于该值视为退化
-  degeneracy_min_effective_features: 50 # 参与退化判定的最小有效平面约束数，低于该值直接按退化处理
-
 local_map:  
   map_sliding_en: true
-  half_map_size: 50
+  half_map_size: 55
   sliding_thresh: 4
-  long_term_visual_map_en: false # 启用长期稀疏视觉地图：局部地图滑窗时保留有视觉观测的体素
+  long_term_visual_map_en: false # 关闭长期视觉地图，降低长期运行计算开销
   long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
 
 adaptive_selector:
-  en: true # 自适应视觉选帧总开关：true 开启“退化全帧、非退化关键帧”策略
-  keyframe_trans_thresh_min: 0.05 # 平移关键帧最小阈值(米)：激光退化时趋向该值（更容易选中图像帧）
-  keyframe_trans_thresh_max: 0.12 # 平移关键帧最大阈值(米)：激光约束充足时趋向该值（更稀疏选帧）
-  keyframe_rot_thresh_min_deg: 1.5 # 旋转关键帧最小阈值(度)：退化时降低旋转门限
-  keyframe_rot_thresh_max_deg: 3.5 # 旋转关键帧最大阈值(度)：约束充足时提高旋转门限
-  keyframe_constraint_ratio_full: 0.2 # 约束强度归一化上限：特征值比值达到该值后按“最稀疏选帧”处理
-  keyframe_max_skip_frames: 2 # 最大连续跳过图像帧数，超过后强制选一帧防止长时间无视觉更新
+  en: true # 开启自适应视觉选帧：平移阶段降算力，转向阶段保留视觉约束
+
+runtime_guard:
+  enable: true # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复
 
 uav:
   imu_rate_odom: false
@@ -120,7 +110,7 @@ evo:
 pcd_save:
   pcd_save_en: true
   save_path: "/home/jetson/data"
-  global_map_pub: true    #need to set pcd_save_en true
+  global_map_pub: true   #need to set pcd_save_en true
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05
   max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
@@ -135,28 +125,18 @@ aruco_landmarks:
   marker_size: 0.16
   delta_width_qr_center: 0.28 # Half the distance between the centers of two markers in the horizontal direction 
   delta_height_qr_center: 0.18 # Half the distance between the centers of two markers in the vertical direction
-  min_quad_area_px: 300.0 # 2D几何门控：四个二维码中心凸包最小面积（像素^2）
-  pair_distance_rel_tol: 0.2 # 3D几何门控：两两距离与理论矩形距离的相对误差上限
-  max_normal_diff_deg: 15.0 # 3D几何门控：四码法向与平均法向的最大夹角（度）
-  max_marker_depth_diff: 0.6 # 深度一致性门控：四码在相机坐标系z方向的最大离散（米）
-  min_marker_depth: 0.1 # 单码距离下限（米），过近容易估计不稳定
-  max_marker_depth: 10.0 # 单码距离上限（米），过远角点噪声占比高
-  max_position_residual: 0.6 # 更新门控：地标世界位置残差范数上限（米）
-  max_orientation_residual_deg: 25.0 # 更新门控：地标姿态残差上限（度）
-  position_noise_base: 0.01 # EKF观测噪声基值：位置分量（值越大越不信任二维码位置）
-  orientation_noise_base: 0.1 # EKF观测噪声基值：姿态分量（值越大越不信任二维码姿态）
   markers:
     - id: 1
       flag: 0      #0表示该地标的世界坐标无效
-      position: [1.0, 2.0, 1.5]
+      #position: [1.0, 2.0, 1.5]
     - id: 2
       flag: 0
-      position: [10.0, 2.0, 1.5]
+      #position: [10.0, 2.0, 1.5]
     - id: 3
       flag: 0
-      position: [20.0, 2.0, 1.5]
+      #position: [20.0, 2.0, 1.5]
     - id: 4
       flag: 0
-      position: [30.0, 2.0, 1.5]
+      #position: [30.0, 2.0, 1.5]
     
 

@@ -56,8 +56,8 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<bool>("local_map/long_term_visual_map_en", voxel_config.long_term_visual_map_en, true);
   nh.param<int>("local_map/long_term_visual_max_voxels", voxel_config.long_term_visual_max_voxels, 5000);
 
-  nh.param<double>("lio/degeneracy_ratio_thresh", voxel_config.degeneracy_ratio_thresh, 0.06);
-  nh.param<int>("lio/degeneracy_min_effective_features", voxel_config.degeneracy_min_effective_features, 30);
+  voxel_config.degeneracy_ratio_thresh = 0.10;
+  voxel_config.degeneracy_min_effective_features = 50;
 
   nh.param<int>("lio/icp_min_iterations", voxel_config.icp_min_iterations, 2);
   nh.param<double>("lio/icp_early_stop_residual_ratio", voxel_config.icp_early_stop_residual_ratio, 0.03);
