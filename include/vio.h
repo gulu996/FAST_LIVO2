@@ -124,6 +124,11 @@ public:
   double aruco_max_orientation_residual_deg = 25.0;
   double aruco_position_noise_base = 0.01;
   double aruco_orientation_noise_base = 0.1;
+  int aruco_process_stride = 4;
+  bool aruco_use_orientation_update = false;
+  double aruco_normal_gate_deg = 35.0;
+  double aruco_update_max_rot_step_deg = 1.0;
+  double aruco_update_max_trans_step_m = 0.08;
 
   struct BoardObservation 
   {
@@ -167,6 +172,8 @@ public:
   int max_iterations, total_points;
   int min_retrieve_points = 30;
   int min_update_meas = 600;
+  int low_track_force_update_stride = 0;
+  int low_track_force_min_points = 8;
 
   double img_point_cov, outlier_threshold, ncc_thre;
   double max_state_update_rot_deg = 0.8;
@@ -175,6 +182,8 @@ public:
   int visual_map_max_voxels = 12000;
   int visual_map_max_points_per_voxel = 24;
   int visual_map_max_total_points = 180000;
+  int visual_map_max_add_per_frame = 600;
+  float visual_map_min_shi_tomasi_score = 10.0f;
   double visual_voxel_size = 0.5;
   
   SubSparseMap *visual_submap;
@@ -188,10 +197,30 @@ public:
   int frame_count = 0;
   bool plot_flag;
 
+  double aruco_time_detect_markers = 0.0;
+  double aruco_time_draw = 0.0;
+  double aruco_time_group_gate = 0.0;
+  double aruco_time_pose_estimate = 0.0;
+  double aruco_time_pnp = 0.0;
+  double aruco_time_update = 0.0;
+  double aruco_time_total = 0.0;
+  double aruco_ave_time_total = 0.0;
+  int aruco_profile_frames = 0;
+  int aruco_board_candidates = 0;
+  int aruco_board_accepted = 0;
+
+  string timing_log_dir;
+  string timing_log_file_path;
+  bool timing_log_enable = true;
+  bool timing_log_ready = false;
+  int timing_log_flush_stride = 10;
+  int timing_log_pending_frames = 0;
+
   Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
   MatrixXd K, H_sub_inv;
 
   ofstream fout_camera, fout_colmap;
+  ofstream timing_log_file;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
   unordered_map<int, Warp *> warp_map;
@@ -229,7 +258,7 @@ public:
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
-  void insertPointIntoVoxelMap(VisualPoint *pt_new);
+  bool insertPointIntoVoxelMap(VisualPoint *pt_new);
   size_t getVisualPointCount() const;
   void pruneVisualMap();
   void plotTrackedPoints();
@@ -246,6 +275,8 @@ public:
   void updateStateWithBoardObservation();
   Eigen::Matrix3d Exp(const Eigen::Vector3d& w);
   Eigen::Matrix3d skewSymmetric(const Eigen::Vector3d& v);
+  void initializeTimingLogFileIfNeeded();
+  void appendTimingLogLines(const vector<string> &lines);
   
   // void resetRvizDisplay();
   // deque<VisualPoint *> map_cur_frame;

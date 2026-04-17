@@ -14,7 +14,43 @@ which is included as part of this source code package.
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <ctime>
+#include <iomanip>
 #include <limits>
+#include <sstream>
+
+namespace
+{
+std::string formatLocalTime(const char *fmt)
+{
+  const std::time_t now = std::time(nullptr);
+  std::tm tm_now;
+  localtime_r(&now, &tm_now);
+  char buf[64] = {0};
+  std::strftime(buf, sizeof(buf), fmt, &tm_now);
+  return std::string(buf);
+}
+
+std::string currentTimeForFilename()
+{
+  return formatLocalTime("%Y-%m-%d-%H%M%S");
+}
+
+std::string formatDouble6(double value)
+{
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(6) << value;
+  return oss.str();
+}
+
+std::string makeTableRow(const std::string &left, const std::string &right)
+{
+  std::ostringstream oss;
+  oss << "| " << std::left << std::setw(29) << left
+      << " | " << std::left << std::setw(27) << right << " |";
+  return oss.str();
+}
+}
 
 VIOManager::VIOManager()
 {
@@ -23,6 +59,7 @@ VIOManager::VIOManager()
 
 VIOManager::~VIOManager()
 {
+  if (timing_log_file.is_open()) timing_log_file.close();
   delete visual_submap;
   for (auto& pair : warp_map) delete pair.second;
   warp_map.clear();
@@ -92,6 +129,11 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     aruco_max_orientation_residual_deg = 25.0;
     aruco_position_noise_base = 0.01;
     aruco_orientation_noise_base = 0.1;
+    aruco_process_stride = 4;
+    aruco_use_orientation_update = false;
+    aruco_normal_gate_deg = 35.0;
+    aruco_update_max_rot_step_deg = 1.0;
+    aruco_update_max_trans_step_m = 0.08;
 
     aruco_relative_positions_[1] = Eigen::Vector3d(-board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);   // 左上
     aruco_relative_positions_[2] = Eigen::Vector3d(board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);    // 右上
@@ -273,6 +315,46 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
   sub_feat_map.clear();
 }
 
+void VIOManager::initializeTimingLogFileIfNeeded()
+{
+  if (!timing_log_enable || timing_log_ready) return;
+  if (timing_log_dir.empty()) return;
+
+  std::string dir = timing_log_dir;
+  if (dir.back() != '/') dir += '/';
+
+  timing_log_file_path = dir + currentTimeForFilename() + ".log";
+  timing_log_file.open(timing_log_file_path, std::ios::out | std::ios::app);
+  if (!timing_log_file.is_open())
+  {
+    printf("[ VIO ] Warning: failed to open timing log file: %s\n", timing_log_file_path.c_str());
+    timing_log_enable = false;
+    return;
+  }
+
+  timing_log_ready = true;
+  printf("[ VIO ] Timing log file: %s\n", timing_log_file_path.c_str());
+}
+
+void VIOManager::appendTimingLogLines(const vector<string> &lines)
+{
+  if (!timing_log_enable || lines.empty()) return;
+  if (!timing_log_ready) initializeTimingLogFileIfNeeded();
+  if (!timing_log_ready || !timing_log_file.is_open()) return;
+
+  for (const auto &line : lines)
+  {
+    timing_log_file << line << "\n";
+  }
+  timing_log_file << "\n";
+  timing_log_pending_frames++;
+  if (timing_log_flush_stride <= 1 || timing_log_pending_frames >= timing_log_flush_stride)
+  {
+    timing_log_file.flush();
+    timing_log_pending_frames = 0;
+  }
+}
+
 void VIOManager::resetGrid()
 {
   fill(grid_num.begin(), grid_num.end(), TYPE_UNKNOWN);
@@ -338,10 +420,24 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   }
 }
 
-void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
+bool VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 {
+  if (pt_new == nullptr) return false;
+
+  if (visual_voxel_size <= 1e-6)
+  {
+    delete pt_new;
+    return false;
+  }
+
   V3D pt_w(pt_new->pos_[0], pt_new->pos_[1], pt_new->pos_[2]);
-  double voxel_size = 0.5;
+  if (!std::isfinite(pt_w[0]) || !std::isfinite(pt_w[1]) || !std::isfinite(pt_w[2]))
+  {
+    delete pt_new;
+    return false;
+  }
+
+  const double voxel_size = visual_voxel_size;
   float loc_xyz[3];
   for (int j = 0; j < 3; j++)
   {
@@ -352,14 +448,33 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
   auto iter = feat_map.find(position);
   if (iter != feat_map.end())
   {
-    iter->second->voxel_points.push_back(pt_new);
-    iter->second->count++;
+    std::vector<VisualPoint *> &pts = iter->second->voxel_points;
+    if (visual_map_max_points_per_voxel > 0 &&
+        pts.size() >= static_cast<size_t>(visual_map_max_points_per_voxel))
+    {
+      delete pt_new;
+      return false;
+    }
+    pts.push_back(pt_new);
+    // Do not erase here: tracked pointers in current visual_submap may still
+    // reference points in this voxel during the same frame.
+    iter->second->count = pts.size();
+    return true;
   }
   else
   {
+    if (visual_map_max_voxels > 0 &&
+        feat_map.size() >= static_cast<size_t>(visual_map_max_voxels))
+    {
+      delete pt_new;
+      return false;
+    }
+
     VOXEL_POINTS *ot = new VOXEL_POINTS(0);
     ot->voxel_points.push_back(pt_new);
+    ot->count = ot->voxel_points.size();
     feat_map[position] = ot;
+    return true;
   }
 }
 
@@ -1011,22 +1126,47 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 {
   if (pg.size() <= 10) return;
 
+  const int configured_cap = std::max(1, visual_map_max_add_per_frame);
+  int max_add_this_frame = configured_cap;
+  if (visual_map_max_total_points > 0)
+  {
+    const size_t total_points_now = getVisualPointCount();
+    if (total_points_now >= static_cast<size_t>(visual_map_max_total_points))
+    {
+      printf("[ VIO ] Skip appending map points: visual map already at cap (%zu/%d)\n",
+             total_points_now, visual_map_max_total_points);
+      return;
+    }
+    const size_t remain = static_cast<size_t>(visual_map_max_total_points) - total_points_now;
+    max_add_this_frame = std::min(max_add_this_frame, static_cast<int>(remain));
+  }
+
+  if (max_add_this_frame <= 0) return;
+
+  const float min_corner_score = std::max(0.0f, visual_map_min_shi_tomasi_score);
+
   // double t0 = omp_get_wtime();
   for (int i = 0; i < pg.size(); i++)
   {
-    if (pg[i].normal == V3D(0, 0, 0)) continue;
+    const V3D &normal = pg[i].normal;
+    const V3D &pt = pg[i].point_w;
+    if (!std::isfinite(pt[0]) || !std::isfinite(pt[1]) || !std::isfinite(pt[2])) continue;
+    if (!std::isfinite(normal[0]) || !std::isfinite(normal[1]) || !std::isfinite(normal[2])) continue;
+    if (normal.squaredNorm() < 1e-12) continue;
 
-    V3D pt = pg[i].point_w;
     V2D pc(new_frame_->w2c(pt));
+    if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
 
     if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
     {
       int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
+      if (index < 0 || index >= length) continue;
 
       if (grid_num[index] != TYPE_MAP)
       {
         float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
-        // if (cur_value < 5) continue;
+        if (!std::isfinite(cur_value)) continue;
+        if (cur_value < min_corner_score) continue;
         if (cur_value > scan_value[index])
         {
           scan_value[index] = cur_value;
@@ -1039,16 +1179,25 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
   for (int j = 0; j < visual_submap->add_from_voxel_map.size(); j++)
   {
-    V3D pt = visual_submap->add_from_voxel_map[j].point_w;
+    const V3D &pt = visual_submap->add_from_voxel_map[j].point_w;
+    const V3D &normal = visual_submap->add_from_voxel_map[j].normal;
+    if (!std::isfinite(pt[0]) || !std::isfinite(pt[1]) || !std::isfinite(pt[2])) continue;
+    if (!std::isfinite(normal[0]) || !std::isfinite(normal[1]) || !std::isfinite(normal[2])) continue;
+    if (normal.squaredNorm() < 1e-12) continue;
+
     V2D pc(new_frame_->w2c(pt));
+    if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
 
     if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
     {
       int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
+      if (index < 0 || index >= length) continue;
 
       if (grid_num[index] != TYPE_MAP)
       {
         float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
+        if (!std::isfinite(cur_value)) continue;
+        if (cur_value < min_corner_score) continue;
         if (cur_value > scan_value[index])
         {
           scan_value[index] = cur_value;
@@ -1065,17 +1214,31 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   int add = 0;
   for (int i = 0; i < length; i++)
   {
+    if (add >= max_add_this_frame) break;
+
     if (grid_num[i] == TYPE_POINTCLOUD) // && (scan_value[i]>=50))
     {
       pointWithVar pt_var = append_voxel_points[i];
       V3D pt = pt_var.point_w;
+      if (!std::isfinite(pt[0]) || !std::isfinite(pt[1]) || !std::isfinite(pt[2])) continue;
+      if (!std::isfinite(pt_var.normal[0]) || !std::isfinite(pt_var.normal[1]) || !std::isfinite(pt_var.normal[2])) continue;
+      if (pt_var.normal.squaredNorm() < 1e-12) continue;
 
       V3D norm_vec(new_frame_->T_f_w_.rotation_matrix() * pt_var.normal);
+      if (norm_vec.squaredNorm() < 1e-12) continue;
+      norm_vec.normalize();
+
       V3D dir(new_frame_->T_f_w_ * pt);
-      dir.normalize();
+      if (!std::isfinite(dir[0]) || !std::isfinite(dir[1]) || !std::isfinite(dir[2])) continue;
+      const double dir_norm = dir.norm();
+      if (dir_norm < 1e-6) continue;
+      dir /= dir_norm;
+
       double cos_theta = dir.dot(norm_vec);
       // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
       V2D pc(new_frame_->w2c(pt));
+      if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
+      if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border)) continue;
 
       float *patch = new float[patch_size_total];
       getImagePatch(img, pc, patch, 0);
@@ -1097,15 +1260,18 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       
       pt_new->previous_normal_ = pt_new->normal_;
 
-      insertPointIntoVoxelMap(pt_new);
-      add += 1;
+      if (insertPointIntoVoxelMap(pt_new))
+      {
+        add += 1;
+      }
       // map_cur_frame.push_back(pt_new);
     }
   }
 
   // double t_b2 = omp_get_wtime() - t0;
 
-  printf("[ VIO ] Append %d new visual map points\n", add);
+  printf("[ VIO ] Append %d new visual map points (cap=%d, score>=%.1f)\n",
+         add, max_add_this_frame, min_corner_score);
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
   // printf("B2. : %.6lf \n", t_b2);
@@ -1129,9 +1295,7 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
 
     V2D pc(new_frame_->w2c(pt->pos_));
     bool add_flag = false;
-    
-    float *patch_temp = new float[patch_size_total];
-    getImagePatch(img, pc, patch_temp, 0);
+
     // TODO: condition: distance and view_angle
     // Step 1: time
     Feature *last_feature = pt->obs_.back();
@@ -1161,6 +1325,8 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     {
       update_num += 1;
       update_flag[i] = 1;
+      float *patch_temp = new float[patch_size_total];
+      getImagePatch(img, pc, patch_temp, 0);
       Vector3d f = cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
       ftr_new->img_ = img;
@@ -2291,28 +2457,45 @@ Eigen::Matrix3d VIOManager::Exp(const Eigen::Vector3d& w)
 
 void VIOManager::detect_qr(cv::Mat img)
 {
+  const double t_aruco_begin = omp_get_wtime();
+  aruco_time_detect_markers = 0.0;
+  aruco_time_draw = 0.0;
+  aruco_time_group_gate = 0.0;
+  aruco_time_pose_estimate = 0.0;
+  aruco_time_pnp = 0.0;
+  aruco_board_candidates = 0;
+  aruco_board_accepted = 0;
+
   current_board_observations_.clear();
 
   std::vector<int> ids;
   std::vector<std::vector<cv::Point2f>> corners, rejectedCandidates;
-  
+
+  const double t_detect_begin = omp_get_wtime();
   cv::aruco::detectMarkers(img, dictionary_, corners, ids, parameters_, rejectedCandidates);
+  aruco_time_detect_markers = omp_get_wtime() - t_detect_begin;
   
   if (ids.empty()) 
   {
+    aruco_time_total = omp_get_wtime() - t_aruco_begin;
     return;
   }
-  
-  draw_qr(ids, corners, rejectedCandidates);
 
+  const double t_draw_begin = omp_get_wtime();
+  draw_qr(ids, corners, rejectedCandidates);
+  aruco_time_draw = omp_get_wtime() - t_draw_begin;
+
+  const double t_group_begin = omp_get_wtime();
   std::map<int, std::vector<size_t>> grouped_indices;
   for (size_t i = 0; i < ids.size(); i++)
   {
     grouped_indices[ids[i]].push_back(i);
   }
+  aruco_board_candidates = static_cast<int>(grouped_indices.size());
 
   for (const auto& group : grouped_indices)
   {
+    double t_gate_anchor = omp_get_wtime();
     const int board_id = group.first;
     const std::vector<size_t>& indices = group.second;
 
@@ -2338,13 +2521,19 @@ void VIOManager::detect_qr(cv::Mat img)
       continue;
     }
 
+    aruco_time_group_gate += omp_get_wtime() - t_gate_anchor;
+
+    const double t_pose_begin = omp_get_wtime();
     std::vector<cv::Vec3d> rvecs, tvecs;
     cv::aruco::estimatePoseSingleMarkers(board_corners, marker_size, cameraMatrix_, distCoeffs_, rvecs, tvecs);
+    aruco_time_pose_estimate += omp_get_wtime() - t_pose_begin;
     if (rvecs.size() != 4 || tvecs.size() != 4)
     {
       printf("\033[1;33m[Aruco] Skip board %d: pose estimation size mismatch.\033[0m\n", board_id);
       continue;
     }
+
+    t_gate_anchor = omp_get_wtime();
 
     auto it = board_world_positions_.find(board_id);
     if (it == board_world_positions_.end())
@@ -2426,18 +2615,23 @@ void VIOManager::detect_qr(cv::Mat img)
       continue;
     }
 
+    aruco_time_group_gate += omp_get_wtime() - t_gate_anchor;
+
     Eigen::Vector3d board_center;
     Eigen::Matrix3d board_rotation;
     int valid_count = 4;
     double board_reproj_error_px = 0.0;
-    if (!estimateBoardPoseFromCentersPnP(board_corners,
-                                         board_config_.delta_width_qr_center,
-                                         board_config_.delta_height_qr_center,
-                                         cameraMatrix_,
-                                         distCoeffs_,
-                                         board_center,
-                                         board_rotation,
-                                         board_reproj_error_px))
+    const double t_pnp_begin = omp_get_wtime();
+    const bool pnp_ok = estimateBoardPoseFromCentersPnP(board_corners,
+                                                        board_config_.delta_width_qr_center,
+                                                        board_config_.delta_height_qr_center,
+                                                        cameraMatrix_,
+                                                        distCoeffs_,
+                                                        board_center,
+                                                        board_rotation,
+                                                        board_reproj_error_px);
+    aruco_time_pnp += omp_get_wtime() - t_pnp_begin;
+    if (!pnp_ok)
     {
       printf("\033[1;33m[Aruco] Skip board %d: joint board pose optimization failed.\033[0m\n", board_id);
       continue;
@@ -2452,6 +2646,7 @@ void VIOManager::detect_qr(cv::Mat img)
     board_obs.center_spread_m = computeCenterSpread(aruco_obs, board_center);
     board_obs.rotation_dispersion_deg = computeRotationDispersionDeg(aruco_obs, board_rotation);
     current_board_observations_.push_back(board_obs);
+    aruco_board_accepted++;
 
     printf("\033[1;32m[Aruco] Board %d accepted: center [%.3f, %.3f, %.3f], spread %.3f m, rot-disp %.2f deg, area %.1f px^2, reproj %.3f px\033[0m\n",
            board_id,
@@ -2463,6 +2658,9 @@ void VIOManager::detect_qr(cv::Mat img)
            quad_area_px,
            board_reproj_error_px);
   }
+
+  aruco_time_group_gate = omp_get_wtime() - t_group_begin;
+  aruco_time_total = omp_get_wtime() - t_aruco_begin;
 }
 
 void VIOManager::draw_qr(
@@ -2615,20 +2813,63 @@ void VIOManager::updateStateWithBoardObservation()
     printf("\033[1;32m  Position Error: [%.3f, %.3f, %.3f] meters, Norm: %.3fm\033[0m\n",
         position_error.x(), position_error.y(), position_error.z(), position_error_norm);
 
-    M3D orientation_error = R_w_board_estimated * R_w_board.transpose();
-    Eigen::AngleAxisd angle_axis_error(orientation_error);
-    double orientation_error_deg = angle_axis_error.angle() * 180.0 / M_PI;
+    const M3D R_flip_pi_x = (Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX())).toRotationMatrix();
+    const M3D R_flip_pi_y = (Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitY())).toRotationMatrix();
+    const M3D R_flip_pi_z = (Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ())).toRotationMatrix();
+
+    auto computeRotationErrorDeg = [](const M3D &R_candidate, const M3D &R_ref) {
+      Eigen::AngleAxisd aa(R_candidate * R_ref.transpose());
+      return aa.angle() * 180.0 / M_PI;
+    };
+
+    const std::array<M3D, 4> candidate_flips = {
+        M3D::Identity(),
+        R_flip_pi_x,
+        R_flip_pi_y,
+        R_flip_pi_z};
+
+    M3D R_cam_board_used = board_obs.center_R_cam_board;
+    double orientation_error_deg = std::numeric_limits<double>::infinity();
+    double orientation_error_before = computeRotationErrorDeg(R_w_board_estimated, R_w_board);
+
+    for (const auto &R_flip : candidate_flips)
+    {
+      const M3D R_cam_candidate = board_obs.center_R_cam_board * R_flip;
+      const M3D R_w_candidate = R_wc * R_cam_candidate;
+      const double err_deg = computeRotationErrorDeg(R_w_candidate, R_w_board);
+      if (err_deg < orientation_error_deg)
+      {
+        orientation_error_deg = err_deg;
+        R_cam_board_used = R_cam_candidate;
+        R_w_board_estimated = R_w_candidate;
+      }
+    }
+
+    if (orientation_error_deg + 1e-3 < orientation_error_before)
+    {
+      printf("\033[1;33m[Aruco] Board %d: resolve orientation ambiguity (%.2f -> %.2f deg).\033[0m\n",
+             board_id,
+             orientation_error_before,
+             orientation_error_deg);
+    }
+
     printf("\033[1;32m  Orientation Error: %.2f degrees\033[0m\n", orientation_error_deg);
 
+    const Eigen::Vector3d n_est = R_w_board_estimated.col(2).normalized();
+    const Eigen::Vector3d n_ref = R_w_board.col(2).normalized();
+    const double normal_error_deg =
+        std::acos(std::clamp(n_est.dot(n_ref), -1.0, 1.0)) * 180.0 / M_PI;
+    printf("\033[1;32m  Normal Error: %.2f degrees\033[0m\n", normal_error_deg);
+
     if (position_error_norm > aruco_max_position_residual ||
-        orientation_error_deg > aruco_max_orientation_residual_deg)
+        normal_error_deg > aruco_normal_gate_deg)
     {
-      printf("\033[1;33m[Aruco] Reject update for board %d: residual gate failed (pos %.3f/%.3f m, ori %.2f/%.2f deg).\033[0m\n",
+      printf("\033[1;33m[Aruco] Reject update for board %d: residual gate failed (pos %.3f/%.3f m, normal %.2f/%.2f deg).\033[0m\n",
              board_id,
              position_error_norm,
              aruco_max_position_residual,
-             orientation_error_deg,
-             aruco_max_orientation_residual_deg);
+             normal_error_deg,
+             aruco_normal_gate_deg);
       continue;
     }
 
@@ -2653,33 +2894,51 @@ void VIOManager::updateStateWithBoardObservation()
 
     V3D position_residual = P_w_board - P_w_board_estimated;
 
-    M3D R_cw = R_wc.transpose();
-    M3D residual_R = board_obs.center_R_cam_board.transpose() * R_cw * R_w_board;
-    Eigen::AngleAxisd angle_axis(residual_R);
-    V3D orientation_residual = angle_axis.angle() * angle_axis.axis();
+    const bool use_orientation_update =
+        aruco_use_orientation_update && (orientation_error_deg <= aruco_max_orientation_residual_deg);
 
-    Eigen::VectorXd z_aruco(6);
-    z_aruco.segment<3>(0) = position_residual;
-    z_aruco.segment<3>(3) = orientation_residual;
+    Eigen::MatrixXd H_aruco;
+    Eigen::MatrixXd R_aruco;
+    Eigen::VectorXd z_aruco;
 
-    Eigen::MatrixXd H_aruco(6, 6);
     M3D p_hat = skewSymmetric(board_obs.center_tvec);
     MD(3, 3) J_pos_R = -R_wc * p_hat;
     MD(3, 3) J_pos_t = -M3D::Identity();
-    MD(3, 3) J_ori_R = -M3D::Identity();
-    MD(3, 3) J_ori_t = MD(3, 3)::Zero();
-
-    H_aruco.block<3, 3>(0, 0) = J_pos_R;
-    H_aruco.block<3, 3>(0, 3) = J_pos_t;
-    H_aruco.block<3, 3>(3, 0) = J_ori_R;
-    H_aruco.block<3, 3>(3, 3) = J_ori_t;
 
     double quality_weight = 1.0 + board_obs.center_spread_m + board_obs.rotation_dispersion_deg / 45.0;
     quality_weight = std::max(1.0, quality_weight);
 
-    Eigen::MatrixXd R_aruco = Eigen::MatrixXd::Zero(6, 6);
-    R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * aruco_position_noise_base * quality_weight;
-    R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * aruco_orientation_noise_base * quality_weight;
+    if (use_orientation_update)
+    {
+      M3D R_cw = R_wc.transpose();
+      M3D residual_R = R_cam_board_used.transpose() * R_cw * R_w_board;
+      Eigen::AngleAxisd angle_axis(residual_R);
+      V3D orientation_residual = angle_axis.angle() * angle_axis.axis();
+
+      z_aruco.resize(6);
+      z_aruco.segment<3>(0) = position_residual;
+      z_aruco.segment<3>(3) = orientation_residual;
+
+      H_aruco = Eigen::MatrixXd::Zero(6, 6);
+      MD(3, 3) J_ori_R = -M3D::Identity();
+      MD(3, 3) J_ori_t = MD(3, 3)::Zero();
+      H_aruco.block<3, 3>(0, 0) = J_pos_R;
+      H_aruco.block<3, 3>(0, 3) = J_pos_t;
+      H_aruco.block<3, 3>(3, 0) = J_ori_R;
+      H_aruco.block<3, 3>(3, 3) = J_ori_t;
+
+      R_aruco = Eigen::MatrixXd::Zero(6, 6);
+      R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * aruco_position_noise_base * quality_weight;
+      R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * aruco_orientation_noise_base * quality_weight;
+    }
+    else
+    {
+      z_aruco = position_residual;
+      H_aruco = Eigen::MatrixXd::Zero(3, 6);
+      H_aruco.block<3, 3>(0, 0) = J_pos_R;
+      H_aruco.block<3, 3>(0, 3) = J_pos_t;
+      R_aruco = Eigen::MatrixXd::Identity(3, 3) * aruco_position_noise_base * quality_weight;
+    }
 
     Eigen::MatrixXd H_T = H_aruco.transpose();
     Eigen::MatrixXd S = H_aruco * state->cov.block<6, 6>(0, 0) * H_T + R_aruco;
@@ -2687,19 +2946,35 @@ void VIOManager::updateStateWithBoardObservation()
 
     Eigen::VectorXd dx = K * z_aruco;
 
+    V3D rot_add = dx.head<3>();
+    V3D trans_add = dx.tail<3>();
+    const double rot_step_deg = rot_add.norm() * 57.3;
+    const double trans_step_m = trans_add.norm();
+    const double max_rot_step_deg = std::max(0.1, aruco_update_max_rot_step_deg);
+    const double max_trans_step_m = std::max(0.01, aruco_update_max_trans_step_m);
+    double step_scale = 1.0;
+    if (rot_step_deg > max_rot_step_deg) step_scale = std::min(step_scale, max_rot_step_deg / std::max(rot_step_deg, 1e-6));
+    if (trans_step_m > max_trans_step_m) step_scale = std::min(step_scale, max_trans_step_m / std::max(trans_step_m, 1e-6));
+    if (step_scale < 1.0) dx *= step_scale;
+
     state->rot_end = state->rot_end * Exp(dx.head<3>());
     state->pos_end += dx.tail<3>();
 
     Eigen::MatrixXd I_KH = Eigen::Matrix<double, 6, 6>::Identity() - K * H_aruco;
     state->cov.block<6, 6>(0, 0) = I_KH * state->cov.block<6, 6>(0, 0) * I_KH.transpose() + K * R_aruco * K.transpose();
 
-    printf("[Aruco] Updated with board %d, residual norm: %.6f, quality weight: %.3f\n",
-           board_id, z_aruco.norm(), quality_weight);
+        printf("[Aruco] Updated with board %d, mode=%s, residual norm: %.6f, quality weight: %.3f\n",
+          board_id,
+          use_orientation_update ? "pos+ori" : "pos-only",
+          z_aruco.norm(),
+          quality_weight);
   }
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  (void)img_time;
+
   if (width != img.cols || height != img.rows)
   {
     if (img.empty()) printf("[ VIO ] Empty Image!\n");
@@ -2719,23 +2994,203 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double t1 = omp_get_wtime();
 
   retrieveFromVisualSparseMap(img, pg, feat_map);
-  if (aruco_landmarks_en) detect_qr(img);
-
-  if (total_points < min_retrieve_points)
+  const double t_retrieve = omp_get_wtime() - t1;
+  const bool run_aruco_this_frame = aruco_landmarks_en && (aruco_process_stride <= 1 || (frame_count % aruco_process_stride == 0));
+  if (run_aruco_this_frame)
   {
-    printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d).\n", total_points, min_retrieve_points);
+    detect_qr(img);
+  }
+  else
+  {
+    current_board_observations_.clear();
+    aruco_time_detect_markers = 0.0;
+    aruco_time_draw = 0.0;
+    aruco_time_group_gate = 0.0;
+    aruco_time_pose_estimate = 0.0;
+    aruco_time_pnp = 0.0;
+    aruco_time_total = 0.0;
+    aruco_board_candidates = 0;
+    aruco_board_accepted = 0;
+  }
+
+  const bool low_track_force_update =
+      low_track_force_update_stride > 0 &&
+      total_points >= low_track_force_min_points &&
+      (frame_count % low_track_force_update_stride == 0);
+  const bool skip_visual_ekf = (total_points < min_retrieve_points) && !low_track_force_update;
+  double t2 = omp_get_wtime();
+
+  if (!skip_visual_ekf)
+  {
+    if (low_track_force_update && total_points < min_retrieve_points)
+    {
+      printf("[ VIO ] Force EKF update under low tracks (%d < %d), stride=%d, min_force_pts=%d\n",
+             total_points, min_retrieve_points, low_track_force_update_stride, low_track_force_min_points);
+    }
+
+    computeJacobianAndUpdateEKF(img);
+    if (run_aruco_this_frame)
+    {
+      const double t_aruco_update_begin = omp_get_wtime();
+      updateStateWithBoardObservation();
+      aruco_time_update = omp_get_wtime() - t_aruco_update_begin;
+    }
+    else
+    {
+      aruco_time_update = 0.0;
+    }
+  }
+  else
+  {
+    const bool aruco_update_ran = run_aruco_this_frame && !current_board_observations_.empty();
+
+    if (aruco_update_ran)
+    {
+      const double t_aruco_update_begin = omp_get_wtime();
+      updateStateWithBoardObservation();
+      aruco_time_update = omp_get_wtime() - t_aruco_update_begin;
+    }
+    else
+    {
+      aruco_time_update = 0.0;
+    }
+
+    const double t_map_gen_begin = omp_get_wtime();
+    generateVisualMapPoints(img, pg);
+    pruneVisualMap();
+    const double t_map_gen = omp_get_wtime() - t_map_gen_begin;
+
+    const double t_low_exit = omp_get_wtime();
+    const double vio_time_now = t_low_exit - t1;
+    frame_count++;
+    ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
+
+    printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
+           total_points, min_retrieve_points, t_map_gen, vio_time_now);
+
+    printf("[ VIO Time ] skip-path: retrieve=%.6f, map_gen=%.6f, aruco_detect=%.6f, aruco_update=%.6f, total=%.6f, avg=%.6f\n",
+          t_retrieve,
+           t_map_gen,
+           aruco_time_total,
+           aruco_time_update,
+           vio_time_now,
+           ave_total);
+
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m|                    VIO Time (Skip Path)                     |\033[0m\n");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t_map_gen);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", vio_time_now);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+
+    if (run_aruco_this_frame)
+    {
+      aruco_profile_frames++;
+      aruco_ave_time_total = aruco_ave_time_total * (aruco_profile_frames - 1) / aruco_profile_frames +
+                             (aruco_time_total + aruco_time_update) / aruco_profile_frames;
+
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;35m|                    Aruco Time (Skip Path)                   |\033[0m\n");
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Candidates", aruco_board_candidates);
+      printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Accepted", aruco_board_accepted);
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;35m| %-29s | %-27s |\033[0m\n", "Aruco Stage", "Time (secs)");
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "detectMarkers", aruco_time_detect_markers);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "draw_qr", aruco_time_draw);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "group+geometry gates", aruco_time_group_gate);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "estimatePoseSingleMarkers", aruco_time_pose_estimate);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "board pose PnP", aruco_time_pnp);
+      if (aruco_update_ran)
+      {
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "state update", aruco_time_update);
+      }
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Current Aruco Total", aruco_time_total + aruco_time_update);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Average Aruco Total", aruco_ave_time_total);
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    }
+
+    {
+      vector<string> lines;
+      {
+        std::ostringstream oss;
+        oss << "[ VIO ] Skip visual EKF update: low tracked points (" << total_points << " < "
+            << min_retrieve_points << "), map-gen=" << formatDouble6(t_map_gen)
+            << " s, total=" << formatDouble6(vio_time_now) << " s.";
+        lines.push_back(oss.str());
+      }
+      {
+        std::ostringstream oss;
+        oss << "[ VIO Time ] skip-path: retrieve=" << formatDouble6(t_retrieve)
+            << ", map_gen=" << formatDouble6(t_map_gen)
+            << ", aruco_detect=" << formatDouble6(aruco_time_total)
+            << ", aruco_update=" << formatDouble6(aruco_time_update)
+            << ", total=" << formatDouble6(vio_time_now)
+            << ", avg=" << formatDouble6(ave_total);
+        lines.push_back(oss.str());
+      }
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back("|                    VIO Time (Skip Path)                     |");
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Sparse Map Size", std::to_string(feat_map.size())));
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Algorithm Stage", "Time (secs)"));
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("retrieveFromVisualSparseMap", formatDouble6(t_retrieve)));
+      lines.push_back(makeTableRow("generateVisualMapPoints", formatDouble6(t_map_gen)));
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Current Total Time", formatDouble6(vio_time_now)));
+      lines.push_back(makeTableRow("Average Total Time", formatDouble6(ave_total)));
+      lines.push_back("+-------------------------------------------------------------+");
+
+      if (run_aruco_this_frame)
+      {
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back("|                    Aruco Time (Skip Path)                   |");
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back(makeTableRow("Board Candidates", std::to_string(aruco_board_candidates)));
+        lines.push_back(makeTableRow("Board Accepted", std::to_string(aruco_board_accepted)));
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back(makeTableRow("Aruco Stage", "Time (secs)"));
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back(makeTableRow("detectMarkers", formatDouble6(aruco_time_detect_markers)));
+        lines.push_back(makeTableRow("draw_qr", formatDouble6(aruco_time_draw)));
+        lines.push_back(makeTableRow("group+geometry gates", formatDouble6(aruco_time_group_gate)));
+        lines.push_back(makeTableRow("estimatePoseSingleMarkers", formatDouble6(aruco_time_pose_estimate)));
+        lines.push_back(makeTableRow("board pose PnP", formatDouble6(aruco_time_pnp)));
+        if (aruco_update_ran)
+        {
+          lines.push_back(makeTableRow("state update", formatDouble6(aruco_time_update)));
+        }
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back(makeTableRow("Current Aruco Total", formatDouble6(aruco_time_total + aruco_time_update)));
+        lines.push_back(makeTableRow("Average Aruco Total", formatDouble6(aruco_ave_time_total)));
+        lines.push_back("+-------------------------------------------------------------+");
+      }
+
+      appendTimingLogLines(lines);
+    }
+
     return;
   }
 
-  double t2 = omp_get_wtime();
-
-  computeJacobianAndUpdateEKF(img);
-  if (aruco_landmarks_en) updateStateWithBoardObservation();
+  // Keep an explicit guard to avoid accidental fall-through if skip-branch
+  // return is modified during experiments.
+  if (skip_visual_ekf) return;
 
   double t3 = omp_get_wtime();
 
   generateVisualMapPoints(img, pg);
-
+  
   double t4 = omp_get_wtime();
   
   plotTrackedPoints();
@@ -2780,7 +3235,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
   printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
   printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
@@ -2792,10 +3247,75 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
 
-  // std::string text = std::to_string(int(1 / (t7 - t1 - (t5 - t4)))) + " HZ";
-  // cv::Point2f origin;
-  // origin.x = 20;
-  // origin.y = 20;
-  // cv::putText(img_cp, text, origin, cv::FONT_HERSHEY_COMPLEX, 0.6, cv::Scalar(255, 255, 255), 1, 8, 0);
-  // cv::imwrite("/home/chunran/Desktop/raycasting/" + std::to_string(new_frame_->id_) + ".png", img_cp);
+  if (run_aruco_this_frame)
+  {
+    aruco_profile_frames++;
+    aruco_ave_time_total = aruco_ave_time_total * (aruco_profile_frames - 1) / aruco_profile_frames +
+                           (aruco_time_total + aruco_time_update) / aruco_profile_frames;
+
+    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;35m|                        Aruco Time                           |\033[0m\n");
+    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Candidates", aruco_board_candidates);
+    printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Accepted", aruco_board_accepted);
+    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;35m| %-29s | %-27s |\033[0m\n", "Aruco Stage", "Time (secs)");
+    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "detectMarkers", aruco_time_detect_markers);
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "draw_qr", aruco_time_draw);
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "group+geometry gates", aruco_time_group_gate);
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "estimatePoseSingleMarkers", aruco_time_pose_estimate);
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "board pose PnP", aruco_time_pnp);
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "state update", aruco_time_update);
+    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Current Aruco Total", aruco_time_total + aruco_time_update);
+    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Average Aruco Total", aruco_ave_time_total);
+    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+  }
+
+  {
+    vector<string> lines;
+    lines.push_back("+-------------------------------------------------------------+");
+    lines.push_back("|                         VIO Time                            |");
+    lines.push_back("+-------------------------------------------------------------+");
+    lines.push_back(makeTableRow("Sparse Map Size", std::to_string(feat_map.size())));
+    lines.push_back("+-------------------------------------------------------------+");
+    lines.push_back(makeTableRow("Algorithm Stage", "Time (secs)"));
+    lines.push_back("+-------------------------------------------------------------+");
+    lines.push_back(makeTableRow("retrieveFromVisualSparseMap", formatDouble6(t_retrieve)));
+    lines.push_back(makeTableRow("computeJacobianAndUpdateEKF", formatDouble6(t3 - t2)));
+    lines.push_back(makeTableRow("-> computeJacobian", formatDouble6(compute_jacobian_time)));
+    lines.push_back(makeTableRow("-> updateEKF", formatDouble6(update_ekf_time)));
+    lines.push_back(makeTableRow("generateVisualMapPoints", formatDouble6(t4 - t3)));
+    lines.push_back(makeTableRow("updateVisualMapPoints", formatDouble6(t6 - t5)));
+    lines.push_back(makeTableRow("updateReferencePatch", formatDouble6(t7 - t6)));
+    lines.push_back("+-------------------------------------------------------------+");
+    lines.push_back(makeTableRow("Current Total Time", formatDouble6(t7 - t1 - (t5 - t4))));
+    lines.push_back(makeTableRow("Average Total Time", formatDouble6(ave_total)));
+    lines.push_back("+-------------------------------------------------------------+");
+
+    if (run_aruco_this_frame)
+    {
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back("|                        Aruco Time                           |");
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Board Candidates", std::to_string(aruco_board_candidates)));
+      lines.push_back(makeTableRow("Board Accepted", std::to_string(aruco_board_accepted)));
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Aruco Stage", "Time (secs)"));
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("detectMarkers", formatDouble6(aruco_time_detect_markers)));
+      lines.push_back(makeTableRow("draw_qr", formatDouble6(aruco_time_draw)));
+      lines.push_back(makeTableRow("group+geometry gates", formatDouble6(aruco_time_group_gate)));
+      lines.push_back(makeTableRow("estimatePoseSingleMarkers", formatDouble6(aruco_time_pose_estimate)));
+      lines.push_back(makeTableRow("board pose PnP", formatDouble6(aruco_time_pnp)));
+      lines.push_back(makeTableRow("state update", formatDouble6(aruco_time_update)));
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Current Aruco Total", formatDouble6(aruco_time_total + aruco_time_update)));
+      lines.push_back(makeTableRow("Average Aruco Total", formatDouble6(aruco_ave_time_total)));
+      lines.push_back("+-------------------------------------------------------------+");
+    }
+
+    appendTimingLogLines(lines);
+  }
 }

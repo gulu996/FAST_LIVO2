@@ -12,6 +12,8 @@ which is included as part of this source code package.
 
 #include "LIVMapper.h"
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -75,6 +77,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("vio/visual_map_max_voxels", visual_map_max_voxels, 12000);
   nh.param<int>("vio/visual_map_max_points_per_voxel", visual_map_max_points_per_voxel, 24);
   nh.param<int>("vio/visual_map_max_total_points", visual_map_max_total_points, 180000);
+  nh.param<int>("vio/visual_map_max_add_per_frame", visual_map_max_add_per_frame_, 600);
+  nh.param<double>("vio/visual_map_min_shi_tomasi_score", visual_map_min_shi_tomasi_score_, 10.0);
   nh.param<int>("vio/grid_size", grid_size, 5);
   nh.param<int>("vio/grid_n_height", grid_n_height, 17);
   nh.param<int>("vio/patch_pyrimid_level", patch_pyrimid_level, 3);
@@ -82,8 +86,12 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("vio/outlier_threshold", outlier_threshold, 1000);
   vio_min_retrieve_points_ = 45;
   vio_min_update_meas_ = 900;
+  vio_low_track_force_update_stride_ = 0;
+  vio_low_track_force_min_points_ = 8;
   vio_max_state_update_rot_deg_ = 0.8;
   vio_max_state_update_trans_m_ = 0.08;
+  nh.param<int>("vio/low_track_force_update_stride", vio_low_track_force_update_stride_, 0);
+  nh.param<int>("vio/low_track_force_min_points", vio_low_track_force_min_points_, 8);
 
   nh.param<double>("time_offset/exposure_time_init", exposure_time_init, 0.0);
   nh.param<double>("time_offset/img_time_offset", img_time_offset, 0.0);
@@ -250,6 +258,8 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->min_retrieve_points = vio_min_retrieve_points_;
   vio_manager->min_update_meas = vio_min_update_meas_;
+  vio_manager->low_track_force_update_stride = vio_low_track_force_update_stride_;
+  vio_manager->low_track_force_min_points = vio_low_track_force_min_points_;
   vio_manager->max_state_update_rot_deg = vio_max_state_update_rot_deg_;
   vio_manager->max_state_update_trans_m = vio_max_state_update_trans_m_;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
@@ -257,8 +267,11 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->visual_map_max_voxels = visual_map_max_voxels;
   vio_manager->visual_map_max_points_per_voxel = visual_map_max_points_per_voxel;
   vio_manager->visual_map_max_total_points = visual_map_max_total_points;
+  vio_manager->visual_map_max_add_per_frame = visual_map_max_add_per_frame_;
+  vio_manager->visual_map_min_shi_tomasi_score = static_cast<float>(visual_map_min_shi_tomasi_score_);
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->aruco_landmarks_en = aruco_landmarks_en;
+  vio_manager->timing_log_dir = save_path;
   vio_manager->initializeVIO(nh);
 
   p_imu->set_extrinsic(extT, extR);
@@ -380,13 +393,28 @@ void LIVMapper::processImu()
 
 void LIVMapper::stateEstimationAndMapping() 
 {
+  static int vio_dispatch_count = 0;
+  static int lio_dispatch_count = 0;
+
   switch (LidarMeasures.lio_vio_flg) 
   {
     case VIO:
+      vio_dispatch_count++;
+      if (vio_dispatch_count % 20 == 1)
+      {
+        std::cout << "[ Flow ] Dispatch VIO frame #" << vio_dispatch_count
+                  << " (LIO dispatched=" << lio_dispatch_count << ")" << std::endl;
+      }
       handleVIO();
       break;
     case LIO:
     case LO:
+      lio_dispatch_count++;
+      if (lio_dispatch_count % 50 == 1)
+      {
+        std::cout << "[ Flow ] Dispatch LIO/LO frame #" << lio_dispatch_count
+                  << " (VIO dispatched=" << vio_dispatch_count << ")" << std::endl;
+      }
       handleLIO();
       break;
   }
@@ -420,6 +448,19 @@ void LIVMapper::handleVIO()
   const bool use_visual_frame = shouldSelectVisualFrame();
   if (!use_visual_frame)
   {
+    static int adaptive_skip_count = 0;
+    adaptive_skip_count++;
+    if (adaptive_skip_count % 10 == 1)
+    {
+      std::cout << "[ VIO ] Skip by selector: reason=" << last_selector_reason_
+                << ", count=" << adaptive_skip_count
+                << ", delta(t/r)=" << last_selector_trans_delta_ << "m/" << last_selector_rot_delta_deg_ << "deg"
+                << ", thresh(t/r)=" << last_selector_trans_thresh_ << "m/" << last_selector_rot_thresh_deg_ << "deg"
+                << ", ratio=" << last_selector_constraint_ratio_
+                << ", skip=" << skipped_visual_frames_ << "/" << keyframe_max_skip_frames_
+                << std::endl;
+    }
+
     if (imu_prop_enable)
     {
       ekf_finish_once = true;
@@ -472,11 +513,28 @@ void LIVMapper::handleVIO()
 
 bool LIVMapper::shouldSelectVisualFrame()
 {
-  if (!adaptive_visual_selector_en) return true;
-  if (!img_en) return false;
+  last_selector_constraint_ratio_ = 0.0;
+  last_selector_trans_thresh_ = 0.0;
+  last_selector_rot_thresh_deg_ = 0.0;
+  last_selector_trans_delta_ = 0.0;
+  last_selector_rot_delta_deg_ = 0.0;
+  last_selector_reach_pose_keyframe_ = false;
+  last_selector_reach_skip_limit_ = false;
+
+  if (!adaptive_visual_selector_en)
+  {
+    last_selector_reason_ = "adaptive_off";
+    return true;
+  }
+  if (!img_en)
+  {
+    last_selector_reason_ = "img_disabled";
+    return false;
+  }
 
   if (voxelmap_manager->isLidarDegenerated())
   {
+    last_selector_reason_ = "lidar_degenerated_force";
     skipped_visual_frames_ = 0;
     has_last_visual_keyframe_state_ = true;
     last_visual_keyframe_state_ = _state;
@@ -485,6 +543,7 @@ bool LIVMapper::shouldSelectVisualFrame()
 
   if (!has_last_visual_keyframe_state_)
   {
+    last_selector_reason_ = "first_visual_keyframe";
     has_last_visual_keyframe_state_ = true;
     last_visual_keyframe_state_ = _state;
     skipped_visual_frames_ = 0;
@@ -505,13 +564,23 @@ bool LIVMapper::shouldSelectVisualFrame()
   const bool reach_pose_keyframe = (trans_delta >= trans_thresh) || (rot_delta_deg >= rot_thresh_deg);
   const bool reach_skip_limit = skipped_visual_frames_ >= keyframe_max_skip_frames_;
 
+  last_selector_constraint_ratio_ = constraint_ratio;
+  last_selector_trans_thresh_ = trans_thresh;
+  last_selector_rot_thresh_deg_ = rot_thresh_deg;
+  last_selector_trans_delta_ = trans_delta;
+  last_selector_rot_delta_deg_ = rot_delta_deg;
+  last_selector_reach_pose_keyframe_ = reach_pose_keyframe;
+  last_selector_reach_skip_limit_ = reach_skip_limit;
+
   if (reach_pose_keyframe || reach_skip_limit)
   {
+    last_selector_reason_ = reach_pose_keyframe ? "pose_keyframe" : "max_skip";
     last_visual_keyframe_state_ = _state;
     skipped_visual_frames_ = 0;
     return true;
   }
 
+  last_selector_reason_ = "below_threshold";
   skipped_visual_frames_++;
   return false;
 }
@@ -773,6 +842,21 @@ void LIVMapper::print_landmarks()
 
 void LIVMapper::run() 
 {
+  auto formatDouble6 = [](double value)
+  {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6) << value;
+    return oss.str();
+  };
+
+  auto makeTableRow = [](const std::string &left, const std::string &right)
+  {
+    std::ostringstream oss;
+    oss << "| " << std::left << std::setw(29) << left
+        << " | " << std::left << std::setw(27) << right << " |";
+    return oss.str();
+  };
+
   ros::Rate rate(5000);
   int i = 0;
   double sum = 0, t = 0;
@@ -794,10 +878,23 @@ void LIVMapper::run()
     stateEstimationAndMapping();
 
     double t2 = omp_get_wtime();
-    updateRuntimeGuard(t2 - t1);
+    const double frame_time = t2 - t1;
+    updateRuntimeGuard(frame_time);
+
+    if (vio_manager)
+    {
+      std::vector<std::string> lines;
+      std::ostringstream line;
+      line << "[ Frame ] idx=" << (i + 1)
+           << ", current=" << formatDouble6(frame_time)
+           << " s, budget=0.100000 s, over_budget="
+           << ((frame_time > 0.1) ? "YES" : "NO");
+      lines.push_back(line.str());
+      vio_manager->appendTimingLogLines(lines);
+    }
 
     i ++;
-    t = t + t2 - t1;
+    t += frame_time;
     if (i % 2 == 0)
     {
       sum += t;
@@ -806,6 +903,21 @@ void LIVMapper::run()
       printf("\033[1;95m| %-29s | %-27f |\033[0m\n", "Current frame time", t);
       printf("\033[1;95m| %-29s | %-27f |\033[0m\n", "Average frame time", sum / (i/2));
       printf("\033[1;45m+-------------------------------------------------------------+\033[0m\n");
+
+      if (vio_manager)
+      {
+        std::vector<std::string> lines;
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back("|                         Frame Time                          |");
+        lines.push_back("+-------------------------------------------------------------+");
+        lines.push_back(makeTableRow("Frame number", std::to_string(i / 2)));
+        lines.push_back(makeTableRow("Current frame time", formatDouble6(t)));
+        lines.push_back(makeTableRow("Average frame time", formatDouble6(sum / (i / 2))));
+        lines.push_back(makeTableRow("Over 0.1s", (t > 0.1) ? "YES" : "NO"));
+        lines.push_back("+-------------------------------------------------------------+");
+        vio_manager->appendTimingLogLines(lines);
+      }
+
       t = 0;
     }
   }

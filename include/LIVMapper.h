@@ -117,6 +117,8 @@ public:
   int visual_map_max_voxels = 12000;
   int visual_map_max_points_per_voxel = 24;
   int visual_map_max_total_points = 180000;
+  int visual_map_max_add_per_frame_ = 600;
+  double visual_map_min_shi_tomasi_score_ = 10.0;
   int pcd_cache_max_points = 300000;
   double exposure_time_init = 0.0;
   bool inverse_composition_en = false;
@@ -127,6 +129,8 @@ public:
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
   int vio_min_retrieve_points_ = 45;
   int vio_min_update_meas_ = 900;
+  int vio_low_track_force_update_stride_ = 0;
+  int vio_low_track_force_min_points_ = 8;
   double outlier_threshold;
   double vio_max_state_update_rot_deg_ = 0.8;
   double vio_max_state_update_trans_m_ = 0.08;
@@ -229,6 +233,14 @@ public:
   int skipped_visual_frames_ = 0;
   bool has_last_visual_keyframe_state_ = false;
   StatesGroup last_visual_keyframe_state_;
+  std::string last_selector_reason_ = "init";
+  double last_selector_constraint_ratio_ = 0.0;
+  double last_selector_trans_thresh_ = 0.0;
+  double last_selector_rot_thresh_deg_ = 0.0;
+  double last_selector_trans_delta_ = 0.0;
+  double last_selector_rot_delta_deg_ = 0.0;
+  bool last_selector_reach_pose_keyframe_ = false;
+  bool last_selector_reach_skip_limit_ = false;
 
   int sub_lidar_queue_size_ = 128;
   int sub_imu_queue_size_ = 512;
