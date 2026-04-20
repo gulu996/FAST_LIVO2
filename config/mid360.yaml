@@ -96,7 +96,7 @@ adaptive_selector:
 
 runtime_guard:
   enable: true # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复
-  frame_time_budget_s: 0.08 # 预算每帧处理时间不超过80ms
+  frame_time_budget_s: 0.06 # 预算每帧处理时间不超过多少ms
 
 uav:
   imu_rate_odom: false
@@ -121,8 +121,8 @@ evo:
   pose_output_en: false
 
 pcd_save:
-  pcd_save_en: true # 实时优先：默认关闭PCD落盘
-  save_log_en: false # 实时优先：默认关闭耗时日志写盘
+  pcd_save_en: true 
+  save_log_en: true # 日志写盘
   save_path: "/home/jetson/data"
   global_map_pub: true   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
