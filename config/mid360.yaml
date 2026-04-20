@@ -71,6 +71,7 @@ imu:
 
 lio:
   max_iterations: 3
+  map_update_stride: 2 # 仅每2帧更新一次地图体素，优先实时定位（可降建图细节）
   icp_min_iterations: 1 # ICP最小迭代次数：至少做1次
   icp_early_stop_residual_ratio: 0.03 # 残差相对改善低于该阈值且已收敛时提前停止
   icp_max_rot_step_deg: 1.2 # ICP单次旋转更新上限（度），抑制异常匹配导致姿态突跳
@@ -95,6 +96,7 @@ adaptive_selector:
 
 runtime_guard:
   enable: true # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复
+  frame_time_budget_s: 0.08 # 预算每帧处理时间不超过80ms
 
 uav:
   imu_rate_odom: false
@@ -105,16 +107,24 @@ publish:
   pub_effect_point_en: false 
   pub_plane_en: false
   pub_scan_num: 1
+  publish_img_stride: 2 # 图像可视化降频
   blind_rgb_points: 0.0
+
+debug:
+  print_console_timing_en: true # 终端耗时表输出
+  print_console_timing_stride: 1
+  vio_console_timing_print_en: true
+  vio_console_timing_print_stride: 1
 
 evo:
   seq_name: "CBD_Building_01"
   pose_output_en: false
 
 pcd_save:
-  pcd_save_en: true
-  save_path: "/home/gulu/data"
-  global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
+  pcd_save_en: true # 实时优先：默认关闭PCD落盘
+  save_log_en: false # 实时优先：默认关闭耗时日志写盘
+  save_path: "/home/jetson/data"
+  global_map_pub: true   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05
   max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
@@ -123,7 +133,7 @@ pcd_save:
   # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
 
 aruco_landmarks:
-  aruco_landmarks_en: true
+  aruco_landmarks_en: false
   width: 0.8
   height: 0.6
   marker_size: 0.16

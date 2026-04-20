@@ -89,8 +89,11 @@ public:
   double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 
   bool lidar_map_inited = false, pcd_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false, hilti_en = false;
+  bool save_log_en = true;
   int pcd_save_interval = -1, pcd_index = 0;
   int pub_scan_num = 1;
+  int pub_scan_num_nominal_ = 1;
+  int pub_scan_num_degraded_ = 4;
   string save_path;
 
   StatesGroup imu_propagate, latest_ekf_state;
@@ -110,6 +113,17 @@ public:
 
   bool lidar_pushed = false, imu_en, gravity_est_en, flg_reset = false, ba_bg_est_en = true;
   bool dense_map_en = false;
+  bool dense_map_en_nominal_ = false;
+  bool pcd_save_en_nominal_ = false;
+  bool colorize_cloud_en_ = true;
+  bool colorize_cloud_en_nominal_ = true;
+  int publish_img_stride_ = 1;
+  int publish_img_counter_ = 0;
+  int lio_map_update_stride_ = 1;
+  int lio_map_update_counter_ = 0;
+  bool print_console_timing_en_ = true;
+  int print_console_timing_stride_ = 1;
+  bool suppress_image_pub_ = false;
   int img_en = 1, imu_int_frame = 3;
   bool normal_en = true;
   bool exposure_estimate_en = false;
@@ -223,9 +237,13 @@ public:
   int runtime_recover_trigger_frames_ = 8;
   int vio_max_iterations_nominal_ = 5;
   int vio_max_iterations_degraded_ = 2;
-  double keyframe_trans_scale_degraded_ = 1.6;
-  double keyframe_rot_scale_degraded_ = 1.6;
-  int keyframe_max_skip_frames_degraded_ = 6;
+  double keyframe_trans_scale_degraded_ = 1.8;
+  double keyframe_rot_scale_degraded_ = 1.8;
+  int keyframe_max_skip_frames_degraded_ = 8;
+  bool disable_dense_map_in_degraded_ = true;
+  bool disable_pcd_save_in_degraded_ = true;
+  bool disable_colorize_cloud_in_degraded_ = false;
+  bool disable_image_publish_in_degraded_ = true;
   int runtime_over_budget_count_ = 0;
   int runtime_under_budget_count_ = 0;
   bool runtime_degraded_mode_ = false;

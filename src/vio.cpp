@@ -209,6 +209,10 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
   height = cam->height();
   image_resize_factor = cam->scale();
 
+  nh.param<bool>("debug/vio_console_timing_print_en", console_timing_print_en, true);
+  nh.param<int>("debug/vio_console_timing_print_stride", console_timing_print_stride, 1);
+  console_timing_print_stride = std::max(1, console_timing_print_stride);
+
   printf("width: %d, height: %d, scale: %f\n", width, height, image_resize_factor);
   Rci = Rcl * Rli;
   Pci = Rcl * Pli + Pcl;
@@ -1099,7 +1103,10 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
   // cout<<"depthcontinuous: C1 "<<t_2<<" C2 "<<t_3<<" C3 "<<t_4<<" C4
   // "<<t_5<<endl;
-  printf("[ VIO ] Retrieve %d points from visual sparse map\n", total_points);
+  if (console_timing_print_en && (frame_count % std::max(1, console_timing_print_stride) == 0))
+  {
+    printf("[ VIO ] Retrieve %d points from visual sparse map\n", total_points);
+  }
 }
 
 void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
@@ -1270,8 +1277,11 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
   // double t_b2 = omp_get_wtime() - t0;
 
-  printf("[ VIO ] Append %d new visual map points (cap=%d, score>=%.1f)\n",
-         add, max_add_this_frame, min_corner_score);
+  if (console_timing_print_en && (frame_count % std::max(1, console_timing_print_stride) == 0))
+  {
+    printf("[ VIO ] Append %d new visual map points (cap=%d, score>=%.1f)\n",
+           add, max_add_this_frame, min_corner_score);
+  }
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
   // printf("B2. : %.6lf \n", t_b2);
@@ -1335,7 +1345,10 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
       pt->addFrameRef(ftr_new);
     }
   }
-  printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  if (console_timing_print_en && (frame_count % std::max(1, console_timing_print_stride) == 0))
+  {
+    printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  }
 }
 
 void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
@@ -3018,6 +3031,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       total_points >= low_track_force_min_points &&
       (frame_count % low_track_force_update_stride == 0);
   const bool skip_visual_ekf = (total_points < min_retrieve_points) && !low_track_force_update;
+    const bool print_console =
+      console_timing_print_en &&
+      ((frame_count % std::max(1, console_timing_print_stride)) == 0);
   double t2 = omp_get_wtime();
 
   if (!skip_visual_ekf)
@@ -3065,30 +3081,33 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     frame_count++;
     ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
 
-    printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
-           total_points, min_retrieve_points, t_map_gen, vio_time_now);
+        if (print_console)
+        {
+          printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
+            total_points, min_retrieve_points, t_map_gen, vio_time_now);
 
-    printf("[ VIO Time ] skip-path: retrieve=%.6f, map_gen=%.6f, aruco_detect=%.6f, aruco_update=%.6f, total=%.6f, avg=%.6f\n",
-          t_retrieve,
-           t_map_gen,
-           aruco_time_total,
-           aruco_time_update,
-           vio_time_now,
-           ave_total);
+          printf("[ VIO Time ] skip-path: retrieve=%.6f, map_gen=%.6f, aruco_detect=%.6f, aruco_update=%.6f, total=%.6f, avg=%.6f\n",
+            t_retrieve,
+            t_map_gen,
+            aruco_time_total,
+            aruco_time_update,
+            vio_time_now,
+            ave_total);
 
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m|                    VIO Time (Skip Path)                     |\033[0m\n");
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t_map_gen);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", vio_time_now);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+          printf("\033[1;34m|                    VIO Time (Skip Path)                     |\033[0m\n");
+          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+          printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+          printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
+          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t_map_gen);
+          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", vio_time_now);
+          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+        }
 
     if (run_aruco_this_frame)
     {
@@ -3096,27 +3115,30 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       aruco_ave_time_total = aruco_ave_time_total * (aruco_profile_frames - 1) / aruco_profile_frames +
                              (aruco_time_total + aruco_time_update) / aruco_profile_frames;
 
-      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-      printf("\033[1;35m|                    Aruco Time (Skip Path)                   |\033[0m\n");
-      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-      printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Candidates", aruco_board_candidates);
-      printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Accepted", aruco_board_accepted);
-      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-      printf("\033[1;35m| %-29s | %-27s |\033[0m\n", "Aruco Stage", "Time (secs)");
-      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "detectMarkers", aruco_time_detect_markers);
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "draw_qr", aruco_time_draw);
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "group+geometry gates", aruco_time_group_gate);
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "estimatePoseSingleMarkers", aruco_time_pose_estimate);
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "board pose PnP", aruco_time_pnp);
-      if (aruco_update_ran)
+      if (print_console)
       {
-        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "state update", aruco_time_update);
+        printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+        printf("\033[1;35m|                    Aruco Time (Skip Path)                   |\033[0m\n");
+        printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+        printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Candidates", aruco_board_candidates);
+        printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Accepted", aruco_board_accepted);
+        printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+        printf("\033[1;35m| %-29s | %-27s |\033[0m\n", "Aruco Stage", "Time (secs)");
+        printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "detectMarkers", aruco_time_detect_markers);
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "draw_qr", aruco_time_draw);
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "group+geometry gates", aruco_time_group_gate);
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "estimatePoseSingleMarkers", aruco_time_pose_estimate);
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "board pose PnP", aruco_time_pnp);
+        if (aruco_update_ran)
+        {
+          printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "state update", aruco_time_update);
+        }
+        printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Current Aruco Total", aruco_time_total + aruco_time_update);
+        printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Average Aruco Total", aruco_ave_time_total);
+        printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
       }
-      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Current Aruco Total", aruco_time_total + aruco_time_update);
-      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Average Aruco Total", aruco_ave_time_total);
-      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
     }
 
     {
@@ -3228,24 +3250,27 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cout << BLUE << "ave_build_residual_time: " << ave_build_residual_time << RESET << endl;
   // cout << BLUE << "ave_ekf_time: " << ave_ekf_time << RESET << endl;
   
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
-  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
-  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  if (print_console)
+  {
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  }
 
   if (run_aruco_this_frame)
   {
@@ -3253,24 +3278,27 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     aruco_ave_time_total = aruco_ave_time_total * (aruco_profile_frames - 1) / aruco_profile_frames +
                            (aruco_time_total + aruco_time_update) / aruco_profile_frames;
 
-    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;35m|                        Aruco Time                           |\033[0m\n");
-    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Candidates", aruco_board_candidates);
-    printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Accepted", aruco_board_accepted);
-    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;35m| %-29s | %-27s |\033[0m\n", "Aruco Stage", "Time (secs)");
-    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "detectMarkers", aruco_time_detect_markers);
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "draw_qr", aruco_time_draw);
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "group+geometry gates", aruco_time_group_gate);
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "estimatePoseSingleMarkers", aruco_time_pose_estimate);
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "board pose PnP", aruco_time_pnp);
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "state update", aruco_time_update);
-    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Current Aruco Total", aruco_time_total + aruco_time_update);
-    printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Average Aruco Total", aruco_ave_time_total);
-    printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    if (print_console)
+    {
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;35m|                        Aruco Time                           |\033[0m\n");
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Candidates", aruco_board_candidates);
+      printf("\033[1;35m| %-29s | %-27d |\033[0m\n", "Board Accepted", aruco_board_accepted);
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;35m| %-29s | %-27s |\033[0m\n", "Aruco Stage", "Time (secs)");
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "detectMarkers", aruco_time_detect_markers);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "draw_qr", aruco_time_draw);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "group+geometry gates", aruco_time_group_gate);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "estimatePoseSingleMarkers", aruco_time_pose_estimate);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "board pose PnP", aruco_time_pnp);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "state update", aruco_time_update);
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Current Aruco Total", aruco_time_total + aruco_time_update);
+      printf("\033[1;36m| %-29s | %-27lf |\033[0m\n", "Average Aruco Total", aruco_ave_time_total);
+      printf("\033[1;35m+-------------------------------------------------------------+\033[0m\n");
+    }
   }
 
   {

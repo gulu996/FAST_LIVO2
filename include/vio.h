@@ -185,6 +185,8 @@ public:
   int visual_map_max_add_per_frame = 600;
   float visual_map_min_shi_tomasi_score = 10.0f;
   double visual_voxel_size = 0.5;
+  bool console_timing_print_en = true;
+  int console_timing_print_stride = 1;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
