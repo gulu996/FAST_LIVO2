@@ -174,7 +174,13 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   colorize_cloud_en_nominal_ = colorize_cloud_en_;
 
   nh.param<bool>("runtime_guard/enable", runtime_guard_en_, true);
-  nh.param<double>("runtime_guard/frame_time_budget_s", frame_time_budget_s_, 0.1);
+  nh.param<double>("runtime_guard/frame_time_budget_s", frame_time_budget_s_, frame_time_budget_s_);
+  if (frame_time_budget_s_ <= 0.0)
+  {
+    ROS_WARN("[RuntimeGuard] Invalid frame_time_budget_s=%.6f, fallback to 0.100000 s", frame_time_budget_s_);
+    frame_time_budget_s_ = 0.1;
+  }
+  ROS_INFO("[RuntimeGuard] enable=%d, frame_time_budget_s=%.6f s", static_cast<int>(runtime_guard_en_), frame_time_budget_s_);
 
   pub_scan_num_degraded_ = std::max(1, pub_scan_num_degraded_);
   runtime_over_budget_trigger_frames_ = std::max(1, runtime_over_budget_trigger_frames_);
@@ -842,7 +848,7 @@ void LIVMapper::handleLIO()
     lines.push_back("+-------------------------------------------------------------+");
     lines.push_back(makeTableRow("Current Total Time", formatDouble6(lio_total_time)));
     lines.push_back(makeTableRow("Average Total Time", formatDouble6(aver_time_consu)));
-    lines.push_back(makeTableRow("Over 0.1s", (lio_total_time > 0.1) ? "YES" : "NO"));
+    lines.push_back(makeTableRow("Budget (s)", formatDouble6(frame_time_budget_s_)));
     lines.push_back("+-------------------------------------------------------------+");
     vio_manager->appendTimingLogLines(lines);
   }
@@ -1010,8 +1016,7 @@ void LIVMapper::run()
       line << "[ Frame ] idx=" << (i + 1)
            << ", mode=" << mode_str
            << ", current=" << formatDouble6(frame_time)
-           << " s, budget=0.100000 s, over_budget="
-           << ((frame_time > 0.1) ? "YES" : "NO");
+           << " s, budget=" << formatDouble6(frame_time_budget_s_);
       lines.push_back(line.str());
 
       std::ostringstream line_cost;
@@ -1050,7 +1055,7 @@ void LIVMapper::run()
         lines.push_back(makeTableRow("Frame number", std::to_string(i / 2)));
         lines.push_back(makeTableRow("Current frame time", formatDouble6(t)));
         lines.push_back(makeTableRow("Average frame time", formatDouble6(sum / (i / 2))));
-        lines.push_back(makeTableRow("Over 0.1s", (t > 0.1) ? "YES" : "NO"));
+        lines.push_back(makeTableRow("Budget (s)", formatDouble6(frame_time_budget_s_)));
         lines.push_back("+-------------------------------------------------------------+");
         vio_manager->appendTimingLogLines(lines);
       }
