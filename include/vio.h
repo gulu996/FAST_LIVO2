@@ -176,6 +176,15 @@ public:
   int low_track_force_min_points = 8;
 
   double img_point_cov, outlier_threshold, ncc_thre;
+  bool image_quality_gate_en = false;
+  double image_quality_max_saturated_fraction = 0.20;
+  double image_quality_max_tile_saturated_fraction = 0.35;
+  double image_quality_max_dark_fraction = 0.98;
+  double image_quality_min_intensity_std = 6.0;
+  int image_quality_saturated_pixel_value = 250;
+  int image_quality_dark_pixel_value = 5;
+  int image_quality_tile_rows = 4;
+  int image_quality_tile_cols = 4;
   double max_state_update_rot_deg = 0.8;
   double max_state_update_trans_m = 0.08;
   bool visual_map_prune_en = true;

@@ -3001,6 +3001,96 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
+
+  const double t_quality_begin = omp_get_wtime();
+  bool image_quality_reject = false;
+  double saturated_fraction = 0.0;
+  double max_tile_saturated_fraction = 0.0;
+  double dark_fraction = 0.0;
+  double intensity_std = 0.0;
+  if (image_quality_gate_en && !img.empty())
+  {
+    cv::Mat mean, stddev;
+    cv::meanStdDev(img, mean, stddev);
+    intensity_std = stddev.at<double>(0, 0);
+
+    cv::Mat saturated_mask, dark_mask;
+    const int sat_threshold = std::min(255, std::max(0, image_quality_saturated_pixel_value));
+    const int dark_threshold = std::min(255, std::max(0, image_quality_dark_pixel_value));
+    cv::compare(img, sat_threshold, saturated_mask, cv::CMP_GE);
+    cv::compare(img, dark_threshold, dark_mask, cv::CMP_LE);
+
+    const double pixel_count = static_cast<double>(img.rows) * static_cast<double>(img.cols);
+    if (pixel_count > 0.0)
+    {
+      saturated_fraction = static_cast<double>(cv::countNonZero(saturated_mask)) / pixel_count;
+      dark_fraction = static_cast<double>(cv::countNonZero(dark_mask)) / pixel_count;
+    }
+
+    const int tile_rows = std::max(1, image_quality_tile_rows);
+    const int tile_cols = std::max(1, image_quality_tile_cols);
+    for (int tile_r = 0; tile_r < tile_rows; ++tile_r)
+    {
+      const int y0 = tile_r * img.rows / tile_rows;
+      const int y1 = (tile_r + 1) * img.rows / tile_rows;
+      if (y1 <= y0) continue;
+      for (int tile_c = 0; tile_c < tile_cols; ++tile_c)
+      {
+        const int x0 = tile_c * img.cols / tile_cols;
+        const int x1 = (tile_c + 1) * img.cols / tile_cols;
+        if (x1 <= x0) continue;
+
+        const cv::Rect tile_roi(x0, y0, x1 - x0, y1 - y0);
+        const double tile_pixel_count = static_cast<double>(tile_roi.width) * static_cast<double>(tile_roi.height);
+        const double tile_saturated_fraction =
+            tile_pixel_count > 0.0 ? static_cast<double>(cv::countNonZero(saturated_mask(tile_roi))) / tile_pixel_count : 0.0;
+        max_tile_saturated_fraction = std::max(max_tile_saturated_fraction, tile_saturated_fraction);
+      }
+    }
+
+    image_quality_reject =
+        (saturated_fraction > image_quality_max_saturated_fraction) ||
+        (max_tile_saturated_fraction > image_quality_max_tile_saturated_fraction) ||
+        (dark_fraction > image_quality_max_dark_fraction) ||
+        (intensity_std < image_quality_min_intensity_std);
+  }
+
+  if (image_quality_reject)
+  {
+    resetGrid();
+    current_board_observations_.clear();
+    aruco_time_detect_markers = 0.0;
+    aruco_time_draw = 0.0;
+    aruco_time_group_gate = 0.0;
+    aruco_time_pose_estimate = 0.0;
+    aruco_time_pnp = 0.0;
+    aruco_time_total = 0.0;
+    aruco_time_update = 0.0;
+    aruco_board_candidates = 0;
+    aruco_board_accepted = 0;
+
+    const double vio_time_now = omp_get_wtime() - t_quality_begin;
+    frame_count++;
+    ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
+
+    const bool print_console =
+        console_timing_print_en &&
+        ((frame_count % std::max(1, console_timing_print_stride)) == 0);
+    if (print_console)
+    {
+      printf("[ VIO ] Skip visual update: bad image quality (sat=%.3f/%.3f, tile_sat=%.3f/%.3f, dark=%.3f/%.3f, std=%.3f/%.3f), total=%.6f s.\n",
+             saturated_fraction,
+             image_quality_max_saturated_fraction,
+             max_tile_saturated_fraction,
+             image_quality_max_tile_saturated_fraction,
+             dark_fraction,
+             image_quality_max_dark_fraction,
+             intensity_std,
+             image_quality_min_intensity_std,
+             vio_time_now);
+    }
+    return;
+  }
   
   resetGrid();
 
