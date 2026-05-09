@@ -145,6 +145,15 @@ public:
   int vio_min_update_meas_ = 900;
   int vio_low_track_force_update_stride_ = 0;
   int vio_low_track_force_min_points_ = 8;
+  bool vio_image_quality_gate_en_ = false;
+  double vio_image_quality_max_saturated_fraction_ = 0.20;
+  double vio_image_quality_max_tile_saturated_fraction_ = 0.35;
+  double vio_image_quality_max_dark_fraction_ = 0.98;
+  double vio_image_quality_min_intensity_std_ = 6.0;
+  int vio_image_quality_saturated_pixel_value_ = 250;
+  int vio_image_quality_dark_pixel_value_ = 5;
+  int vio_image_quality_tile_rows_ = 4;
+  int vio_image_quality_tile_cols_ = 4;
   double outlier_threshold;
   double vio_max_state_update_rot_deg_ = 0.8;
   double vio_max_state_update_trans_m_ = 0.08;

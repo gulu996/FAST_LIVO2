@@ -92,6 +92,15 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   vio_max_state_update_trans_m_ = 0.08;
   nh.param<int>("vio/low_track_force_update_stride", vio_low_track_force_update_stride_, 0);
   nh.param<int>("vio/low_track_force_min_points", vio_low_track_force_min_points_, 8);
+  nh.param<bool>("vio/image_quality_gate_en", vio_image_quality_gate_en_, false);
+  nh.param<double>("vio/image_quality_max_saturated_fraction", vio_image_quality_max_saturated_fraction_, 0.20);
+  nh.param<double>("vio/image_quality_max_tile_saturated_fraction", vio_image_quality_max_tile_saturated_fraction_, 0.35);
+  nh.param<double>("vio/image_quality_max_dark_fraction", vio_image_quality_max_dark_fraction_, 0.98);
+  nh.param<double>("vio/image_quality_min_intensity_std", vio_image_quality_min_intensity_std_, 6.0);
+  nh.param<int>("vio/image_quality_saturated_pixel_value", vio_image_quality_saturated_pixel_value_, 250);
+  nh.param<int>("vio/image_quality_dark_pixel_value", vio_image_quality_dark_pixel_value_, 5);
+  nh.param<int>("vio/image_quality_tile_rows", vio_image_quality_tile_rows_, 4);
+  nh.param<int>("vio/image_quality_tile_cols", vio_image_quality_tile_cols_, 4);
 
   nh.param<double>("time_offset/exposure_time_init", exposure_time_init, 0.0);
   nh.param<double>("time_offset/img_time_offset", img_time_offset, 0.0);
@@ -309,6 +318,15 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->min_update_meas = vio_min_update_meas_;
   vio_manager->low_track_force_update_stride = vio_low_track_force_update_stride_;
   vio_manager->low_track_force_min_points = vio_low_track_force_min_points_;
+  vio_manager->image_quality_gate_en = vio_image_quality_gate_en_;
+  vio_manager->image_quality_max_saturated_fraction = vio_image_quality_max_saturated_fraction_;
+  vio_manager->image_quality_max_tile_saturated_fraction = vio_image_quality_max_tile_saturated_fraction_;
+  vio_manager->image_quality_max_dark_fraction = vio_image_quality_max_dark_fraction_;
+  vio_manager->image_quality_min_intensity_std = vio_image_quality_min_intensity_std_;
+  vio_manager->image_quality_saturated_pixel_value = vio_image_quality_saturated_pixel_value_;
+  vio_manager->image_quality_dark_pixel_value = vio_image_quality_dark_pixel_value_;
+  vio_manager->image_quality_tile_rows = vio_image_quality_tile_rows_;
+  vio_manager->image_quality_tile_cols = vio_image_quality_tile_cols_;
   vio_manager->max_state_update_rot_deg = vio_max_state_update_rot_deg_;
   vio_manager->max_state_update_trans_m = vio_max_state_update_trans_m_;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
