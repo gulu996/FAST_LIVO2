@@ -50,6 +50,55 @@ std::string makeTableRow(const std::string &left, const std::string &right)
       << " | " << std::left << std::setw(27) << right << " |";
   return oss.str();
 }
+
+bool voxelLocationLess(const VOXEL_LOCATION &a, const VOXEL_LOCATION &b)
+{
+  if (a.x != b.x) return a.x < b.x;
+  if (a.y != b.y) return a.y < b.y;
+  return a.z < b.z;
+}
+
+bool pointLessLexicographic(const V3D &a, const V3D &b)
+{
+  constexpr double eps = 1e-9;
+  if (std::fabs(a[0] - b[0]) > eps) return a[0] < b[0];
+  if (std::fabs(a[1] - b[1]) > eps) return a[1] < b[1];
+  return a[2] < b[2] - eps;
+}
+
+bool shouldReplaceGridPoint(double candidate_score, const V3D &candidate_point, double current_score, const V3D &current_point)
+{
+  constexpr double eps = 1e-6;
+  if (candidate_score > current_score + eps) return true;
+  if (std::fabs(candidate_score - current_score) <= eps) return pointLessLexicographic(candidate_point, current_point);
+  return false;
+}
+
+bool isPatchPhotometricallyUsable(const float *patch, int patch_size, int saturation_threshold,
+                                  double max_saturated_fraction, double min_intensity_std)
+{
+  if (patch == nullptr || patch_size <= 0) return false;
+
+  double sum = 0.0;
+  double sum_sq = 0.0;
+  int saturated = 0;
+  for (int i = 0; i < patch_size; ++i)
+  {
+    const double value = patch[i];
+    if (!std::isfinite(value)) return false;
+    sum += value;
+    sum_sq += value * value;
+    if (value >= saturation_threshold) ++saturated;
+  }
+
+  const double count = static_cast<double>(patch_size);
+  const double saturated_fraction = static_cast<double>(saturated) / count;
+  const double mean = sum / count;
+  const double variance = std::max(0.0, sum_sq / count - mean * mean);
+  const double stddev = std::sqrt(variance);
+
+  return saturated_fraction <= max_saturated_fraction && stddev >= min_intensity_std;
+}
 }
 
 VIOManager::VIOManager()
@@ -545,7 +594,8 @@ void VIOManager::pruneVisualMap()
   std::sort(ordered_voxels.begin(), ordered_voxels.end(),
             [](const std::pair<double, VOXEL_LOCATION> &a, const std::pair<double, VOXEL_LOCATION> &b)
             {
-              return a.first > b.first;
+              if (std::fabs(a.first - b.first) > 1e-9) return a.first > b.first;
+              return voxelLocationLess(a.second, b.second);
             });
 
   for (const auto &item : ordered_voxels)
@@ -761,10 +811,13 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
   // double t1 = omp_get_wtime();
   vector<VOXEL_LOCATION> DeleteKeyList;
+  vector<VOXEL_LOCATION> ordered_sub_keys;
+  ordered_sub_keys.reserve(sub_feat_map.size());
+  for (const auto &iter : sub_feat_map) ordered_sub_keys.push_back(iter.first);
+  std::sort(ordered_sub_keys.begin(), ordered_sub_keys.end(), voxelLocationLess);
 
-  for (auto &iter : sub_feat_map)
+  for (const auto &position : ordered_sub_keys)
   {
-    VOXEL_LOCATION position = iter.first;
 
     // double t4 = omp_get_wtime();
     auto corre_voxel = feat_map.find(position);
@@ -797,7 +850,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
           grid_num[index] = TYPE_MAP;
           Vector3d obs_vec(new_frame_->pos() - pt->pos_);
           float cur_dist = obs_vec.norm();
-          if (cur_dist <= map_dist[index])
+          if (retrieve_voxel_points[index] == nullptr ||
+              shouldReplaceGridPoint(-cur_dist, pt->pos_, -map_dist[index], retrieve_voxel_points[index]->pos_))
           {
             map_dist[index] = cur_dist;
             retrieve_voxel_points[index] = pt;
@@ -880,7 +934,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
               float cur_dist = obs_vec.norm();
 
-              if (cur_dist <= map_dist[index])
+              if (retrieve_voxel_points[index] == nullptr ||
+                  shouldReplaceGridPoint(-cur_dist, pt->pos_, -map_dist[index], retrieve_voxel_points[index]->pos_))
               {
                 map_dist[index] = cur_dist;
                 retrieve_voxel_points[index] = pt;
@@ -967,7 +1022,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       // t_2 += omp_get_wtime() - t_1;
 
       // t_1 = omp_get_wtime();
-      Feature *ref_ftr;
+      Feature *ref_ftr = nullptr;
       std::vector<float> patch_wrap(warp_len);
 
       int search_level;
@@ -1005,7 +1060,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
               count++;
             }
             phtometric_errors = phtometric_errors / count;
-            if (phtometric_errors < phtometric_errors_min)
+            if (phtometric_errors < phtometric_errors_min - 1e-6 ||
+                (std::fabs(phtometric_errors - phtometric_errors_min) <= 1e-6 &&
+                 (ref_ftr == nullptr || ref_patch_temp->id_ < ref_ftr->id_)))
             {
               phtometric_errors_min = phtometric_errors;
               ref_ftr = ref_patch_temp;
@@ -1067,6 +1124,18 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       }
 
       getImagePatch(img, pc, patch_buffer.data(), 0);
+
+      if (visual_patch_quality_gate_en)
+      {
+        const int sat_threshold = std::min(255, std::max(0, image_quality_saturated_pixel_value));
+        if (!isPatchPhotometricallyUsable(patch_buffer.data(), patch_size_total, sat_threshold,
+                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std) ||
+            !isPatchPhotometricallyUsable(patch_wrap.data(), patch_size_total, sat_threshold,
+                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std))
+        {
+          continue;
+        }
+      }
 
       float error = 0.0;
       for (int ind = 0; ind < patch_size_total; ind++)
@@ -1174,7 +1243,8 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
         float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
         if (!std::isfinite(cur_value)) continue;
         if (cur_value < min_corner_score) continue;
-        if (cur_value > scan_value[index])
+        if (grid_num[index] != TYPE_POINTCLOUD ||
+            shouldReplaceGridPoint(cur_value, pt, scan_value[index], append_voxel_points[index].point_w))
         {
           scan_value[index] = cur_value;
           append_voxel_points[index] = pg[i];
@@ -1205,7 +1275,8 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
         float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
         if (!std::isfinite(cur_value)) continue;
         if (cur_value < min_corner_score) continue;
-        if (cur_value > scan_value[index])
+        if (grid_num[index] != TYPE_POINTCLOUD ||
+            shouldReplaceGridPoint(cur_value, pt, scan_value[index], append_voxel_points[index].point_w))
         {
           scan_value[index] = cur_value;
           append_voxel_points[index] = visual_submap->add_from_voxel_map[j];
@@ -1249,6 +1320,16 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
       float *patch = new float[patch_size_total];
       getImagePatch(img, pc, patch, 0);
+      if (visual_patch_quality_gate_en)
+      {
+        const int sat_threshold = std::min(255, std::max(0, image_quality_saturated_pixel_value));
+        if (!isPatchPhotometricallyUsable(patch, patch_size_total, sat_threshold,
+                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std))
+        {
+          delete[] patch;
+          continue;
+        }
+      }
 
       VisualPoint *pt_new = new VisualPoint(pt);
 
@@ -1337,6 +1418,16 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
       update_flag[i] = 1;
       float *patch_temp = new float[patch_size_total];
       getImagePatch(img, pc, patch_temp, 0);
+      if (visual_patch_quality_gate_en)
+      {
+        const int sat_threshold = std::min(255, std::max(0, image_quality_saturated_pixel_value));
+        if (!isPatchPhotometricallyUsable(patch_temp, patch_size_total, sat_threshold,
+                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std))
+        {
+          delete[] patch_temp;
+          continue;
+        }
+      }
       Vector3d f = cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
       ftr_new->img_ = img;
@@ -1473,7 +1564,9 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
 
       ref_patch_temp->score_ = score;
 
-      if (score > score_max)
+      if (score > score_max + 1e-6 ||
+          (std::fabs(score - score_max) <= 1e-6 &&
+           (pt->ref_patch == nullptr || ref_patch_temp->id_ < pt->ref_patch->id_)))
       {
         score_max = score;
         pt->ref_patch = ref_patch_temp;
@@ -1964,7 +2057,7 @@ void VIOManager::updateState(cv::Mat img, int level)
   
     #ifdef MP_EN
       omp_set_num_threads(MP_PROC_NUM);
-      #pragma omp parallel for reduction(+:error, n_meas)
+      #pragma omp parallel for if(!deterministic_visual_update_en) reduction(+:error, n_meas)
     #endif
     for (int i = 0; i < total_points; i++)
     {
@@ -3126,6 +3219,15 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       ((frame_count % std::max(1, console_timing_print_stride)) == 0);
   double t2 = omp_get_wtime();
 
+  const StatesGroup state_before_visual_update = *state;
+  const MD(DIM_STATE, DIM_STATE) cov_before_visual_update = state->cov;
+  bool visual_update_rejected_by_guard = false;
+  std::string visual_update_reject_reason;
+  double visual_update_trans_m = 0.0;
+  double visual_update_rot_deg = 0.0;
+  double visual_update_backward_m = 0.0;
+  double visual_update_exposure_delta = 0.0;
+
   if (!skip_visual_ekf)
   {
     if (low_track_force_update && total_points < min_retrieve_points)
@@ -3293,6 +3395,93 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     }
 
     return;
+  }
+
+  if (visual_update_guard_en)
+  {
+    const V3D delta_pos = state->pos_end - state_before_visual_update.pos_end;
+    visual_update_trans_m = delta_pos.norm();
+    const Eigen::Matrix3d delta_rot = state_before_visual_update.rot_end.transpose() * state->rot_end;
+    visual_update_rot_deg = Eigen::AngleAxisd(delta_rot).angle() * 57.29577951308232;
+    visual_update_exposure_delta = std::fabs(state->inv_expo_time - state_before_visual_update.inv_expo_time);
+
+    const double speed = state_before_visual_update.vel_end.norm();
+    if (speed > 0.2)
+    {
+      visual_update_backward_m = std::max(0.0, -delta_pos.dot(state_before_visual_update.vel_end / speed));
+    }
+
+    const bool finite_state =
+        std::isfinite(visual_update_trans_m) &&
+        std::isfinite(visual_update_rot_deg) &&
+        std::isfinite(visual_update_backward_m) &&
+        std::isfinite(visual_update_exposure_delta) &&
+        std::isfinite(state->pos_end[0]) && std::isfinite(state->pos_end[1]) && std::isfinite(state->pos_end[2]) &&
+        std::isfinite(state->inv_expo_time) && state->inv_expo_time > 0.0;
+
+    if (!finite_state)
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "non_finite_state";
+    }
+    else if (visual_update_trans_m > std::max(0.01, visual_update_max_trans_m))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_translation";
+    }
+    else if (visual_update_rot_deg > std::max(0.1, visual_update_max_rot_deg))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_rotation";
+    }
+    else if (visual_update_backward_m > std::max(0.0, visual_update_max_backward_m))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "backward_step";
+    }
+    else if (exposure_estimate_en && visual_update_exposure_delta > std::max(0.0, visual_update_max_exposure_delta))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_exposure_change";
+    }
+
+    if (visual_update_rejected_by_guard)
+    {
+      *state = state_before_visual_update;
+      state->cov = cov_before_visual_update;
+      G.setZero();
+      updateFrameState(*state);
+
+      const double vio_time_now = omp_get_wtime() - t1;
+      frame_count++;
+      ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
+
+      if (print_console)
+      {
+        printf("[ VIO ] Reject visual update by guard (%s): dtrans=%.3f/%.3f m, drot=%.3f/%.3f deg, back=%.3f/%.3f m, dexpo=%.3f/%.3f, total=%.6f s.\n",
+               visual_update_reject_reason.c_str(),
+               visual_update_trans_m, visual_update_max_trans_m,
+               visual_update_rot_deg, visual_update_max_rot_deg,
+               visual_update_backward_m, visual_update_max_backward_m,
+               visual_update_exposure_delta, visual_update_max_exposure_delta,
+               vio_time_now);
+      }
+
+      {
+        vector<string> lines;
+        std::ostringstream oss;
+        oss << "[ VIO ] Reject visual update by guard (" << visual_update_reject_reason
+            << "): dtrans=" << formatDouble6(visual_update_trans_m) << "/" << formatDouble6(visual_update_max_trans_m)
+            << " m, drot=" << formatDouble6(visual_update_rot_deg) << "/" << formatDouble6(visual_update_max_rot_deg)
+            << " deg, back=" << formatDouble6(visual_update_backward_m) << "/" << formatDouble6(visual_update_max_backward_m)
+            << " m, dexpo=" << formatDouble6(visual_update_exposure_delta) << "/" << formatDouble6(visual_update_max_exposure_delta)
+            << ", total=" << formatDouble6(vio_time_now) << " s.";
+        lines.push_back(oss.str());
+        appendTimingLogLines(lines);
+      }
+
+      return;
+    }
   }
 
   // Keep an explicit guard to avoid accidental fall-through if skip-branch

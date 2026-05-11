@@ -51,13 +51,24 @@ vio:
   visual_map_max_total_points: 18000 # 视觉点总量硬上限
   visual_map_max_add_per_frame: 300 # 每帧最多新增视觉点
   visual_map_min_shi_tomasi_score: 6.0 # 降低角点阈值以提升低纹理场景可用点
+  min_retrieve_points: 120 # 隧道/出口场景要求更多可用视觉点；不足时只建图不做视觉EKF
+  min_update_meas: 3000 # patch残差数量下限，提高少量错误光度约束触发更新的门槛
   low_track_force_update_stride: 0 # 隧道低纹理/过曝场景禁用低跟踪点强制视觉EKF，避免少量错误光度约束拉回轨迹
   low_track_force_min_points: 8 # 触发强制更新所需的最少跟踪点；stride为0时不启用
+  deterministic_visual_update_en: true # 固定视觉更新为确定性顺序，避免多次回放同一bag因并行归约/等分选择产生不同轨迹
+  visual_update_guard_en: true # 视觉EKF总修正门限，超过则回滚到LIO/IMU预测，防止出口过曝导致突然倒退
+  visual_update_max_trans_m: 0.12 # 单帧视觉总平移修正上限；隧道中优先信任雷达/惯性
+  visual_update_max_rot_deg: 2.0 # 单帧视觉总旋转修正上限
+  visual_update_max_backward_m: 0.03 # 沿当前速度反方向的视觉修正上限，专门抑制“往后退”
+  visual_update_max_exposure_delta: 0.30 # 曝光估计单帧变化上限，避免过曝出口把曝光状态拉飞
   image_quality_gate_en: true # 图像过曝、过暗或低对比时跳过视觉更新，退回雷达/惯性约束
   image_quality_max_saturated_fraction: 0.18 # 全图过曝比例超过该值时跳过视觉；洞口后期可达70%+，会稳定触发
   image_quality_max_tile_saturated_fraction: 0.35 # 局部网格过曝比例超过该值也跳过，覆盖洞口从小变大的早期阶段
   image_quality_max_dark_fraction: 0.98 # 灰度<=阈值的像素比例超过该值认为画面近乎全黑
   image_quality_min_intensity_std: 6.0 # 灰度标准差低于该值认为低纹理/低对比，不做视觉EKF
+  visual_patch_quality_gate_en: true # 对单个视觉patch做过曝/低纹理过滤，处理出口刚出现时面积小、全图门限尚未触发的纯白区域
+  visual_patch_max_saturated_fraction: 0.10 # patch内过曝像素比例超过该值时不参与跟踪/建图
+  visual_patch_min_intensity_std: 2.0 # patch灰度标准差过低时不参与跟踪/建图，避免纯白出口和低纹理误约束
   image_quality_saturated_pixel_value: 245
   image_quality_dark_pixel_value: 5
   image_quality_tile_rows: 4
