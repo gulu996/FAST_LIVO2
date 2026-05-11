@@ -3219,6 +3219,15 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       ((frame_count % std::max(1, console_timing_print_stride)) == 0);
   double t2 = omp_get_wtime();
 
+  const StatesGroup state_before_visual_update = *state;
+  const MD(DIM_STATE, DIM_STATE) cov_before_visual_update = state->cov;
+  bool visual_update_rejected_by_guard = false;
+  std::string visual_update_reject_reason;
+  double visual_update_trans_m = 0.0;
+  double visual_update_rot_deg = 0.0;
+  double visual_update_backward_m = 0.0;
+  double visual_update_exposure_delta = 0.0;
+
   if (!skip_visual_ekf)
   {
     if (low_track_force_update && total_points < min_retrieve_points)
@@ -3386,6 +3395,93 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     }
 
     return;
+  }
+
+  if (visual_update_guard_en)
+  {
+    const V3D delta_pos = state->pos_end - state_before_visual_update.pos_end;
+    visual_update_trans_m = delta_pos.norm();
+    const Eigen::Matrix3d delta_rot = state_before_visual_update.rot_end.transpose() * state->rot_end;
+    visual_update_rot_deg = Eigen::AngleAxisd(delta_rot).angle() * 57.29577951308232;
+    visual_update_exposure_delta = std::fabs(state->inv_expo_time - state_before_visual_update.inv_expo_time);
+
+    const double speed = state_before_visual_update.vel_end.norm();
+    if (speed > 0.2)
+    {
+      visual_update_backward_m = std::max(0.0, -delta_pos.dot(state_before_visual_update.vel_end / speed));
+    }
+
+    const bool finite_state =
+        std::isfinite(visual_update_trans_m) &&
+        std::isfinite(visual_update_rot_deg) &&
+        std::isfinite(visual_update_backward_m) &&
+        std::isfinite(visual_update_exposure_delta) &&
+        std::isfinite(state->pos_end[0]) && std::isfinite(state->pos_end[1]) && std::isfinite(state->pos_end[2]) &&
+        std::isfinite(state->inv_expo_time) && state->inv_expo_time > 0.0;
+
+    if (!finite_state)
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "non_finite_state";
+    }
+    else if (visual_update_trans_m > std::max(0.01, visual_update_max_trans_m))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_translation";
+    }
+    else if (visual_update_rot_deg > std::max(0.1, visual_update_max_rot_deg))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_rotation";
+    }
+    else if (visual_update_backward_m > std::max(0.0, visual_update_max_backward_m))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "backward_step";
+    }
+    else if (exposure_estimate_en && visual_update_exposure_delta > std::max(0.0, visual_update_max_exposure_delta))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_exposure_change";
+    }
+
+    if (visual_update_rejected_by_guard)
+    {
+      *state = state_before_visual_update;
+      state->cov = cov_before_visual_update;
+      G.setZero();
+      updateFrameState(*state);
+
+      const double vio_time_now = omp_get_wtime() - t1;
+      frame_count++;
+      ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
+
+      if (print_console)
+      {
+        printf("[ VIO ] Reject visual update by guard (%s): dtrans=%.3f/%.3f m, drot=%.3f/%.3f deg, back=%.3f/%.3f m, dexpo=%.3f/%.3f, total=%.6f s.\n",
+               visual_update_reject_reason.c_str(),
+               visual_update_trans_m, visual_update_max_trans_m,
+               visual_update_rot_deg, visual_update_max_rot_deg,
+               visual_update_backward_m, visual_update_max_backward_m,
+               visual_update_exposure_delta, visual_update_max_exposure_delta,
+               vio_time_now);
+      }
+
+      {
+        vector<string> lines;
+        std::ostringstream oss;
+        oss << "[ VIO ] Reject visual update by guard (" << visual_update_reject_reason
+            << "): dtrans=" << formatDouble6(visual_update_trans_m) << "/" << formatDouble6(visual_update_max_trans_m)
+            << " m, drot=" << formatDouble6(visual_update_rot_deg) << "/" << formatDouble6(visual_update_max_rot_deg)
+            << " deg, back=" << formatDouble6(visual_update_backward_m) << "/" << formatDouble6(visual_update_max_backward_m)
+            << " m, dexpo=" << formatDouble6(visual_update_exposure_delta) << "/" << formatDouble6(visual_update_max_exposure_delta)
+            << ", total=" << formatDouble6(vio_time_now) << " s.";
+        lines.push_back(oss.str());
+        appendTimingLogLines(lines);
+      }
+
+      return;
+    }
   }
 
   // Keep an explicit guard to avoid accidental fall-through if skip-branch

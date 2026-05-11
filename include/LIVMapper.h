@@ -154,6 +154,11 @@ public:
   int vio_low_track_force_update_stride_ = 0;
   int vio_low_track_force_min_points_ = 8;
   bool vio_deterministic_visual_update_en_ = true;
+  bool vio_visual_update_guard_en_ = true;
+  double vio_visual_update_max_trans_m_ = 0.12;
+  double vio_visual_update_max_rot_deg_ = 2.0;
+  double vio_visual_update_max_backward_m_ = 0.03;
+  double vio_visual_update_max_exposure_delta_ = 0.30;
   bool vio_image_quality_gate_en_ = false;
   double vio_image_quality_max_saturated_fraction_ = 0.20;
   double vio_image_quality_max_tile_saturated_fraction_ = 0.35;

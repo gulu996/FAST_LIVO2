@@ -175,6 +175,11 @@ public:
   int low_track_force_update_stride = 0;
   int low_track_force_min_points = 8;
   bool deterministic_visual_update_en = true;
+  bool visual_update_guard_en = true;
+  double visual_update_max_trans_m = 0.12;
+  double visual_update_max_rot_deg = 2.0;
+  double visual_update_max_backward_m = 0.03;
+  double visual_update_max_exposure_delta = 0.30;
 
   double img_point_cov, outlier_threshold, ncc_thre;
   bool image_quality_gate_en = false;
