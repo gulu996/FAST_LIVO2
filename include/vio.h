@@ -174,6 +174,7 @@ public:
   int min_update_meas = 600;
   int low_track_force_update_stride = 0;
   int low_track_force_min_points = 8;
+  bool deterministic_visual_update_en = true;
 
   double img_point_cov, outlier_threshold, ncc_thre;
   bool image_quality_gate_en = false;
@@ -181,6 +182,9 @@ public:
   double image_quality_max_tile_saturated_fraction = 0.35;
   double image_quality_max_dark_fraction = 0.98;
   double image_quality_min_intensity_std = 6.0;
+  bool visual_patch_quality_gate_en = true;
+  double visual_patch_max_saturated_fraction = 0.10;
+  double visual_patch_min_intensity_std = 2.0;
   int image_quality_saturated_pixel_value = 250;
   int image_quality_dark_pixel_value = 5;
   int image_quality_tile_rows = 4;
