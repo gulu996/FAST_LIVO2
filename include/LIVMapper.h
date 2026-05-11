@@ -19,6 +19,7 @@ which is included as part of this source code package.
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 #include <nav_msgs/Path.h>
+#include <netinet/in.h>
 #include <vikit/camera_loader.h>
 
 class LIVMapper
@@ -60,6 +61,9 @@ public:
   void publish_odometry(const ros::Publisher &pubOdomAftMapped);
   void publish_mavros(const ros::Publisher &mavros_pose_publisher);
   void publish_path(const ros::Publisher pubPath);
+  void initializeUdpReporter();
+  void sendUdpMessage(const std::string &message);
+  void sendUdpPose(const Eigen::Vector3d &position);
   void readParameters(ros::NodeHandle &nh);
   template <typename T> void set_posestamp(T &out);
   template <typename T> void pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi, Eigen::Matrix<T, 3, 1> &po);
@@ -140,6 +144,10 @@ public:
   int lidar_en = 1;
   bool is_first_frame = false;
   bool aruco_landmarks_en = false;
+  bool udp_report_en = false;
+  std::string udp_target_ip_;
+  int udp_report_port_ = 0;
+  std::string udp_device_id_;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
   int vio_min_retrieve_points_ = 45;
   int vio_min_update_meas_ = 900;
@@ -226,6 +234,9 @@ public:
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
   bool global_map_pub = false;  
+  int udp_socket_fd_ = -1;
+  struct sockaddr_in udp_target_addr_ {};
+  bool udp_socket_ready_ = false;
 
   bool adaptive_visual_selector_en = true;
   double keyframe_trans_thresh_min_ = 0.08;

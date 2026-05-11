@@ -132,14 +132,20 @@ evo:
 pcd_save:
   pcd_save_en: true 
   save_log_en: true # 日志写盘
-  save_path: "/home/jetson/data"
-  global_map_pub: true   #need to set pcd_save_en true, x86上请设为false
+  save_path: "/home/gulu/data"
+  global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05
   max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
-  interval: 20
+  interval: 5
   # how many LiDAR frames saved in each pcd file;
   # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+udp_report:
+  en: false
+  device_id: "fast_livo2_001"
+  target_ip: "192.168.3.164"
+  target_port: 9000
 
 aruco_landmarks:
   aruco_landmarks_en: false

@@ -12,8 +12,56 @@ which is included as part of this source code package.
 
 #include "LIVMapper.h"
 #include <algorithm>
+#include <arpa/inet.h>
+#include <filesystem>
 #include <iomanip>
+#include <iostream>
+#include <netinet/in.h>
 #include <sstream>
+#include <sys/socket.h>
+#include <system_error>
+#include <unistd.h>
+
+namespace fs = std::filesystem;
+
+namespace
+{
+std::string formatLocalTime(const char *fmt)
+{
+  const std::time_t now = std::time(nullptr);
+  std::tm tm_now;
+  localtime_r(&now, &tm_now);
+  char buf[64] = {0};
+  std::strftime(buf, sizeof(buf), fmt, &tm_now);
+  return std::string(buf);
+}
+
+std::string currentTimeForFilename()
+{
+  return formatLocalTime("%Y-%m-%d-%H%M%S");
+}
+
+std::string ensureTrailingSlash(std::string path)
+{
+  if (!path.empty() && path.back() != '/') path += '/';
+  return path;
+}
+
+std::string makeRunOutputDir(const std::string &base_dir)
+{
+  const std::string normalized_base = ensureTrailingSlash(base_dir);
+  const std::string run_dir = normalized_base + currentTimeForFilename();
+  std::error_code ec;
+  fs::create_directories(run_dir, ec);
+  if (ec)
+  {
+    std::cerr << "[ LIVMapper ] Warning: failed to create output dir: "
+              << run_dir << " (" << ec.message() << ")" << std::endl;
+    return normalized_base;
+  }
+  return ensureTrailingSlash(run_dir);
+}
+}
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -48,7 +96,14 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   path.header.frame_id = "camera_init";
 }
 
-LIVMapper::~LIVMapper() {}
+LIVMapper::~LIVMapper()
+{
+  if (udp_socket_fd_ >= 0)
+  {
+    ::close(udp_socket_fd_);
+    udp_socket_fd_ = -1;
+  }
+}
 
 void LIVMapper::readParameters(ros::NodeHandle &nh)
 {
@@ -126,9 +181,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("preprocess/point_filter_num", p_pre->point_filter_num, 3);
   nh.param<bool>("preprocess/feature_extract_enabled", p_pre->feature_enabled, false);
 
-  nh.param<string>("/laserMapping/save_path",save_path,"");
+  nh.param<string>("/laserMapping/save_path",save_path,""); 
   if (save_path.empty()) nh.param<string>("pcd_save/save_path",save_path,"/home/jetson/data");
-  if (save_path.back() != '/') save_path += '/';
+  save_path = makeRunOutputDir(save_path);
   nh.param<bool>("pcd_save/global_map_pub", global_map_pub, false);  // 新增：读取 global_map_pub 参数，默认 false
   nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
   nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
@@ -136,6 +191,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("pcd_save/colmap_output_en", colmap_output_en, false);
   nh.param<double>("pcd_save/filter_size_pcd", filter_size_pcd, 0.5);
   nh.param<int>("pcd_save/max_cache_points", pcd_cache_max_points, 300000);
+  nh.param<bool>("udp_report/en", udp_report_en, false);
+  nh.param<std::string>("udp_report/target_ip", udp_target_ip_, "127.0.0.1");
+  nh.param<int>("udp_report/target_port", udp_report_port_, 9000);
+  nh.param<std::string>("udp_report/device_id", udp_device_id_, "fast_livo2");
   nh.param<vector<double>>("extrin_calib/extrinsic_T", extrinT, vector<double>());
   nh.param<vector<double>>("extrin_calib/extrinsic_R", extrinR, vector<double>());
   nh.param<vector<double>>("extrin_calib/Pcl", cameraextrinT, vector<double>());
@@ -341,6 +400,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->timing_log_dir = save_path;
   vio_manager->timing_log_enable = save_log_en;
   vio_manager->initializeVIO(nh);
+  initializeUdpReporter();
 
   p_imu->set_extrinsic(extT, extR);
   p_imu->set_gyr_cov_scale(V3D(gyr_cov, gyr_cov, gyr_cov));
@@ -378,10 +438,66 @@ void LIVMapper::initializeFiles()
           return;
       }
   }
-  if(colmap_output_en) fout_points.open(std::string(ROOT_DIR) + "Log/Colmap/sparse/0/points3D.txt", std::ios::out);
-  if(pcd_save_interval > 0) fout_pcd_pos.open(std::string(ROOT_DIR) + "Log/PCD/scans_pos.json", std::ios::out);
+  if(colmap_output_en) fout_points.open(save_path + "points3D.txt", std::ios::out);
+  if(pcd_save_interval > 0) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
   fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
   fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
+}
+
+void LIVMapper::initializeUdpReporter()
+{
+  if (!udp_report_en) return;
+  if (udp_target_ip_.empty() || udp_report_port_ <= 0 || udp_report_port_ > 65535)
+  {
+    ROS_WARN("[UDP] Invalid target config, reporting disabled.");
+    udp_report_en = false;
+    return;
+  }
+
+  udp_socket_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp_socket_fd_ < 0)
+  {
+    ROS_WARN("[UDP] Failed to create socket, reporting disabled.");
+    udp_report_en = false;
+    return;
+  }
+
+  udp_target_addr_ = {};
+  udp_target_addr_.sin_family = AF_INET;
+  udp_target_addr_.sin_port = htons(static_cast<uint16_t>(udp_report_port_));
+  if (::inet_pton(AF_INET, udp_target_ip_.c_str(), &udp_target_addr_.sin_addr) != 1)
+  {
+    ROS_WARN("[UDP] Invalid target IP '%s', reporting disabled.", udp_target_ip_.c_str());
+    ::close(udp_socket_fd_);
+    udp_socket_fd_ = -1;
+    udp_report_en = false;
+    return;
+  }
+
+  udp_socket_ready_ = true;
+  sendUdpMessage(std::string("DEVICE_ID ") + udp_device_id_);
+  ROS_INFO("[UDP] Reporting enabled for %s:%d", udp_target_ip_.c_str(), udp_report_port_);
+}
+
+void LIVMapper::sendUdpMessage(const std::string &message)
+{
+  if (!udp_report_en || !udp_socket_ready_ || udp_socket_fd_ < 0 || message.empty()) return;
+
+  const ssize_t sent = ::sendto(udp_socket_fd_, message.c_str(), message.size(), 0,
+                                reinterpret_cast<const sockaddr *>(&udp_target_addr_), sizeof(udp_target_addr_));
+  if (sent < 0)
+  {
+    ROS_WARN_THROTTLE(5.0, "[UDP] Failed to send packet to %s:%d.", udp_target_ip_.c_str(), udp_report_port_);
+  }
+}
+
+void LIVMapper::sendUdpPose(const Eigen::Vector3d &position)
+{
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(6)
+      << "POSE " << ros::Time::now().toSec() << ' '
+      << position.x() << ' ' << position.y() << ' ' << position.z();
+  sendUdpMessage(oss.str());
 }
 
 void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it) 
@@ -729,13 +845,13 @@ void LIVMapper::handleLIO()
     std::ofstream outFile, evoFile;
     if (!pos_opend) 
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::out);
+      evoFile.open(save_path + seq_name + ".txt", std::ios::out);
       pos_opend = true;
       if (!evoFile.is_open()) ROS_ERROR("open fail\n");
     } 
     else 
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::app);
+      evoFile.open(save_path + seq_name + ".txt", std::ios::app);
       if (!evoFile.is_open()) ROS_ERROR("open fail\n");
     }
     Eigen::Matrix4d outT;
@@ -1924,6 +2040,7 @@ void LIVMapper::publish_odometry(const ros::Publisher &pubOdomAftMapped)
   transform.setRotation(q);
   br.sendTransform( tf::StampedTransform(transform, odomAftMapped.header.stamp, "camera_init", "aft_mapped") );
   pubOdomAftMapped.publish(odomAftMapped);
+  sendUdpPose(_state.pos_end);
 }
 
 void LIVMapper::publish_mavros(const ros::Publisher &mavros_pose_publisher)
