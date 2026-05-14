@@ -124,7 +124,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
   nh.param<int>("vio/max_iterations", max_iterations, 5);
-  IMG_POINT_COV = 100.0;
+  IMG_POINT_COV = 200.0;  // 降低visual EKF权重：100.0→200.0，使EKF对visual测量的信任度减半
   nh.param<bool>("vio/raycast_en", raycast_en, false);
   nh.param<bool>("vio/exposure_estimate_en", exposure_estimate_en, true);
   nh.param<double>("vio/inv_expo_cov", inv_expo_cov, 0.2);
@@ -1367,7 +1367,9 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
   if (cur_head_time < last_timestamp_lidar)
   {
     ROS_ERROR("lidar loop back, clear buffer");
-    lid_raw_data_buffer.clear();
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+    return;
   }
   // ROS_INFO("get point cloud at time: %.6f", msg->header.stamp.toSec());
   PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
@@ -1408,7 +1410,9 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_i
   if (cur_head_time < last_timestamp_lidar)
   {
     ROS_ERROR("lidar loop back, clear buffer");
-    lid_raw_data_buffer.clear();
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+    return;
   }
   // ROS_INFO("get point cloud at time: %.6f", msg->header.stamp.toSec());
   PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
