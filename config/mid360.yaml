@@ -112,7 +112,7 @@ local_map:
   long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
 
 adaptive_selector:
-  en: false # 关闭自适应选帧，让视觉帧尽量都进入VIO流程
+  en: true # 启用自适应选帧
 
 runtime_guard:
   enable: false # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复
@@ -143,8 +143,8 @@ evo:
 pcd_save:
   pcd_save_en: true 
   save_log_en: true # 日志写盘
-  save_path: "/home/gulu/data"
-  global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
+  save_path: "/home/jetson/data"
+  global_map_pub: true   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05
   max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
