@@ -679,6 +679,44 @@ void LIVMapper::handleVIO()
     fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
              << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
              << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
+
+    if (vio_manager)
+    {
+      auto formatDouble6 = [](double value)
+      {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(6) << value;
+        return oss.str();
+      };
+
+      auto makeTableRow = [](const std::string &left, const std::string &right)
+      {
+        std::ostringstream oss;
+        oss << "| " << std::left << std::setw(29) << left
+            << " | " << std::left << std::setw(27) << right << " |";
+        return oss.str();
+      };
+
+      std::vector<std::string> lines;
+      std::ostringstream oss;
+      oss << "[ VIO ] Skip by selector: reason=" << last_selector_reason_
+          << ", count=" << adaptive_skip_count
+          << ", delta(t/r)=" << formatDouble6(last_selector_trans_delta_) << "m/" << formatDouble6(last_selector_rot_delta_deg_) << "deg"
+          << ", thresh(t/r)=" << formatDouble6(last_selector_trans_thresh_) << "m/" << formatDouble6(last_selector_rot_thresh_deg_) << "deg"
+          << ", ratio=" << formatDouble6(last_selector_constraint_ratio_)
+          << ", skip=" << skipped_visual_frames_ << "/" << keyframe_max_skip_frames_;
+      lines.push_back(oss.str());
+      lines.push_back("+-------------------------------------------------------------+");
+      lines.push_back(makeTableRow("Raw Feature Num", std::to_string(pcl_w_wait_pub->points.size())));
+      lines.push_back(makeTableRow("Selector Reason", last_selector_reason_));
+      lines.push_back(makeTableRow("Skip Count", std::to_string(adaptive_skip_count)));
+      lines.push_back(makeTableRow("Skip Limit", std::to_string(keyframe_max_skip_frames_)));
+      lines.push_back(makeTableRow("Delta t/r", formatDouble6(last_selector_trans_delta_) + "m/" + formatDouble6(last_selector_rot_delta_deg_) + "deg"));
+      lines.push_back(makeTableRow("Thresh t/r", formatDouble6(last_selector_trans_thresh_) + "m/" + formatDouble6(last_selector_rot_thresh_deg_) + "deg"));
+      lines.push_back(makeTableRow("Constraint Ratio", formatDouble6(last_selector_constraint_ratio_)));
+      lines.push_back("+-------------------------------------------------------------+");
+      vio_manager->appendTimingLogLines(lines);
+    }
     return;
   }
 
