@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "voxel_map.h"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -63,6 +64,8 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<double>("lio/icp_early_stop_residual_ratio", voxel_config.icp_early_stop_residual_ratio, 0.03);
   nh.param<double>("lio/icp_max_rot_step_deg", voxel_config.icp_max_rot_step_deg, 1.2);
   nh.param<double>("lio/icp_max_trans_step_m", voxel_config.icp_max_trans_step_m, 0.20);
+
+  nh.param<bool>("lio/deterministic_lio_update_en", voxel_config.deterministic_lio_update_en, true);
 }
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
@@ -716,7 +719,7 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
   }
   #ifdef MP_EN
     omp_set_num_threads(MP_PROC_NUM);
-    #pragma omp parallel for
+    #pragma omp parallel for if(!config_setting_.deterministic_lio_update_en)
   #endif
   for (int i = 0; i < index.size(); i++)
   {
@@ -1016,11 +1019,23 @@ void VoxelMapManager::mapSliding()
       static_cast<int>(long_term_visual_map_.size()) > config_setting_.long_term_visual_max_voxels)
   {
     int to_remove = static_cast<int>(long_term_visual_map_.size()) - config_setting_.long_term_visual_max_voxels;
-    for (auto it = long_term_visual_map_.begin(); it != long_term_visual_map_.end() && to_remove > 0;)
-    {
-      delete it->second;
-      it = long_term_visual_map_.erase(it);
-      --to_remove;
+    std::vector<std::pair<double, VOXEL_LOCATION>> sorted;
+    sorted.reserve(long_term_visual_map_.size());
+    for (const auto &kv : long_term_visual_map_) {
+      V3D center(kv.first.x * config_setting_.max_voxel_size_,
+                 kv.first.y * config_setting_.max_voxel_size_,
+                 kv.first.z * config_setting_.max_voxel_size_);
+      sorted.emplace_back((center - position_last_).squaredNorm(), kv.first);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    for (const auto &p : sorted) {
+      if (to_remove <= 0) break;
+      auto it = long_term_visual_map_.find(p.second);
+      if (it != long_term_visual_map_.end()) {
+        delete it->second;
+        long_term_visual_map_.erase(it);
+        --to_remove;
+      }
     }
   }
 
@@ -1034,11 +1049,19 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
 {
   int delete_voxel_cout = 0;
   int transfer_voxel_count = 0;
-  // double delete_time = 0;
-  // double last_delete_time = 0;
-  for (auto it = voxel_map_.begin(); it != voxel_map_.end(); )
+  std::vector<VOXEL_LOCATION> sorted_keys;
+  sorted_keys.reserve(voxel_map_.size());
+  for (const auto &kv : voxel_map_) sorted_keys.push_back(kv.first);
+  std::sort(sorted_keys.begin(), sorted_keys.end(),
+            [](const VOXEL_LOCATION &a, const VOXEL_LOCATION &b) {
+              if (a.x != b.x) return a.x < b.x;
+              if (a.y != b.y) return a.y < b.y;
+              return a.z < b.z;
+            });
+  for (const auto &loc : sorted_keys)
   {
-    const VOXEL_LOCATION& loc = it->first;
+    auto it = voxel_map_.find(loc);
+    if (it == voxel_map_.end()) continue;
     bool should_remove = loc.x > x_max || loc.x < x_min || loc.y > y_max || loc.y < y_min || loc.z > z_max || loc.z < z_min;
     if (should_remove){
       const bool has_visual_observation = visual_observed_voxels_.find(loc) != visual_observed_voxels_.end();
@@ -1054,16 +1077,13 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
         {
           long_term_visual_map_[loc] = it->second;
         }
-        it = voxel_map_.erase(it);
+        voxel_map_.erase(it);
         ++transfer_voxel_count;
         continue;
       }
       delete it->second;
-      it = voxel_map_.erase(it);
-      // delete_time += omp_get_wtime() - last_delete_time;
+      voxel_map_.erase(it);
       delete_voxel_cout++;
-    } else {
-      ++it;
     }
   }
   std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels, transfer "

@@ -20,19 +20,23 @@ message(STATUS "Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 # Specific settings for Release build
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    # 64-bit ARM optimizations (e.g., RK3588 and Jetson Orin NX)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -ffast-math")
-    message(STATUS "Using 64-bit ARM optimizations: -O3 -mcpu=native -mtune=native -ffast-math")
+    # 64-bit ARM — deterministic floating-point configuration
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -mcpu=generic -mtune=generic -ffp-contract=off")
+    message(STATUS "Using 64-bit ARM deterministic: -O2 -mcpu=generic -mtune=generic -ffp-contract=off")
   else()
-    # 32-bit ARM optimizations with NEON support
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-    message(STATUS "Using 32-bit ARM optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
+    # 32-bit ARM
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -mcpu=generic -mtune=generic -mfpu=neon -ffp-contract=off")
+    message(STATUS "Using 32-bit ARM deterministic: -O2 -mcpu=generic -mtune=generic -mfpu=neon -ffp-contract=off")
   endif()
   add_definitions(-DARM_ARCH)
 else()
-  # x86-64 (Intel/AMD) optimizations
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops") #-flto
-  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops") 
+  # x86-64 (Intel/AMD) — deterministic floating-point configuration
+  # -O2: disable -O3 auto-vectorization / loop peeling / unrolling
+  # -march=x86-64: use baseline x86-64 ISA, no CPU-specific SIMD variants
+  # -ffp-contract=off: disable FMA contraction
+  # -frounding-math: prevent optimizations that assume default rounding mode
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -march=x86-64 -mtune=generic -ffp-contract=off -frounding-math")
+  message(STATUS "Using x86 deterministic: -O2 -march=x86-64 -mtune=generic -ffp-contract=off -frounding-math")
   add_definitions(-DX86_ARCH)
 endif()
 
@@ -145,3 +149,6 @@ target_link_libraries(fastlivo_mapping
 if(mimalloc_FOUND)
   target_link_libraries(fastlivo_mapping mimalloc)
 endif()
+
+# Link libusb-1.0 (required by PCL IO)
+target_link_libraries(fastlivo_mapping usb-1.0)

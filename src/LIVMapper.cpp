@@ -459,7 +459,7 @@ void LIVMapper::initializeFiles()
       }
   }
   if(colmap_output_en) fout_points.open(save_path + "points3D.txt", std::ios::out);
-  if(pcd_save_interval > 0) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
+  if(save_log_en) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
   fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
   fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
 }
@@ -600,7 +600,7 @@ void LIVMapper::stateEstimationAndMapping()
   static int vio_dispatch_count = 0;
   static int lio_dispatch_count = 0;
 
-  switch (LidarMeasures.lio_vio_flg) 
+  switch (LidarMeasures.lio_vio_flg)
   {
     case VIO:
       vio_dispatch_count++;
@@ -622,6 +622,17 @@ void LIVMapper::stateEstimationAndMapping()
       handleLIO();
       break;
   }
+  // Deterministic state rounding: quantize vectors to ~1e-10 to block ULP drift amplification
+  // Rotation matrix skipped: rounding elements breaks SO(3) orthogonality
+  auto snap = [](double v) { return std::round(v * 1e10) * 1e-10; };
+  for (int i = 0; i < 3; i++) {
+    _state.pos_end[i] = snap(_state.pos_end[i]);
+    _state.vel_end[i] = snap(_state.vel_end[i]);
+    _state.bias_g[i] = snap(_state.bias_g[i]);
+    _state.bias_a[i] = snap(_state.bias_a[i]);
+    _state.gravity[i] = snap(_state.gravity[i]);
+  }
+  _state.inv_expo_time = snap(_state.inv_expo_time);
 }
 
 void LIVMapper::handleVIO() 
@@ -845,6 +856,12 @@ void LIVMapper::updateVisualObservationHints()
       observed_voxels.push_back(kv.first);
     }
   }
+  std::sort(observed_voxels.begin(), observed_voxels.end(),
+            [](const VOXEL_LOCATION &a, const VOXEL_LOCATION &b) {
+              if (a.x != b.x) return a.x < b.x;
+              if (a.y != b.y) return a.y < b.y;
+              return a.z < b.z;
+            });
   voxelmap_manager->setVisualObservedVoxels(observed_voxels);
 }
 
@@ -865,6 +882,12 @@ void LIVMapper::handleLIO()
 
   downSizeFilterSurf.setInputCloud(feats_undistort);
   downSizeFilterSurf.filter(*feats_down_body);
+  std::sort(feats_down_body->points.begin(), feats_down_body->points.end(),
+            [](const PointType &a, const PointType &b) {
+              if (a.x != b.x) return a.x < b.x;
+              if (a.y != b.y) return a.y < b.y;
+              return a.z < b.z;
+            });
   
   double t_down = omp_get_wtime();
 
@@ -1479,7 +1502,6 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 {
   if (!imu_en) return;
 
-  if (last_timestamp_lidar < 0.0) return;
   // ROS_INFO("get imu at time: %.6f", msg_in->header.stamp.toSec());
   sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
   msg->header.stamp = ros::Time().fromSec(msg->header.stamp.toSec() - imu_time_offset);
@@ -1567,8 +1589,6 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   double msg_header_time = msg->header.stamp.toSec() + img_time_offset;
   if (abs(msg_header_time - last_timestamp_img) < 0.001) return;
   ROS_INFO_THROTTLE(1.0, "Get image, its header time: %.6f", msg_header_time);
-  if (last_timestamp_lidar < 0) return;
-
   if (msg_header_time < last_timestamp_img)
   {
     ROS_ERROR("image loop back. \n");
@@ -2028,14 +2048,18 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
           pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_intensity);
           PointCloudXYZI().swap(*pcl_wait_save_intensity);
         }        
-        Eigen::Quaterniond q(_state.rot_end);
-        fout_pcd_pos << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " " << q.w() << " " << q.x() << " " << q.y()
-                     << " " << q.z() << " " << endl;
         scan_wait_num = 0;
       }
     }
   }
 
+  if (save_log_en)
+  {
+    Eigen::Quaterniond q(_state.rot_end);
+    fout_pcd_pos << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " " << q.w() << " " << q.x() << " " << q.y()
+                  << " " << q.z() << " " << endl;
+  }
+  
   if (need_rgb_cloud && laserCloudWorldRGB->size() > 0) PointCloudXYZI().swap(*pcl_wait_pub);
   PointCloudXYZI().swap(*pcl_w_wait_pub);
 }

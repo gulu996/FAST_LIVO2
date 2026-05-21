@@ -66,6 +66,8 @@ typedef struct VoxelMapConfig
   // config of ICP stability guard
   double icp_max_rot_step_deg;
   double icp_max_trans_step_m;
+
+  bool deterministic_lio_update_en;
 } VoxelMapConfig;
 
 typedef struct PointToPlane

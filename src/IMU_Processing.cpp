@@ -25,6 +25,7 @@ ImuProcess::ImuProcess() : Eye3d(M3D::Identity()),
   mean_gyr = V3D(0, 0, 0);
   angvel_last = Zero3d;
   acc_s_last = Zero3d;
+  last_prop_end_time = 0.0;
   Lid_offset_to_IMU = Zero3d;
   Lid_rot_to_IMU = Eye3d;
   last_imu.reset(new sensor_msgs::Imu());
@@ -39,6 +40,7 @@ void ImuProcess::Reset()
   mean_acc = V3D(0, 0, -1.0);
   mean_gyr = V3D(0, 0, 0);
   angvel_last = Zero3d;
+  last_prop_end_time = 0.0;
   imu_need_init = true;
   init_iter_num = 1;
   IMUpose.clear();
