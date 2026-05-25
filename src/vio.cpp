@@ -3488,6 +3488,40 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // return is modified during experiments.
   if (skip_visual_ekf) return;
 
+  // Deterministic state snap: quantize before visual-map insertion so the
+  // map is built from rounded state (prevents ULP divergence in feat_map).
+  {
+    const double prec     = 1e-8;   // fine: biases / rotation
+    const double pos_prec = 1e-4;   // 0.1 mm — catches VIO ULP drift
+    const double vel_prec = 1e-4;
+    const double expo_prec = 1e-4;
+    auto snap = [](double v, double p) { return std::round(v / p) * p; };
+    Eigen::AngleAxisd aa(state->rot_end);
+    double angle = snap(aa.angle(), prec);
+    Eigen::Vector3d axis = aa.axis();
+    for (int i = 0; i < 3; i++) axis[i] = snap(axis[i], prec);
+    double axis_norm = axis.norm();
+    if (angle > prec && axis_norm > prec) {
+      axis /= axis_norm;
+      state->rot_end = Eigen::AngleAxisd(angle, axis).toRotationMatrix();
+    } else {
+      state->rot_end = M3D::Identity();
+    }
+    for (int i = 0; i < 3; i++) {
+      state->pos_end[i]   = snap(state->pos_end[i],   pos_prec);
+      state->vel_end[i]   = snap(state->vel_end[i],   vel_prec);
+      state->bias_g[i]    = snap(state->bias_g[i],    prec);
+      state->bias_a[i]    = snap(state->bias_a[i],    prec);
+      state->gravity[i]   = snap(state->gravity[i],   prec);
+    }
+    state->inv_expo_time = snap(state->inv_expo_time, expo_prec);
+    double cov_prec = prec * 1e-6;
+    auto csnap = [cov_prec](double v) { return std::round(v / cov_prec) * cov_prec; };
+    for (int r = 0; r < DIM_STATE; r++)
+      for (int c = 0; c < DIM_STATE; c++)
+        state->cov(r, c) = csnap(state->cov(r, c));
+  }
+
   double t3 = omp_get_wtime();
 
   generateVisualMapPoints(img, pg);

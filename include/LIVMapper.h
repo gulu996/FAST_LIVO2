@@ -154,6 +154,8 @@ public:
   int vio_low_track_force_update_stride_ = 0;
   int vio_low_track_force_min_points_ = 8;
   bool vio_deterministic_visual_update_en_ = true;
+  double state_snap_precision_ = 1e-8;
+  int spin_rate_ = 5000;
   bool vio_visual_update_guard_en_ = true;
   double vio_visual_update_max_trans_m_ = 0.12;
   double vio_visual_update_max_rot_deg_ = 2.0;
@@ -289,12 +291,12 @@ public:
   bool last_selector_reach_pose_keyframe_ = false;
   bool last_selector_reach_skip_limit_ = false;
 
-  int sub_lidar_queue_size_ = 128;
-  int sub_imu_queue_size_ = 512;
-  int sub_img_queue_size_ = 16;
-  int max_lidar_buffer_size_ = 32;
-  int max_imu_buffer_size_ = 3000;
-  int max_img_buffer_size_ = 12;
-  int max_prop_imu_buffer_size_ = 3000;
+  int sub_lidar_queue_size_ = 1000;
+  int sub_imu_queue_size_ = 10000;
+  int sub_img_queue_size_ = 1000;
+  int max_lidar_buffer_size_ = 1000;
+  int max_imu_buffer_size_ = 10000;
+  int max_img_buffer_size_ = 1000;
+  int max_prop_imu_buffer_size_ = 10000;
 };
 #endif

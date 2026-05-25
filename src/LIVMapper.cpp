@@ -150,6 +150,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("vio/low_track_force_update_stride", vio_low_track_force_update_stride_, 0);
   nh.param<int>("vio/low_track_force_min_points", vio_low_track_force_min_points_, 8);
   nh.param<bool>("vio/deterministic_visual_update_en", vio_deterministic_visual_update_en_, true);
+  nh.param<double>("vio/deterministic_state_snap_precision", state_snap_precision_, 1e-8);
+  nh.param<int>("common/spin_rate", spin_rate_, 5000);
   nh.param<bool>("vio/visual_update_guard_en", vio_visual_update_guard_en_, true);
   nh.param<double>("vio/visual_update_max_trans_m", vio_visual_update_max_trans_m_, 0.12);
   nh.param<double>("vio/visual_update_max_rot_deg", vio_visual_update_max_rot_deg_, 2.0);
@@ -622,17 +624,40 @@ void LIVMapper::stateEstimationAndMapping()
       handleLIO();
       break;
   }
-  // Deterministic state rounding: quantize vectors to ~1e-10 to block ULP drift amplification
-  // Rotation matrix skipped: rounding elements breaks SO(3) orthogonality
-  auto snap = [](double v) { return std::round(v * 1e10) * 1e-10; };
-  for (int i = 0; i < 3; i++) {
-    _state.pos_end[i] = snap(_state.pos_end[i]);
-    _state.vel_end[i] = snap(_state.vel_end[i]);
-    _state.bias_g[i] = snap(_state.bias_g[i]);
-    _state.bias_a[i] = snap(_state.bias_a[i]);
-    _state.gravity[i] = snap(_state.gravity[i]);
+  // Deterministic state rounding: quantize to block ULP drift amplification
+  if (state_snap_precision_ > 0.0) {
+    double prec = state_snap_precision_;
+    auto snap = [](double v, double p) { return std::round(v / p) * p; };
+    const double pos_prec  = 1e-4;   // 0.1 mm — double-precision safe
+    const double vel_prec  = 1e-4;   // 0.1 mm/s
+    const double expo_prec = 1e-4;
+    // Snap rotation via axis-angle: rounds minimal representation, preserves SO(3)
+    Eigen::AngleAxisd aa(_state.rot_end);
+    double angle = snap(aa.angle(), prec);
+    Eigen::Vector3d axis = aa.axis();
+    for (int i = 0; i < 3; i++) axis[i] = snap(axis[i], prec);
+    double axis_norm = axis.norm();
+    if (angle > prec && axis_norm > prec) {
+      axis /= axis_norm;
+      _state.rot_end = Eigen::AngleAxisd(angle, axis).toRotationMatrix();
+    } else {
+      _state.rot_end = M3D::Identity();
+    }
+    for (int i = 0; i < 3; i++) {
+      _state.pos_end[i] = snap(_state.pos_end[i], pos_prec);
+      _state.vel_end[i] = snap(_state.vel_end[i], vel_prec);
+      _state.bias_g[i]  = snap(_state.bias_g[i],  prec);
+      _state.bias_a[i]  = snap(_state.bias_a[i],  prec);
+      _state.gravity[i] = snap(_state.gravity[i], prec);
+    }
+    _state.inv_expo_time = snap(_state.inv_expo_time, expo_prec);
+    // Snap covariance matrix: ULP drift here changes Kalman gain, feeding into next state update
+    double cov_prec = prec * 1e-6; // much finer precision for covariance (wide dynamic range)
+    auto csnap = [cov_prec](double v) { return std::round(v / cov_prec) * cov_prec; };
+    for (int r = 0; r < DIM_STATE; r++)
+      for (int c = 0; c < DIM_STATE; c++)
+        _state.cov(r, c) = csnap(_state.cov(r, c));
   }
-  _state.inv_expo_time = snap(_state.inv_expo_time);
 }
 
 void LIVMapper::handleVIO() 
@@ -880,14 +905,46 @@ void LIVMapper::handleLIO()
 
   double t0 = omp_get_wtime();
 
-  downSizeFilterSurf.setInputCloud(feats_undistort);
-  downSizeFilterSurf.filter(*feats_down_body);
-  std::sort(feats_down_body->points.begin(), feats_down_body->points.end(),
-            [](const PointType &a, const PointType &b) {
-              if (a.x != b.x) return a.x < b.x;
-              if (a.y != b.y) return a.y < b.y;
-              return a.z < b.z;
-            });
+  // Deterministic VoxelGrid: std::map + double precision replaces PCL's hash-map-based filter.
+  // PCL is pre-compiled and its internal FMA can flip voxel boundary assignments across runs.
+  feats_down_body->clear();
+  if (!feats_undistort->empty())
+  {
+    double inv_leaf = 1.0 / static_cast<double>(filter_size_surf_min);
+    std::map<std::tuple<int64_t, int64_t, int64_t>, std::vector<size_t>> voxel_groups;
+    for (size_t i = 0; i < feats_undistort->points.size(); ++i)
+    {
+      const auto &pt = feats_undistort->points[i];
+      int64_t ix = static_cast<int64_t>(std::floor(static_cast<double>(pt.x) * inv_leaf));
+      int64_t iy = static_cast<int64_t>(std::floor(static_cast<double>(pt.y) * inv_leaf));
+      int64_t iz = static_cast<int64_t>(std::floor(static_cast<double>(pt.z) * inv_leaf));
+      voxel_groups[{ix, iy, iz}].push_back(i);
+    }
+    feats_down_body->points.reserve(voxel_groups.size());
+    for (const auto &kv : voxel_groups)
+    {
+      const auto &indices = kv.second;
+      double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0, sum_intensity = 0.0;
+      for (size_t idx : indices)
+      {
+        const auto &pt = feats_undistort->points[idx];
+        sum_x += pt.x;
+        sum_y += pt.y;
+        sum_z += pt.z;
+        sum_intensity += pt.intensity;
+      }
+      double inv_n = 1.0 / static_cast<double>(indices.size());
+      PointType centroid;
+      centroid.x = static_cast<float>(sum_x * inv_n);
+      centroid.y = static_cast<float>(sum_y * inv_n);
+      centroid.z = static_cast<float>(sum_z * inv_n);
+      centroid.intensity = static_cast<float>(sum_intensity * inv_n);
+      feats_down_body->points.push_back(centroid);
+    }
+    feats_down_body->width = feats_down_body->points.size();
+    feats_down_body->height = 1;
+    feats_down_body->is_dense = true;
+  }
   
   double t_down = omp_get_wtime();
 
@@ -908,6 +965,38 @@ void LIVMapper::handleLIO()
   voxelmap_manager->StateEstimation(state_propagat);
   _state = voxelmap_manager->state_;
   _pv_list = voxelmap_manager->pv_list_;
+  // Deterministic state snap before map insertion + logging
+  {
+    const double prec     = state_snap_precision_;
+    const double pos_prec = 1e-4;
+    const double vel_prec = 1e-4;
+    const double expo_prec = 1e-4;
+    auto snap = [](double v, double p) { return std::round(v / p) * p; };
+    Eigen::AngleAxisd aa(_state.rot_end);
+    double angle = snap(aa.angle(), prec);
+    Eigen::Vector3d axis = aa.axis();
+    for (int j = 0; j < 3; j++) axis[j] = snap(axis[j], prec);
+    double axis_norm = axis.norm();
+    if (angle > prec && axis_norm > prec) {
+      axis /= axis_norm;
+      _state.rot_end = Eigen::AngleAxisd(angle, axis).toRotationMatrix();
+    } else {
+      _state.rot_end = M3D::Identity();
+    }
+    for (int j = 0; j < 3; j++) {
+      _state.pos_end[j] = snap(_state.pos_end[j], pos_prec);
+      _state.vel_end[j] = snap(_state.vel_end[j], vel_prec);
+      _state.bias_g[j]  = snap(_state.bias_g[j],  prec);
+      _state.bias_a[j]  = snap(_state.bias_a[j],  prec);
+      _state.gravity[j] = snap(_state.gravity[j], prec);
+    }
+    _state.inv_expo_time = snap(_state.inv_expo_time, expo_prec);
+    double cov_prec = prec * 1e-6;
+    auto csnap = [cov_prec](double v) { return std::round(v / cov_prec) * cov_prec; };
+    for (int r = 0; r < DIM_STATE; r++)
+      for (int c = 0; c < DIM_STATE; c++)
+        _state.cov(r, c) = csnap(_state.cov(r, c));
+  }
 
   double t2 = omp_get_wtime();
 
@@ -1184,15 +1273,15 @@ void LIVMapper::run()
     return oss.str();
   };
 
-  ros::Rate rate(5000);
+  ros::Rate rate(spin_rate_);
   int i = 0;
   double sum = 0, t = 0;
-  while (ros::ok()) 
+  while (ros::ok())
   {
     const double t1 = omp_get_wtime();
     ros::spinOnce();
     const double t_spin_end = omp_get_wtime();
-    if (!sync_packages(LidarMeasures)) 
+    if (!sync_packages(LidarMeasures))
     {
       rate.sleep();
       continue;
@@ -1535,6 +1624,16 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
   // }
 
   last_timestamp_imu = timestamp;
+
+  // Snap IMU data to fixed precision so downstream propagation is deterministic
+  // regardless of rosbag deserialisation or system-math ULP differences.
+  const double imu_prec = 1e-6;
+  msg->angular_velocity.x = std::round(msg->angular_velocity.x / imu_prec) * imu_prec;
+  msg->angular_velocity.y = std::round(msg->angular_velocity.y / imu_prec) * imu_prec;
+  msg->angular_velocity.z = std::round(msg->angular_velocity.z / imu_prec) * imu_prec;
+  msg->linear_acceleration.x = std::round(msg->linear_acceleration.x / imu_prec) * imu_prec;
+  msg->linear_acceleration.y = std::round(msg->linear_acceleration.y / imu_prec) * imu_prec;
+  msg->linear_acceleration.z = std::round(msg->linear_acceleration.z / imu_prec) * imu_prec;
 
   imu_buffer.push_back(msg);
   while (max_imu_buffer_size_ > 0 && static_cast<int>(imu_buffer.size()) > max_imu_buffer_size_)

@@ -4,7 +4,8 @@ common:
   imu_topic: "/livox/imu"
   img_en: 1
   lidar_en: 1
-  ros_driver_bug_fix: false
+  ros_driver_bug_fix: true
+  spin_rate: 5000 # spinOnce轮询频率(Hz)，降低可在CPU波动时提供缓冲，但不宜低于传感器频率*2
 
 extrin_calib:
   #extrinsic_T: [-0.011, -0.02329, 0.04412]
@@ -56,6 +57,7 @@ vio:
   low_track_force_update_stride: 1 # 低跟踪时每帧都尝试强制视觉EKF
   low_track_force_min_points: 10 # 至少10个可用点就尝试更新；与min_update_meas保持一致
   deterministic_visual_update_en: true # 固定视觉更新为确定性顺序，避免多次回放同一bag因并行归约/等分选择产生不同轨迹
+  deterministic_state_snap_precision: 1e-8 # 状态舍入精度：每帧LIO/VIO后将pos/vel/bias/gravity/expo舍入，阻断ULP漂移累积。
   visual_update_guard_en: true # 视觉EKF总修正门限，超过则回滚到LIO/IMU预测，防止出口过曝导致突然倒退
   visual_update_max_trans_m: 0.20 # 放宽单帧视觉总平移修正上限，减少不必要回滚
   visual_update_max_rot_deg: 4.0 # 放宽单帧视觉总旋转修正上限
