@@ -3081,6 +3081,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 {
   (void)img_time;
 
+  // ===== 诊断：VIO 全程校验和 =====
+  static std::ofstream fout_vio_diag;
+  if (!fout_vio_diag.is_open() && !timing_log_dir.empty())
+    fout_vio_diag.open(timing_log_dir + "vio_diag.txt", std::ios::out);
+  // ===== 诊断初始化 =====
+
   if (width != img.cols || height != img.rows)
   {
     if (img.empty()) printf("[ VIO ] Empty Image!\n");
@@ -3191,6 +3197,26 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   retrieveFromVisualSparseMap(img, pg, feat_map);
   const double t_retrieve = omp_get_wtime() - t1;
+
+  // ===== 诊断：visual_submap 校验和 =====
+  if (fout_vio_diag.is_open())
+  {
+    double ck_pt_pos = 0, ck_pt_normal = 0;
+    size_t n_pts = visual_submap->voxel_points.size();
+    for (size_t i = 0; i < n_pts; i++)
+    {
+      auto *pt = visual_submap->voxel_points[i];
+      if (pt) { ck_pt_pos += pt->pos_.x() + pt->pos_.y() + pt->pos_.z();
+                 ck_pt_normal += pt->normal_.x() + pt->normal_.y() + pt->normal_.z(); }
+    }
+    fout_vio_diag << std::fixed << std::setprecision(9)
+                  << "frame=" << frame_count << " stage=after_retrieve"
+                  << " n_pts=" << n_pts
+                  << " total_points=" << total_points
+                  << " ck_pt_pos=" << ck_pt_pos
+                  << " ck_pt_normal=" << ck_pt_normal << std::endl;
+  }
+  // ===== 诊断结束 =====
   const bool run_aruco_this_frame = aruco_landmarks_en && (aruco_process_stride <= 1 || (frame_count % aruco_process_stride == 0));
   if (run_aruco_this_frame)
   {
@@ -3237,6 +3263,23 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     }
 
     computeJacobianAndUpdateEKF(img);
+
+    // ===== 诊断：VIO EKF 更新后的状态校验和 =====
+    if (fout_vio_diag.is_open() && state)
+    {
+      auto vck = [](const V3D &v) -> double { return v.x() + v.y() + v.z(); };
+      auto mck = [](const M3D &m) -> double { return m.trace(); };
+      fout_vio_diag << std::fixed << std::setprecision(9)
+                    << "frame=" << frame_count << " stage=after_ekf"
+                    << " ck_pos=" << vck(state->pos_end)
+                    << " ck_vel=" << vck(state->vel_end)
+                    << " ck_rot=" << mck(state->rot_end)
+                    << " ck_bg=" << vck(state->bias_g)
+                    << " ck_ba=" << vck(state->bias_a)
+                    << " ck_grav=" << vck(state->gravity)
+                    << " ck_cov=" << state->cov.trace() << std::endl;
+    }
+    // ===== 诊断结束 =====
     if (run_aruco_this_frame)
     {
       const double t_aruco_update_begin = omp_get_wtime();

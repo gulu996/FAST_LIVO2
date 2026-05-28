@@ -149,9 +149,9 @@ evo:
   pose_output_en: false
 
 pcd_save:
-  pcd_save_en: true
+  pcd_save_en: false
   save_log_en: true # 日志写盘
-  save_path: "/home/jetson/data"
+  save_path: "/home/gulu/data"
   global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05

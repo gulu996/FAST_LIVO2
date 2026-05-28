@@ -47,6 +47,7 @@ public:
   void disable_exposure_est();
   void Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
   void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
+  void set_log_dir(const std::string &log_dir) { log_dir_ = log_dir; }
 
   ofstream fout_imu;
   double IMU_mean_acc_norm;
@@ -85,6 +86,7 @@ private:
   bool gravity_est_en = true;
   bool ba_bg_est_en = true;
   bool exposure_estimate_en = true;
+  std::string log_dir_;
 };
 typedef std::shared_ptr<ImuProcess> ImuProcessPtr;
 #endif

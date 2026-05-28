@@ -326,6 +326,55 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   case LIO:
   case VIO:
     dt = 0;
+
+    // ===== 诊断：检测 IMU 时间戳顺序一致性（输出到文件） =====
+    static int frame_cnt = 0;
+    static std::ofstream fout_imu_order;
+    if (!fout_imu_order.is_open() && !log_dir_.empty())
+    {
+      fout_imu_order.open(log_dir_ + "imu_order.txt", std::ios::out);
+    }
+    frame_cnt++;
+    {
+      int disorder_cnt = 0;
+      double prev_ts = -1e9;
+      for (size_t i = 0; i < v_imu.size(); i++)
+      {
+        double ts = v_imu[i]->header.stamp.toSec();
+        if (ts < prev_ts)
+        {
+          if (disorder_cnt == 0 && fout_imu_order.is_open())
+            fout_imu_order << "[DISORDER] frame " << frame_cnt << " idx " << i
+                           << " prev=" << std::fixed << std::setprecision(9) << prev_ts
+                           << " cur=" << ts << " diff=" << prev_ts - ts << std::endl;
+          disorder_cnt++;
+        }
+        prev_ts = ts;
+      }
+
+      if (fout_imu_order.is_open())
+      {
+        double ts_cksum = 0.0, gyro_cksum = 0.0, acc_cksum = 0.0;
+        for (size_t i = 0; i < v_imu.size(); i++)
+        {
+          ts_cksum += v_imu[i]->header.stamp.toSec();
+          gyro_cksum += v_imu[i]->angular_velocity.x + v_imu[i]->angular_velocity.y + v_imu[i]->angular_velocity.z;
+          acc_cksum += v_imu[i]->linear_acceleration.x + v_imu[i]->linear_acceleration.y + v_imu[i]->linear_acceleration.z;
+        }
+
+        fout_imu_order << std::fixed << std::setprecision(9)
+                       << "frame=" << frame_cnt
+                       << " count=" << v_imu.size()
+                       << " ts_beg=" << v_imu.front()->header.stamp.toSec()
+                       << " ts_end=" << v_imu.back()->header.stamp.toSec()
+                       << " disorder=" << disorder_cnt
+                       << " ck_ts=" << ts_cksum
+                       << " ck_gyro=" << gyro_cksum
+                       << " ck_acc=" << acc_cksum << std::endl;
+      }
+    }
+    // ===== 诊断结束 =====
+
     for (int i = 0; i < v_imu.size() - 1; i++)
     {
       auto head = v_imu[i];

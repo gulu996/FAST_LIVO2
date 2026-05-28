@@ -429,6 +429,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   p_imu->set_gyr_bias_cov(V3D(0.0001, 0.0001, 0.0001));
   p_imu->set_acc_bias_cov(V3D(0.0001, 0.0001, 0.0001));
   p_imu->set_imu_init_frame_num(imu_int_frame);
+  p_imu->set_log_dir(save_path);
 
   if (!imu_en) p_imu->disable_imu();
   if (!gravity_est_en) p_imu->disable_gravity_est();
@@ -1205,9 +1206,84 @@ void LIVMapper::run()
 
     // if (!p_imu->imu_time_init) continue;
 
+    // ===== 诊断：pipeline 级校验和，定位非确定性首次出现位置 =====
+    static int pipe_frame_cnt = 0;
+    static std::ofstream fout_pipe_order;
+    if (!fout_pipe_order.is_open() && !save_path.empty())
+    {
+      fout_pipe_order.open(save_path + "pipeline_order.txt", std::ios::out);
+    }
+    pipe_frame_cnt++;
+    {
+      auto vec_cksum = [](const V3D &v) -> double { return v.x() + v.y() + v.z(); };
+      auto mat_cksum = [](const M3D &m) -> double { return m.trace(); };
+      auto ptcl_cksum = [](const PointCloudXYZI::Ptr &pc) -> double {
+        double s = 0;
+        for (size_t i = 0; i < pc->size(); i++) {
+          s += pc->points[i].x + pc->points[i].y + pc->points[i].z;
+        }
+        return s;
+      };
+      const double ck_prop_pos = vec_cksum(_state.pos_end);
+      const double ck_prop_vel = vec_cksum(_state.vel_end);
+      const double ck_prop_rot = mat_cksum(_state.rot_end);
+      const double ck_prop_bg  = vec_cksum(_state.bias_g);
+      const double ck_prop_ba  = vec_cksum(_state.bias_a);
+      const double ck_prop_grav = vec_cksum(_state.gravity);
+      const double ck_pcl = ptcl_cksum(feats_undistort);
+      const double ck_cov = _state.cov.trace();
+
+      if (fout_pipe_order.is_open())
+      {
+        fout_pipe_order << std::fixed << std::setprecision(9)
+                        << "frame=" << pipe_frame_cnt
+                        << " mode=" << (LidarMeasures.lio_vio_flg == LIO ? "LIO" : "VIO")
+                        << " after=IMU"
+                        << " ck_pos=" << ck_prop_pos
+                        << " ck_vel=" << ck_prop_vel
+                        << " ck_rot=" << ck_prop_rot
+                        << " ck_bg=" << ck_prop_bg
+                        << " ck_ba=" << ck_prop_ba
+                        << " ck_grav=" << ck_prop_grav
+                        << " ck_cov=" << ck_cov
+                        << " ck_pcl=" << ck_pcl
+                        << " pcl_n=" << feats_undistort->size() << std::endl;
+      }
+    }
+    // ===== 诊断结束（第1部分） =====
+
     const EKF_STATE frame_mode = LidarMeasures.lio_vio_flg;
 
     stateEstimationAndMapping();
+
+    // ===== 诊断（第2部分）：EKF 更新后的状态 =====
+    {
+      auto vec_cksum = [](const V3D &v) -> double { return v.x() + v.y() + v.z(); };
+      auto mat_cksum = [](const M3D &m) -> double { return m.trace(); };
+      const double ck_upd_pos = vec_cksum(_state.pos_end);
+      const double ck_upd_vel = vec_cksum(_state.vel_end);
+      const double ck_upd_rot = mat_cksum(_state.rot_end);
+      const double ck_upd_bg  = vec_cksum(_state.bias_g);
+      const double ck_upd_ba  = vec_cksum(_state.bias_a);
+      const double ck_upd_grav = vec_cksum(_state.gravity);
+      const double ck_upd_cov = _state.cov.trace();
+
+      if (fout_pipe_order.is_open())
+      {
+        fout_pipe_order << std::fixed << std::setprecision(9)
+                        << "frame=" << pipe_frame_cnt
+                        << " mode=" << (frame_mode == LIO ? "LIO" : "VIO")
+                        << " after=EKF"
+                        << " ck_pos=" << ck_upd_pos
+                        << " ck_vel=" << ck_upd_vel
+                        << " ck_rot=" << ck_upd_rot
+                        << " ck_bg=" << ck_upd_bg
+                        << " ck_ba=" << ck_upd_ba
+                        << " ck_grav=" << ck_upd_grav
+                        << " ck_cov=" << ck_upd_cov << std::endl;
+      }
+    }
+    // ===== 诊断结束（第2部分） =====
 
     const double t2 = omp_get_wtime();
     const double frame_time = t2 - t1;
@@ -1309,6 +1385,11 @@ void LIVMapper::imu_prop_callback(const ros::TimerEvent &e)
   new_imu = false; // 控制propagate频率和IMU频率一致
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
+    // 确保 prop_imu_buffer 按时间戳有序，消除乱序送达导致的非确定性
+    std::sort(prop_imu_buffer.begin(), prop_imu_buffer.end(),
+              [](const sensor_msgs::Imu &a, const sensor_msgs::Imu &b) {
+                return a.header.stamp.toSec() < b.header.stamp.toSec();
+              });
     static double last_t_from_lidar_end_time = 0;
     if (state_update_flg)
     {
@@ -1519,10 +1600,9 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 
   if (last_timestamp_imu > 0.0 && timestamp < last_timestamp_imu)
   {
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-    ROS_ERROR("imu loop back, offset: %lf \n", last_timestamp_imu - timestamp);
-    return;
+    // 乱序但不丢弃，仅警告。下游 sync_packages 会按时间戳排序，保证确定性。
+    ROS_WARN("imu loop back, offset: %lf, inserting anyway (will be sorted downstream)\n",
+             last_timestamp_imu - timestamp);
   }
 
   // if (last_timestamp_imu > 0.0 && timestamp > last_timestamp_imu + 0.2)
@@ -1534,7 +1614,8 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
   //   return;
   // }
 
-  last_timestamp_imu = timestamp;
+  // 追踪最大时间戳而非最后时间戳，避免乱序消息被误判
+  if (timestamp > last_timestamp_imu) last_timestamp_imu = timestamp;
 
   imu_buffer.push_back(msg);
   while (max_imu_buffer_size_ > 0 && static_cast<int>(imu_buffer.size()) > max_imu_buffer_size_)
@@ -1662,6 +1743,11 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     m.imu.clear();
     m.lio_time = meas.lidar_frame_end_time;
     mtx_buffer.lock();
+    // 确保 imu_buffer 按时间戳有序，消除乱序送达导致的 draining 非确定性
+    std::sort(imu_buffer.begin(), imu_buffer.end(),
+              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                return a->header.stamp.toSec() < b->header.stamp.toSec();
+              });
     while (!imu_buffer.empty())
     {
       if (imu_buffer.front()->header.stamp.toSec() > meas.lidar_frame_end_time) break;
@@ -1672,6 +1758,12 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     lid_header_time_buffer.pop_front();
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+
+    // 确保 IMU 按时间戳严格有序，消除回调乱序导致的非确定性
+    std::sort(m.imu.begin(), m.imu.end(),
+              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                return a->header.stamp.toSec() < b->header.stamp.toSec();
+              });
 
     meas.lio_vio_flg = LIO; // process lidar topic, so timestamp should be lidar scan end.
     meas.measures.push_back(m);
@@ -1730,6 +1822,11 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       m.imu.clear();
       m.lio_time = img_capture_time;
       mtx_buffer.lock();
+      // 确保 imu_buffer 按时间戳有序，消除乱序送达导致的 draining 非确定性
+      std::sort(imu_buffer.begin(), imu_buffer.end(),
+                [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                  return a->header.stamp.toSec() < b->header.stamp.toSec();
+                });
       while (!imu_buffer.empty())
       {
         if (imu_buffer.front()->header.stamp.toSec() > m.lio_time) break;
@@ -1742,6 +1839,12 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       }
       mtx_buffer.unlock();
       sig_buffer.notify_all();
+
+      // 确保 IMU 按时间戳严格有序，消除回调乱序导致的非确定性
+      std::sort(m.imu.begin(), m.imu.end(),
+                [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                  return a->header.stamp.toSec() < b->header.stamp.toSec();
+                });
 
       *(meas.pcl_proc_cur) = *(meas.pcl_proc_next);
       PointCloudXYZI().swap(*meas.pcl_proc_next);
