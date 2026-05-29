@@ -74,6 +74,45 @@ bool shouldReplaceGridPoint(double candidate_score, const V3D &candidate_point, 
   return false;
 }
 
+V2D snapPixelForDeterminism(const V2D &px)
+{
+  constexpr double kPixelSnapScale = 1e2; // 0.01 px, below image measurement noise.
+  V2D snapped = px;
+  snapped[0] = snapDoubleForDeterminism(snapped[0], kPixelSnapScale);
+  snapped[1] = snapDoubleForDeterminism(snapped[1], kPixelSnapScale);
+  return snapped;
+}
+
+V3D snapCameraPointForDeterminism(const V3D &point)
+{
+  constexpr double kPointSnapScale = 1e8;
+  V3D snapped = point;
+  snapped[0] = snapDoubleForDeterminism(snapped[0], kPointSnapScale);
+  snapped[1] = snapDoubleForDeterminism(snapped[1], kPointSnapScale);
+  snapped[2] = snapDoubleForDeterminism(snapped[2], kPointSnapScale);
+  return snapped;
+}
+
+bool isPatchBilinearInsideImage(int u_ref_i, int v_ref_i, int scale, int cols, int rows, int patch_size, int patch_size_half)
+{
+  if (scale <= 0 || cols <= 0 || rows <= 0 || patch_size <= 0) return false;
+  const int min_u = u_ref_i - patch_size_half * scale;
+  const int min_v = v_ref_i - patch_size_half * scale;
+  const int max_u = u_ref_i + (patch_size - patch_size_half) * scale;
+  const int max_v = v_ref_i + (patch_size - patch_size_half) * scale;
+  return min_u >= 0 && min_v >= 0 && max_u < cols && max_v < rows;
+}
+
+bool isPatchGradientInsideImage(int u_ref_i, int v_ref_i, int scale, int cols, int rows, int patch_size, int patch_size_half)
+{
+  if (scale <= 0 || cols <= 0 || rows <= 0 || patch_size <= 0) return false;
+  const int min_u = u_ref_i - (patch_size_half + 1) * scale;
+  const int min_v = v_ref_i - (patch_size_half + 1) * scale;
+  const int max_u = u_ref_i + (patch_size - patch_size_half + 1) * scale;
+  const int max_v = v_ref_i + (patch_size - patch_size_half + 1) * scale;
+  return min_u >= 0 && min_v >= 0 && max_u < cols && max_v < rows;
+}
+
 bool isPatchPhotometricallyUsable(const float *patch, int patch_size, int saturation_threshold,
                                   double max_saturated_fraction, double min_intensity_std)
 {
@@ -104,6 +143,8 @@ bool isPatchPhotometricallyUsable(const float *patch, int patch_size, int satura
 VIOManager::VIOManager()
 {
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+  G.setZero();
+  H_T_H.setZero();
 }
 
 VIOManager::~VIOManager()
@@ -451,11 +492,19 @@ void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
 
 void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
 {
+  pc = snapPixelForDeterminism(pc);
   const float u_ref = pc[0];
   const float v_ref = pc[1];
   const int scale = (1 << level);
+  const int img_step = static_cast<int>(img.step);
   const int u_ref_i = floorf(pc[0] / scale) * scale;
   const int v_ref_i = floorf(pc[1] / scale) * scale;
+  const int patch_offset = patch_size_total * level;
+  if (!isPatchBilinearInsideImage(u_ref_i, v_ref_i, scale, img.cols, img.rows, patch_size, patch_size_half))
+  {
+    std::fill(patch_tmp + patch_offset, patch_tmp + patch_offset + patch_size_total, 0.0f);
+    return;
+  }
   const float subpix_u_ref = (u_ref - u_ref_i) / scale;
   const float subpix_v_ref = (v_ref - v_ref_i) / scale;
   const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
@@ -464,11 +513,11 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   const float w_ref_br = subpix_u_ref * subpix_v_ref;
   for (int x = 0; x < patch_size; x++)
   {
-    uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i - patch_size_half * scale + x * scale) * width + (u_ref_i - patch_size_half * scale);
+    uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i - patch_size_half * scale + x * scale) * img_step + (u_ref_i - patch_size_half * scale);
     for (int y = 0; y < patch_size; y++, img_ptr += scale)
     {
-      patch_tmp[patch_size_total * level + x * patch_size + y] =
-          w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
+      patch_tmp[patch_offset + x * patch_size + y] =
+          w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * img_step] + w_ref_br * img_ptr[scale * img_step + scale];
     }
   }
 }
@@ -640,9 +689,9 @@ void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, co
   const V3D f_cur(H_cur_ref * xyz_ref);
   const V3D f_du_cur = H_cur_ref * f_du_ref;
   const V3D f_dv_cur = H_cur_ref * f_dv_ref;
-  V2D px_cur(cam.world2cam(f_cur));
-  V2D px_du_cur(cam.world2cam(f_du_cur));
-  V2D px_dv_cur(cam.world2cam(f_dv_cur));
+  V2D px_cur = snapPixelForDeterminism(cam.world2cam(f_cur));
+  V2D px_du_cur = snapPixelForDeterminism(cam.world2cam(f_du_cur));
+  V2D px_dv_cur = snapPixelForDeterminism(cam.world2cam(f_dv_cur));
   A_cur_ref.col(0) = (px_du_cur - px_cur) / kHalfPatchSize;
   A_cur_ref.col(1) = (px_dv_cur - px_cur) / kHalfPatchSize;
 }
@@ -657,9 +706,9 @@ void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector
   Vector3d xyz_dv_ref(cam.cam2world(px_ref + Vector2d(0, halfpatch_size) * (1 << level_ref) * (1 << pyramid_level)));
   xyz_du_ref *= xyz_ref[2] / xyz_du_ref[2];
   xyz_dv_ref *= xyz_ref[2] / xyz_dv_ref[2];
-  const Vector2d px_cur(cam.world2cam(T_cur_ref * (xyz_ref)));
-  const Vector2d px_du(cam.world2cam(T_cur_ref * (xyz_du_ref)));
-  const Vector2d px_dv(cam.world2cam(T_cur_ref * (xyz_dv_ref)));
+  const Vector2d px_cur = snapPixelForDeterminism(cam.world2cam(T_cur_ref * (xyz_ref)));
+  const Vector2d px_du = snapPixelForDeterminism(cam.world2cam(T_cur_ref * (xyz_du_ref)));
+  const Vector2d px_dv = snapPixelForDeterminism(cam.world2cam(T_cur_ref * (xyz_dv_ref)));
   A_cur_ref.col(0) = (px_du - px_cur) / halfpatch_size;
   A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
 }
@@ -683,7 +732,7 @@ void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
       Vector2f px_patch(x - halfpatch_size, y - halfpatch_size);
       px_patch *= (1 << search_level);
       px_patch *= (1 << pyramid_level);
-      const Vector2f px(A_ref_cur * px_patch + px_ref.cast<float>());
+      const Vector2f px = snapPixelForDeterminism((A_ref_cur * px_patch + px_ref.cast<float>()).cast<double>()).cast<float>();
       if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = 0;
       else
@@ -788,7 +837,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       V2D px;
       // px[0] = fx * pt_c[0]/pt_c[2] + cx;
       // px[1] = fy * pt_c[1]/pt_c[2]+ cy;
-      px = new_frame_->cam_->world2cam(pt_c);
+      px = snapPixelForDeterminism(new_frame_->cam_->world2cam(pt_c));
 
       if (new_frame_->cam_->isInFrame(px.cast<int>(), border))
       {
@@ -841,7 +890,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         // dir.normalize();
         // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree  0.17 80 degree 0.08 85 degree
 
-        V2D pc(new_frame_->w2c(pt->pos_));
+        V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
         if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
         {
           // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 255, 255), -1, 8);
@@ -920,7 +969,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
             dir.normalize();
             // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree 0.17 80 degree 0.08 85 degree
 
-            V2D pc(new_frame_->w2c(pt->pos_));
+            V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
 
             if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
             {
@@ -991,7 +1040,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       VisualPoint *pt = retrieve_voxel_points[i];
       // visual_sub_map_cur.push_back(pt); // before
 
-      V2D pc(new_frame_->w2c(pt->pos_));
+      V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
 
       // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 0, 255), -1, 8); // Green Sparse Align tracked
 
@@ -1178,24 +1227,40 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   }
 }
 
-void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
+bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
-  if (total_points == 0) return;
+  G.setZero();
+  H_T_H.setZero();
+  if (total_points == 0) return false;
   
   compute_jacobian_time = update_ekf_time = 0.0;
+  bool has_valid_update = false;
 
   for (int level = patch_pyrimid_level - 1; level >= 0; level--)
   {
+    bool level_updated = false;
     if (inverse_composition_en)
     {
       has_ref_patch_cache = false;
-      updateStateInverse(img, level);
+      level_updated = updateStateInverse(img, level);
     }
     else
-      updateState(img, level);
+      level_updated = updateState(img, level);
+    has_valid_update = has_valid_update || level_updated;
   }
-  state->cov -= G * state->cov;
+
+  if (has_valid_update)
+  {
+    state->cov -= G * state->cov;
+    state->cov = 0.5 * (state->cov + state->cov.transpose()).eval();
+    snapStateForDeterminism(*state);
+  }
+  else
+  {
+    G.setZero();
+  }
   updateFrameState(*state);
+  return has_valid_update;
 }
 
 void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
@@ -1230,7 +1295,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
     if (!std::isfinite(normal[0]) || !std::isfinite(normal[1]) || !std::isfinite(normal[2])) continue;
     if (normal.squaredNorm() < 1e-12) continue;
 
-    V2D pc(new_frame_->w2c(pt));
+    V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt));
     if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
 
     if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
@@ -1262,7 +1327,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
     if (!std::isfinite(normal[0]) || !std::isfinite(normal[1]) || !std::isfinite(normal[2])) continue;
     if (normal.squaredNorm() < 1e-12) continue;
 
-    V2D pc(new_frame_->w2c(pt));
+    V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt));
     if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
 
     if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
@@ -1314,7 +1379,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
       double cos_theta = dir.dot(norm_vec);
       // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
-      V2D pc(new_frame_->w2c(pt));
+      V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt));
       if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
       if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border)) continue;
 
@@ -1384,7 +1449,7 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
       continue;
     }
 
-    V2D pc(new_frame_->w2c(pt->pos_));
+    V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
     bool add_flag = false;
 
     // TODO: condition: distance and view_angle
@@ -1611,8 +1676,8 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
       Feature *ref_ftr;
       ref_ftr = pt->ref_patch;
       // Feature* ref_ftr;
-      V2D pc(new_frame_->w2c(pt->pos_));
-      V2D pc_prior(new_frame_->w2c_prior(pt->pos_));
+      V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+      V2D pc_prior = snapPixelForDeterminism(new_frame_->w2c_prior(pt->pos_));
 
       V3D norm_vec(ref_ftr->T_f_w_.rotation_matrix() * pt->normal_);
       V3D pf(ref_ftr->T_f_w_ * pt->pos_);
@@ -1749,7 +1814,7 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
     if (!pt->is_normal_initialized_) continue;
 
     Feature *ref_ftr;
-    V2D pc(new_frame_->w2c(pt->pos_));
+    V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
     ref_ftr = pt->ref_patch;
 
     Matrix2d A_cur_ref;
@@ -1821,13 +1886,14 @@ void VIOManager::precomputeReferencePatches(int level)
     const int scale = (1 << level);
 
     VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr || pt->ref_patch == nullptr) continue;
     cv::Mat img = pt->ref_patch->img_;
-
-    if (pt == nullptr) continue;
+    if (img.empty()) continue;
+    const int img_step = static_cast<int>(img.step);
 
     double depth((pt->pos_ - pt->ref_patch->pos()).norm());
-    V3D pf = pt->ref_patch->f_ * depth;
-    V2D pc = pt->ref_patch->px_;
+    V3D pf = snapCameraPointForDeterminism(pt->ref_patch->f_ * depth);
+    V2D pc = snapPixelForDeterminism(pt->ref_patch->px_);
     M3D R_ref_w = pt->ref_patch->T_f_w_.rotation_matrix();
 
     computeProjectionJacobian(pf, Jdpi);
@@ -1837,6 +1903,7 @@ void VIOManager::precomputeReferencePatches(int level)
     const float v_ref = pc[1];
     const int u_ref_i = floorf(pc[0] / scale) * scale;
     const int v_ref_i = floorf(pc[1] / scale) * scale;
+    if (!isPatchGradientInsideImage(u_ref_i, v_ref_i, scale, img.cols, img.rows, patch_size, patch_size_half)) continue;
     const float subpix_u_ref = (u_ref - u_ref_i) / scale;
     const float subpix_v_ref = (v_ref - v_ref_i) / scale;
     const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
@@ -1846,19 +1913,19 @@ void VIOManager::precomputeReferencePatches(int level)
 
     for (int x = 0; x < patch_size; x++)
     {
-      uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
+      uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * img_step + u_ref_i - patch_size_half * scale;
       for (int y = 0; y < patch_size; ++y, img_ptr += scale)
       {
         float du =
             0.5f *
-            ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * width + scale] +
-              w_ref_br * img_ptr[scale * width + scale * 2]) -
-             (w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] + w_ref_bl * img_ptr[scale * width - scale] + w_ref_br * img_ptr[scale * width]));
+            ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * img_step + scale] +
+              w_ref_br * img_ptr[scale * img_step + scale * 2]) -
+             (w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] + w_ref_bl * img_ptr[scale * img_step - scale] + w_ref_br * img_ptr[scale * img_step]));
         float dv =
             0.5f *
-            ((w_ref_tl * img_ptr[scale * width] + w_ref_tr * img_ptr[scale + scale * width] + w_ref_bl * img_ptr[width * scale * 2] +
-              w_ref_br * img_ptr[width * scale * 2 + scale]) -
-             (w_ref_tl * img_ptr[-scale * width] + w_ref_tr * img_ptr[-scale * width + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
+            ((w_ref_tl * img_ptr[scale * img_step] + w_ref_tr * img_ptr[scale + scale * img_step] + w_ref_bl * img_ptr[img_step * scale * 2] +
+              w_ref_br * img_ptr[img_step * scale * 2 + scale]) -
+             (w_ref_tl * img_ptr[-scale * img_step] + w_ref_tr * img_ptr[-scale * img_step + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
 
         Jimg << du, dv;
         Jimg = Jimg * (1.0 / scale);
@@ -1873,9 +1940,11 @@ void VIOManager::precomputeReferencePatches(int level)
   has_ref_patch_cache = true;
 }
 
-void VIOManager::updateStateInverse(cv::Mat img, int level)
+bool VIOManager::updateStateInverse(cv::Mat img, int level)
 {
-  if (total_points == 0) return;
+  if (total_points == 0) return false;
+  if (state) snapStateForDeterminism(*state);
+  if (state_propagat) snapStateForDeterminism(*state_propagat);
   StatesGroup old_state = (*state);
   V2D pc;
   MD(1, 2) Jimg;
@@ -1884,11 +1953,13 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
   VectorXd z;
   MatrixXd H_sub;
   bool EKF_end = false;
+  bool any_update = false;
   float last_error = std::numeric_limits<float>::max();
   compute_jacobian_time = update_ekf_time = 0.0;
   M3D P_wi_hat;
   bool z_init = true;
   const int H_DIM = total_points * patch_size_total;
+  const int img_step = static_cast<int>(img.step);
 
   z.resize(H_DIM);
   z.setZero();
@@ -1901,6 +1972,8 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
     double t1 = omp_get_wtime();
     double count_outlier = 0;
     if (has_ref_patch_cache == false) precomputeReferencePatches(level);
+    z.setZero();
+    H_sub.setZero();
     int n_meas = 0;
     float error = 0.0;
     M3D Rwi(state->rot_end);
@@ -1921,13 +1994,18 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
 
       if (pt == nullptr) continue;
 
-      V3D pf = Rcw * pt->pos_ + Pcw;
-      pc = cam->world2cam(pf);
+      V3D pf = snapCameraPointForDeterminism(Rcw * pt->pos_ + Pcw);
+      pc = snapPixelForDeterminism(cam->world2cam(pf));
 
       const float u_ref = pc[0];
       const float v_ref = pc[1];
       const int u_ref_i = floorf(pc[0] / scale) * scale;
       const int v_ref_i = floorf(pc[1] / scale) * scale;
+      if (!isPatchBilinearInsideImage(u_ref_i, v_ref_i, scale, img.cols, img.rows, patch_size, patch_size_half))
+      {
+        visual_submap->errors[i] = std::numeric_limits<float>::max();
+        continue;
+      }
       const float subpix_u_ref = (u_ref - u_ref_i) / scale;
       const float subpix_v_ref = (v_ref - v_ref_i) / scale;
       const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
@@ -1938,11 +2016,11 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       vector<float> P = visual_submap->warp_patch[i];
       for (int x = 0; x < patch_size; x++)
       {
-        uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
+        uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * img_step + u_ref_i - patch_size_half * scale;
         for (int y = 0; y < patch_size; ++y, img_ptr += scale)
         {
-          double res = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] +
-                       w_ref_br * img_ptr[scale * width + scale] - P[patch_size_total * level + x * patch_size + y];
+          double res = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * img_step] +
+                       w_ref_br * img_ptr[scale * img_step + scale] - P[patch_size_total * level + x * patch_size + y];
           z(i * patch_size_total + x * patch_size + y) = res;
           patch_error += res * res;
           MD(1, 3) J_dR = H_sub_inv.block<1, 3>(i * patch_size_total + x * patch_size + y, 0);
@@ -1989,10 +2067,10 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       auto &&HTz = H_sub_T * z;
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-        MD(DIM_STATE, 1) solution =
+      MD(DIM_STATE, 1) solution =
           (-K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0)).eval();
-        V3D rot_add = solution.block<3, 1>(0, 0);
-        V3D t_add = solution.block<3, 1>(3, 0);
+      V3D rot_add = solution.block<3, 1>(0, 0);
+      V3D t_add = solution.block<3, 1>(3, 0);
       const double rot_step_deg = rot_add.norm() * 57.3;
       const double trans_step_m = t_add.norm();
       const double max_rot_step_deg = std::max(0.1, max_state_update_rot_deg);
@@ -2008,6 +2086,8 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       }
 
       (*state) += solution;
+      snapStateForDeterminism(*state);
+      any_update = true;
 
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f)) { EKF_end = true; }
     }
@@ -2021,19 +2101,24 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
 
     if (iteration == max_iterations || EKF_end) break; 
   }
+  return any_update;
 }
 
-void VIOManager::updateState(cv::Mat img, int level)
+bool VIOManager::updateState(cv::Mat img, int level)
 {
-  if (total_points == 0) return;
+  if (total_points == 0) return false;
+  if (state) snapStateForDeterminism(*state);
+  if (state_propagat) snapStateForDeterminism(*state_propagat);
   StatesGroup old_state = (*state);
 
   VectorXd z;
   MatrixXd H_sub;
   bool EKF_end = false;
+  bool any_update = false;
   float last_error = std::numeric_limits<float>::max();
 
   const int H_DIM = total_points * patch_size_total;
+  const int img_step = static_cast<int>(img.step);
   z.resize(H_DIM);
   z.setZero();
   H_sub.resize(H_DIM, 7);
@@ -2041,7 +2126,10 @@ void VIOManager::updateState(cv::Mat img, int level)
 
   for (int iteration = 0; iteration < max_iterations; iteration++)
   {
+    double accum_du = 0, accum_dv = 0, accum_JdR = 0, accum_Jdt = 0, accum_cur = 0, accum_pf = 0, accum_patch = 0;
     double t1 = omp_get_wtime();
+    z.setZero();
+    H_sub.setZero();
 
     M3D Rwi(state->rot_end);
     V3D Pwi(state->pos_end);
@@ -2076,8 +2164,8 @@ void VIOManager::updateState(cv::Mat img, int level)
 
       if (pt == nullptr) continue;
 
-      V3D pf = Rcw * pt->pos_ + Pcw;
-      V2D pc = cam->world2cam(pf);
+      V3D pf = snapCameraPointForDeterminism(Rcw * pt->pos_ + Pcw);
+      V2D pc = snapPixelForDeterminism(cam->world2cam(pf));
 
       computeProjectionJacobian(pf, Jdpi);
       M3D p_hat;
@@ -2087,6 +2175,11 @@ void VIOManager::updateState(cv::Mat img, int level)
       float v_ref = pc[1];
       int u_ref_i = floorf(pc[0] / scale) * scale;
       int v_ref_i = floorf(pc[1] / scale) * scale;
+      if (!isPatchGradientInsideImage(u_ref_i, v_ref_i, scale, img.cols, img.rows, patch_size, patch_size_half))
+      {
+        visual_submap->errors[i] = std::numeric_limits<float>::max();
+        continue;
+      }
       float subpix_u_ref = (u_ref - u_ref_i) / scale;
       float subpix_v_ref = (v_ref - v_ref_i) / scale;
       float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
@@ -2100,19 +2193,19 @@ void VIOManager::updateState(cv::Mat img, int level)
 
       for (int x = 0; x < patch_size; x++)
       {
-        uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
+        uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * img_step + u_ref_i - patch_size_half * scale;
         for (int y = 0; y < patch_size; ++y, img_ptr += scale)
         {
           float du =
               0.5f *
-              ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * width + scale] +
-                w_ref_br * img_ptr[scale * width + scale * 2]) -
-               (w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] + w_ref_bl * img_ptr[scale * width - scale] + w_ref_br * img_ptr[scale * width]));
+              ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * img_step + scale] +
+                w_ref_br * img_ptr[scale * img_step + scale * 2]) -
+               (w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] + w_ref_bl * img_ptr[scale * img_step - scale] + w_ref_br * img_ptr[scale * img_step]));
           float dv =
               0.5f *
-              ((w_ref_tl * img_ptr[scale * width] + w_ref_tr * img_ptr[scale + scale * width] + w_ref_bl * img_ptr[width * scale * 2] +
-                w_ref_br * img_ptr[width * scale * 2 + scale]) -
-               (w_ref_tl * img_ptr[-scale * width] + w_ref_tr * img_ptr[-scale * width + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
+              ((w_ref_tl * img_ptr[scale * img_step] + w_ref_tr * img_ptr[scale + scale * img_step] + w_ref_bl * img_ptr[img_step * scale * 2] +
+                w_ref_br * img_ptr[img_step * scale * 2 + scale]) -
+               (w_ref_tl * img_ptr[-scale * img_step] + w_ref_tr * img_ptr[-scale * img_step + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
 
           Jimg << du, dv;
           Jimg = Jimg * state->inv_expo_time;
@@ -2123,14 +2216,18 @@ void VIOManager::updateState(cv::Mat img, int level)
           Jdt = Jdp * Jdp_dt;
 
           double cur_value =
-              w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
+              w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * img_step] + w_ref_br * img_ptr[scale * img_step + scale];
           double res = state->inv_expo_time * cur_value - inv_ref_expo * P[patch_size_total * level + x * patch_size + y];
 
           z(i * patch_size_total + x * patch_size + y) = res;
 
           patch_error += res * res;
           n_meas += 1;
-          
+          accum_du += du; accum_dv += dv;
+          accum_JdR += JdR.squaredNorm(); accum_Jdt += Jdt.squaredNorm();
+          accum_cur += cur_value; accum_pf += pf.squaredNorm();
+          accum_patch += patch_error;
+
           if (exposure_estimate_en) { H_sub.block<1, 7>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt, cur_value; }
           else { H_sub.block<1, 6>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt; }
         }
@@ -2153,25 +2250,50 @@ void VIOManager::updateState(cv::Mat img, int level)
       EKF_end = true;
       break;
     }
-    
+
     compute_jacobian_time += omp_get_wtime() - t1;
 
-    // printf("\nPYRAMID LEVEL %i\n---------------\n", level);
-    // std::cout << "It. " << iteration
-    //           << "\t last_error = " << last_error
-    //           << "\t new_error = " << error
-    //           << std::endl;
-
     double t3 = omp_get_wtime();
+
+    // ===== 诊断：H 矩阵分量分离 =====
+    {
+      static std::ofstream fcomp;
+      if (!fcomp.is_open() && !timing_log_dir.empty())
+        fcomp.open(timing_log_dir + "h_component.txt", std::ios::out);
+      if (fcomp.is_open())
+        fcomp << std::fixed << std::setprecision(12)
+              << "frame=" << frame_count << " level=" << level << " iter=" << iteration
+              << " n_meas=" << n_meas
+              << " sum_du=" << accum_du << " sum_dv=" << accum_dv
+              << " sum_JdR=" << accum_JdR << " sum_Jdt=" << accum_Jdt
+              << " sum_cur=" << accum_cur << " sum_pf=" << accum_pf
+              << " sum_patch=" << accum_patch << std::endl;
+    }
+    // ===== 诊断结束 =====
+
+    // ===== 诊断：IEKF 迭代细节 =====
+    static std::ofstream fout_iekf_diag;
+    if (!fout_iekf_diag.is_open() && !timing_log_dir.empty())
+      fout_iekf_diag.open(timing_log_dir + "iekf_diag.txt", std::ios::out);
+    if (fout_iekf_diag.is_open())
+    {
+      double ck_H = H_sub.sum();
+      double ck_z = z.sum();
+      fout_iekf_diag << std::fixed << std::setprecision(12)
+                     << "frame=" << frame_count
+                     << " level=" << level
+                     << " iter=" << iteration
+                     << " n_meas=" << n_meas
+                     << " error=" << error
+                     << " ck_H=" << ck_H
+                     << " ck_z=" << ck_z << std::endl;
+    }
+    // ===== 诊断结束 =====
 
     if (error <= last_error)
     {
       old_state = (*state);
       last_error = error;
-
-      // K = (H.transpose() / img_point_cov * H + state->cov.inverse()).inverse() * H.transpose() / img_point_cov; auto
-      // vec = (*state_propagat) - (*state); G = K*H;
-      // (*state) += (-K*z + vec - G*vec);
 
       auto &&H_sub_T = H_sub.transpose();
       H_T_H.setZero();
@@ -2179,7 +2301,6 @@ void VIOManager::updateState(cv::Mat img, int level)
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
-      // K = K_1.block<DIM_STATE,6>(0,0) * H_sub_T;
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
       MD(DIM_STATE, 1)
@@ -2202,10 +2323,25 @@ void VIOManager::updateState(cv::Mat img, int level)
       }
 
       (*state) += solution;
+      snapStateForDeterminism(*state);
+      any_update = true;
 
       auto &&expo_add = solution.block<1, 1>(6, 0);
-      // if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f) && (expo_add.norm() < 0.001f)) EKF_end = true;
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f))  EKF_end = true;
+
+      // ===== 诊断：IEKF 更新量 =====
+      if (fout_iekf_diag.is_open())
+      {
+        fout_iekf_diag << std::fixed << std::setprecision(12)
+                       << "frame=" << frame_count
+                       << " level=" << level
+                       << " iter=" << iteration
+                       << " rot_step_deg=" << rot_step_deg
+                       << " trans_step_m=" << trans_step_m
+                       << " sol_rot=" << rot_add.squaredNorm()
+                       << " sol_trans=" << t_add.squaredNorm() << std::endl;
+      }
+      // ===== 诊断结束 =====
     }
     else
     {
@@ -2218,6 +2354,7 @@ void VIOManager::updateState(cv::Mat img, int level)
     if (iteration == max_iterations || EKF_end) break;
   }
   // if (state->inv_expo_time < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
+  return any_update;
 }
 
 void VIOManager::updateFrameState(StatesGroup state)
@@ -2253,7 +2390,7 @@ void VIOManager::plotTrackedPoints()
   for (int i = 0; i < total_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
-    V2D pc(new_frame_->w2c(pt->pos_));
+    V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
 
     if (visual_submap->errors[i] <= visual_submap->propa_errors[i])
     {
@@ -2274,20 +2411,22 @@ void VIOManager::plotTrackedPoints()
 
 V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
 {
+  pc = snapPixelForDeterminism(pc);
   const float u_ref = pc[0];
   const float v_ref = pc[1];
   const int u_ref_i = floorf(pc[0]);
   const int v_ref_i = floorf(pc[1]);
+  const int img_step = static_cast<int>(img.step);
   const float subpix_u_ref = (u_ref - u_ref_i);
   const float subpix_v_ref = (v_ref - v_ref_i);
   const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
   const float w_ref_tr = subpix_u_ref * (1.0 - subpix_v_ref);
   const float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
   const float w_ref_br = subpix_u_ref * subpix_v_ref;
-  uint8_t *img_ptr = (uint8_t *)img.data + ((v_ref_i)*width + (u_ref_i)) * 3;
-  float B = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[0 + 3] + w_ref_bl * img_ptr[width * 3] + w_ref_br * img_ptr[width * 3 + 0 + 3];
-  float G = w_ref_tl * img_ptr[1] + w_ref_tr * img_ptr[1 + 3] + w_ref_bl * img_ptr[1 + width * 3] + w_ref_br * img_ptr[width * 3 + 1 + 3];
-  float R = w_ref_tl * img_ptr[2] + w_ref_tr * img_ptr[2 + 3] + w_ref_bl * img_ptr[2 + width * 3] + w_ref_br * img_ptr[width * 3 + 2 + 3];
+  uint8_t *img_ptr = (uint8_t *)img.data + v_ref_i * img_step + u_ref_i * 3;
+  float B = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[0 + 3] + w_ref_bl * img_ptr[img_step] + w_ref_br * img_ptr[img_step + 0 + 3];
+  float G = w_ref_tl * img_ptr[1] + w_ref_tr * img_ptr[1 + 3] + w_ref_bl * img_ptr[1 + img_step] + w_ref_br * img_ptr[img_step + 1 + 3];
+  float R = w_ref_tl * img_ptr[2] + w_ref_tr * img_ptr[2 + 3] + w_ref_bl * img_ptr[2 + img_step] + w_ref_br * img_ptr[img_step + 2 + 3];
   V3F pixel(B, G, R);
   return pixel;
 }
@@ -3069,12 +3208,14 @@ void VIOManager::updateStateWithBoardObservation()
     Eigen::MatrixXd I_KH = Eigen::Matrix<double, 6, 6>::Identity() - K * H_aruco;
     state->cov.block<6, 6>(0, 0) = I_KH * state->cov.block<6, 6>(0, 0) * I_KH.transpose() + K * R_aruco * K.transpose();
 
-        printf("[Aruco] Updated with board %d, mode=%s, residual norm: %.6f, quality weight: %.3f\n",
-          board_id,
-          use_orientation_update ? "pos+ori" : "pos-only",
-          z_aruco.norm(),
-          quality_weight);
+    printf("[Aruco] Updated with board %d, mode=%s, residual norm: %.6f, quality weight: %.3f\n",
+           board_id,
+           use_orientation_update ? "pos+ori" : "pos-only",
+           z_aruco.norm(),
+           quality_weight);
   }
+  snapStateForDeterminism(*state);
+  updateFrameState(*state);
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
@@ -3094,9 +3235,59 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   }
   img_rgb = img.clone();
   img_cp = img.clone();
-  // img_test = img.clone();
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
+
+  // 强制拷贝到连续缓冲区，避免 cv::cvtColor 内部重分配导致的布局差异
+  {
+    cv::Mat tmp(img.rows, img.cols, CV_8UC1);
+    uint8_t *src = img.data;
+    uint8_t *dst = tmp.data;
+    int src_step = (int)img.step;
+    int dst_step = (int)tmp.step;
+    for (int r = 0; r < img.rows; r++)
+      for (int c = 0; c < img.cols; c++)
+        dst[r * dst_step + c] = src[r * src_step + c];
+    img = tmp;
+  }
+
+  // ===== 诊断：图像像素校验和 =====
+  {
+    static std::ofstream fimgck;
+    if (!fimgck.is_open() && !timing_log_dir.empty())
+      fimgck.open(timing_log_dir + "img_checksum.txt", std::ios::out);
+    if (fimgck.is_open())
+    {
+      double ck_img = 0;
+      uint8_t *d = img.data;
+      int step = (int)img.step;
+      for (int r = 0; r < img.rows; r++)
+        for (int c = 0; c < img.cols; c++)
+          ck_img += d[r * step + c];
+      fimgck << std::fixed << std::setprecision(6)
+             << "frame=" << frame_count
+             << " ck_img=" << ck_img
+             << " cols=" << img.cols << " rows=" << img.rows
+             << " step=" << step << std::endl;
+    }
+  }
+  // ===== 诊断结束 =====
+
+  // ===== 诊断：检查 stride 是否匹配 =====
+  {
+    static bool stride_checked = false;
+    static std::ofstream fstride;
+    if (!fstride.is_open() && !timing_log_dir.empty())
+      fstride.open(timing_log_dir + "stride_check.txt", std::ios::out);
+    if (!stride_checked && fstride.is_open())
+    {
+      fstride << "width=" << width << " img.cols=" << img.cols
+              << " img.step=" << img.step << " img.rows=" << img.rows
+              << " channels=" << img.channels() << std::endl;
+      stride_checked = true;
+    }
+  }
+  // ===== 诊断结束 =====
 
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);

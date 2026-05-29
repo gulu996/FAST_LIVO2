@@ -258,8 +258,8 @@ public:
 
   VIOManager();
   ~VIOManager();
-  void updateStateInverse(cv::Mat img, int level);
-  void updateState(cv::Mat img, int level);
+  bool updateStateInverse(cv::Mat img, int level);
+  bool updateState(cv::Mat img, int level);
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
@@ -268,7 +268,7 @@ public:
   void initializeVIO(ros::NodeHandle &nh);
   void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);
-  void computeJacobianAndUpdateEKF(cv::Mat img);
+  bool computeJacobianAndUpdateEKF(cv::Mat img);
   void resetGrid();
   void updateVisualMapPoints(cv::Mat img);
   void getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref, const SE3 &T_cur_ref,

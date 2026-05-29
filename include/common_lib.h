@@ -20,6 +20,7 @@ which is included as part of this source code package.
 #include <sensor_msgs/Imu.h>
 #include <sophus/se3.h>
 #include <tf/transform_broadcaster.h>
+#include <cmath>
 
 using namespace std;
 using namespace Eigen;
@@ -221,6 +222,48 @@ struct StatesGroup
   V3D gravity;                              // the estimated gravity acceleration
   Matrix<double, DIM_STATE, DIM_STATE> cov; // states covariance
 };
+
+inline double snapDoubleForDeterminism(double value, double scale)
+{
+  if (!std::isfinite(value)) return value;
+  return std::round(value * scale) / scale;
+}
+
+inline void snapStateForDeterminism(StatesGroup &state)
+{
+  constexpr double kStateSnapScale = 1e8;
+  constexpr double kCovSnapScale = 1e10;
+
+  for (int i = 0; i < 3; ++i)
+  {
+    state.pos_end[i] = snapDoubleForDeterminism(state.pos_end[i], kStateSnapScale);
+    state.vel_end[i] = snapDoubleForDeterminism(state.vel_end[i], kStateSnapScale);
+    state.bias_g[i] = snapDoubleForDeterminism(state.bias_g[i], kStateSnapScale);
+    state.bias_a[i] = snapDoubleForDeterminism(state.bias_a[i], kStateSnapScale);
+    state.gravity[i] = snapDoubleForDeterminism(state.gravity[i], kStateSnapScale);
+  }
+  state.inv_expo_time = snapDoubleForDeterminism(state.inv_expo_time, kStateSnapScale);
+
+  Eigen::Quaterniond q(state.rot_end);
+  q.normalize();
+  if (q.w() < 0.0) q.coeffs() *= -1.0;
+  q.x() = snapDoubleForDeterminism(q.x(), kStateSnapScale);
+  q.y() = snapDoubleForDeterminism(q.y(), kStateSnapScale);
+  q.z() = snapDoubleForDeterminism(q.z(), kStateSnapScale);
+  q.w() = snapDoubleForDeterminism(q.w(), kStateSnapScale);
+  q.normalize();
+  state.rot_end = q.toRotationMatrix();
+
+  state.cov = 0.5 * (state.cov + state.cov.transpose()).eval();
+  for (int r = 0; r < DIM_STATE; ++r)
+  {
+    for (int c = 0; c < DIM_STATE; ++c)
+    {
+      state.cov(r, c) = snapDoubleForDeterminism(state.cov(r, c), kCovSnapScale);
+    }
+  }
+  state.cov = 0.5 * (state.cov + state.cov.transpose()).eval();
+}
 
 template <typename T>
 auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> &g, const Matrix<T, 3, 1> &v, const Matrix<T, 3, 1> &p,

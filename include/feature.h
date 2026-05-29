@@ -40,7 +40,9 @@ struct Feature
   double inv_expo_time_; //!< Inverse exposure time of the image where the patch feature was extracted.
   
   Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3 &_T_f_w, int _level)
-      : type_(CORNER), px_(_px), f_(_f), T_f_w_(_T_f_w), mean_(0), score_(0), level_(_level), patch_(_patch), point_(_point)
+      : id_(-1), type_(CORNER), px_(_px), f_(_f), level_(_level), point_(_point),
+        grad_(Vector2d::Zero()), T_f_w_(_T_f_w), patch_(_patch), score_(0), mean_(0),
+        inv_expo_time_(1.0)
   {
   }
 

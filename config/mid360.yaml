@@ -12,6 +12,8 @@ common:
   max_imu_buffer_size: 10000
   max_img_buffer_size: 1000
   max_prop_imu_buffer_size: 10000
+  sync_img_buffer_min_size: 5
+  sync_img_lookahead_time: 0.12
 
 extrin_calib:
   #extrinsic_T: [-0.011, -0.02329, 0.04412]
@@ -149,9 +151,9 @@ evo:
   pose_output_en: false
 
 pcd_save:
-  pcd_save_en: false
+  pcd_save_en: true
   save_log_en: true # 日志写盘
-  save_path: "/home/gulu/data"
+  save_path: "/home/jeton/data"
   global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05
@@ -187,4 +189,3 @@ aruco_landmarks:
       flag: 0
       #position: [30.0, 2.0, 1.5]
     
-

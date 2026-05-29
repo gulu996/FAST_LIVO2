@@ -182,6 +182,9 @@ public:
   deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
   deque<cv::Mat> img_buffer;
   deque<double> img_time_buffer;
+  cv::Mat pending_vio_img_;
+  double pending_vio_time_ = 0.0;
+  bool has_pending_vio_img_ = false;
   vector<pointWithVar> _pv_list;
   vector<double> extrinT;
   vector<double> extrinR;
@@ -296,5 +299,7 @@ public:
   int max_imu_buffer_size_ = 3000;
   int max_img_buffer_size_ = 12;
   int max_prop_imu_buffer_size_ = 3000;
+  int sync_img_buffer_min_size_ = 1;
+  double sync_img_lookahead_time_ = 0.0;
 };
 #endif

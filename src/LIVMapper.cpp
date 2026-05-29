@@ -120,6 +120,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("common/max_imu_buffer_size", max_imu_buffer_size_, 3000);
   nh.param<int>("common/max_img_buffer_size", max_img_buffer_size_, 12);
   nh.param<int>("common/max_prop_imu_buffer_size", max_prop_imu_buffer_size_, 3000);
+  nh.param<int>("common/sync_img_buffer_min_size", sync_img_buffer_min_size_, 1);
+  nh.param<double>("common/sync_img_lookahead_time", sync_img_lookahead_time_, 0.0);
+  sync_img_buffer_min_size_ = std::max(1, sync_img_buffer_min_size_);
+  sync_img_lookahead_time_ = std::max(0.0, sync_img_lookahead_time_);
 
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
@@ -585,6 +589,7 @@ void LIVMapper::processImu()
 
   if (gravity_align_en) gravityAlignment();
 
+  snapStateForDeterminism(_state);
   state_propagat = _state;
   voxelmap_manager->state_ = _state;
   voxelmap_manager->feats_undistort_ = feats_undistort;
@@ -623,17 +628,9 @@ void LIVMapper::stateEstimationAndMapping()
       handleLIO();
       break;
   }
-  // Deterministic state rounding: quantize vectors to ~1e-10 to block ULP drift amplification
-  // Rotation matrix skipped: rounding elements breaks SO(3) orthogonality
-  auto snap = [](double v) { return std::round(v * 1e10) * 1e-10; };
-  for (int i = 0; i < 3; i++) {
-    _state.pos_end[i] = snap(_state.pos_end[i]);
-    _state.vel_end[i] = snap(_state.vel_end[i]);
-    _state.bias_g[i] = snap(_state.bias_g[i]);
-    _state.bias_a[i] = snap(_state.bias_a[i]);
-    _state.gravity[i] = snap(_state.gravity[i]);
-  }
-  _state.inv_expo_time = snap(_state.inv_expo_time);
+  snapStateForDeterminism(_state);
+  voxelmap_manager->state_ = _state;
+  if (state_update_flg) latest_ekf_state = _state;
 }
 
 void LIVMapper::handleVIO() 
@@ -733,6 +730,8 @@ void LIVMapper::handleVIO()
   }
 
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  snapStateForDeterminism(_state);
+  vio_manager->updateFrameState(_state);
   updateVisualObservationHints();
 
   if (imu_prop_enable) 
@@ -909,6 +908,8 @@ void LIVMapper::handleLIO()
   voxelmap_manager->StateEstimation(state_propagat);
   _state = voxelmap_manager->state_;
   _pv_list = voxelmap_manager->pv_list_;
+  snapStateForDeterminism(_state);
+  voxelmap_manager->state_ = _state;
 
   double t2 = omp_get_wtime();
 
@@ -1668,29 +1669,27 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   }
   // double msg_header_time =  msg->header.stamp.toSec();
   double msg_header_time = msg->header.stamp.toSec() + img_time_offset;
-  if (abs(msg_header_time - last_timestamp_img) < 0.001) return;
   ROS_INFO_THROTTLE(1.0, "Get image, its header time: %.6f", msg_header_time);
-  if (msg_header_time < last_timestamp_img)
-  {
-    ROS_ERROR("image loop back. \n");
-    return;
-  }
 
   mtx_buffer.lock();
 
   double img_time_correct = msg_header_time; // last_timestamp_lidar + 0.105;
 
-  if (img_time_correct - last_timestamp_img < 0.02)
+  for (const double buffered_time : img_time_buffer)
   {
-    ROS_WARN("Image need Jumps: %.6f", img_time_correct);
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-    return;
+    if (std::fabs(buffered_time - img_time_correct) < 0.001)
+    {
+      mtx_buffer.unlock();
+      sig_buffer.notify_all();
+      return;
+    }
   }
 
   cv::Mat img_cur = getImageFromMsg(msg);
-  img_buffer.push_back(img_cur);
-  img_time_buffer.push_back(img_time_correct);
+  const auto insert_it = std::lower_bound(img_time_buffer.begin(), img_time_buffer.end(), img_time_correct);
+  const auto insert_idx = std::distance(img_time_buffer.begin(), insert_it);
+  img_time_buffer.insert(insert_it, img_time_correct);
+  img_buffer.insert(img_buffer.begin() + insert_idx, img_cur);
   while (max_img_buffer_size_ > 0 && static_cast<int>(img_buffer.size()) > max_img_buffer_size_)
   {
     img_buffer.pop_front();
@@ -1699,7 +1698,7 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
 
-  last_timestamp_img = img_time_correct;
+  if (img_time_correct > last_timestamp_img) last_timestamp_img = img_time_correct;
   // cv::imshow("img", img);
   // cv::waitKey(1);
   // cout<<"last_timestamp_img:::"<<last_timestamp_img<<endl;
@@ -1709,9 +1708,10 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 
 bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 {
-  if (lid_raw_data_buffer.empty() && lidar_en) return false;
-  if (img_buffer.empty() && img_en) return false;
-  if (imu_buffer.empty() && imu_en) return false;
+  const bool pending_livo_vio = slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_;
+  if (lid_raw_data_buffer.empty() && lidar_en && !pending_livo_vio) return false;
+  if (img_en && img_buffer.empty() && !pending_livo_vio) return false;
+  if (imu_buffer.empty() && imu_en && !pending_livo_vio) return false;
 
   switch (slam_mode_)
   {
@@ -1787,6 +1787,12 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     case VIO:
     {
       // printf("!!! meas.lio_vio_flg: %d \n", meas.lio_vio_flg);
+      if (static_cast<int>(img_time_buffer.size()) < sync_img_buffer_min_size_) return false;
+      if (sync_img_lookahead_time_ > 0.0 &&
+          img_time_buffer.back() < img_time_buffer.front() + sync_img_lookahead_time_)
+      {
+        return false;
+      }
       double img_capture_time = img_time_buffer.front() + exposure_time_init;
       /*** has img topic, but img topic timestamp larger than lidar end time,
        * process lidar topic. After LIO update, the meas.lidar_frame_end_time
@@ -1797,7 +1803,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       // meas.last_lio_update_time);
 
       double lid_newest_time = lid_header_time_buffer.back() + lid_raw_data_buffer.back()->points.back().curvature / double(1000);
-      double imu_newest_time = imu_buffer.back()->header.stamp.toSec();
+      double imu_newest_time = last_timestamp_imu;
 
       if (img_capture_time < meas.last_lio_update_time + 0.00001)
       {
@@ -1880,6 +1886,19 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
         lid_header_time_buffer.pop_front();
       }
 
+      pending_vio_img_ = img_buffer.front();
+      pending_vio_time_ = img_capture_time;
+      has_pending_vio_img_ = true;
+      img_buffer.pop_front();
+      img_time_buffer.pop_front();
+      if (static_cast<int>(img_buffer.size()) < sync_img_buffer_min_size_ ||
+          (sync_img_lookahead_time_ > 0.0 &&
+           !img_time_buffer.empty() &&
+           img_time_buffer.back() < img_time_buffer.front() + sync_img_lookahead_time_))
+      {
+        sig_buffer.notify_all();
+      }
+
       meas.measures.push_back(m);
       meas.lio_vio_flg = LIO;
       // meas.last_lio_update_time = m.lio_time;
@@ -1892,16 +1911,16 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
     case LIO:
     {
-      double img_capture_time = img_time_buffer.front() + exposure_time_init;
+      if (!has_pending_vio_img_) return false;
+      double img_capture_time = pending_vio_time_;
       meas.lio_vio_flg = VIO;
       // printf("[ Data Cut ] VIO \n");
       meas.measures.clear();
-      double imu_time = imu_buffer.front()->header.stamp.toSec();
 
       struct MeasureGroup m;
       m.vio_time = img_capture_time;
       m.lio_time = meas.last_lio_update_time;
-      m.img = img_buffer.front();
+      m.img = pending_vio_img_;
       mtx_buffer.lock();
       // while ((!imu_buffer.empty() && (imu_time < img_capture_time)))
       // {
@@ -1912,8 +1931,9 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       //   printf("[ Data Cut ] imu time: %lf \n",
       //   imu_buffer.front()->header.stamp.toSec());
       // }
-      img_buffer.pop_front();
-      img_time_buffer.pop_front();
+      pending_vio_img_.release();
+      pending_vio_time_ = 0.0;
+      has_pending_vio_img_ = false;
       mtx_buffer.unlock();
       sig_buffer.notify_all();
       meas.measures.push_back(m);
