@@ -21,6 +21,9 @@ which is included as part of this source code package.
 
 namespace
 {
+bool g_vio_pixel_snap_for_determinism_enabled = true;
+bool g_vio_camera_point_snap_for_determinism_enabled = true;
+
 std::string formatLocalTime(const char *fmt)
 {
   const std::time_t now = std::time(nullptr);
@@ -76,6 +79,8 @@ bool shouldReplaceGridPoint(double candidate_score, const V3D &candidate_point, 
 
 V2D snapPixelForDeterminism(const V2D &px)
 {
+  if (!g_vio_pixel_snap_for_determinism_enabled) return px;
+
   constexpr double kPixelSnapScale = 1e2; // 0.01 px, below image measurement noise.
   V2D snapped = px;
   snapped[0] = snapDoubleForDeterminism(snapped[0], kPixelSnapScale);
@@ -85,6 +90,8 @@ V2D snapPixelForDeterminism(const V2D &px)
 
 V3D snapCameraPointForDeterminism(const V3D &point)
 {
+  if (!g_vio_camera_point_snap_for_determinism_enabled) return point;
+
   constexpr double kPointSnapScale = 1e8;
   V3D snapped = point;
   snapped[0] = snapDoubleForDeterminism(snapped[0], kPointSnapScale);
@@ -171,6 +178,9 @@ void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
 
 void VIOManager::initializeVIO(ros::NodeHandle &nh)
 {
+  g_vio_pixel_snap_for_determinism_enabled = deterministic_pixel_snap_en;
+  g_vio_camera_point_snap_for_determinism_enabled = deterministic_camera_point_snap_en;
+
   visual_submap = new SubSparseMap;
 
   // Initialize camera matrix
@@ -863,7 +873,10 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   vector<VOXEL_LOCATION> ordered_sub_keys;
   ordered_sub_keys.reserve(sub_feat_map.size());
   for (const auto &iter : sub_feat_map) ordered_sub_keys.push_back(iter.first);
-  std::sort(ordered_sub_keys.begin(), ordered_sub_keys.end(), voxelLocationLess);
+  if (deterministic_visual_voxel_key_sort_en)
+  {
+    std::sort(ordered_sub_keys.begin(), ordered_sub_keys.end(), voxelLocationLess);
+  }
 
   for (const auto &position : ordered_sub_keys)
   {
@@ -2126,7 +2139,6 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
   for (int iteration = 0; iteration < max_iterations; iteration++)
   {
-    double accum_du = 0, accum_dv = 0, accum_JdR = 0, accum_Jdt = 0, accum_cur = 0, accum_pf = 0, accum_patch = 0;
     double t1 = omp_get_wtime();
     z.setZero();
     H_sub.setZero();
@@ -2223,10 +2235,6 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
           patch_error += res * res;
           n_meas += 1;
-          accum_du += du; accum_dv += dv;
-          accum_JdR += JdR.squaredNorm(); accum_Jdt += Jdt.squaredNorm();
-          accum_cur += cur_value; accum_pf += pf.squaredNorm();
-          accum_patch += patch_error;
 
           if (exposure_estimate_en) { H_sub.block<1, 7>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt, cur_value; }
           else { H_sub.block<1, 6>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt; }
@@ -2254,41 +2262,6 @@ bool VIOManager::updateState(cv::Mat img, int level)
     compute_jacobian_time += omp_get_wtime() - t1;
 
     double t3 = omp_get_wtime();
-
-    // ===== 诊断：H 矩阵分量分离 =====
-    {
-      static std::ofstream fcomp;
-      if (!fcomp.is_open() && !timing_log_dir.empty())
-        fcomp.open(timing_log_dir + "h_component.txt", std::ios::out);
-      if (fcomp.is_open())
-        fcomp << std::fixed << std::setprecision(12)
-              << "frame=" << frame_count << " level=" << level << " iter=" << iteration
-              << " n_meas=" << n_meas
-              << " sum_du=" << accum_du << " sum_dv=" << accum_dv
-              << " sum_JdR=" << accum_JdR << " sum_Jdt=" << accum_Jdt
-              << " sum_cur=" << accum_cur << " sum_pf=" << accum_pf
-              << " sum_patch=" << accum_patch << std::endl;
-    }
-    // ===== 诊断结束 =====
-
-    // ===== 诊断：IEKF 迭代细节 =====
-    static std::ofstream fout_iekf_diag;
-    if (!fout_iekf_diag.is_open() && !timing_log_dir.empty())
-      fout_iekf_diag.open(timing_log_dir + "iekf_diag.txt", std::ios::out);
-    if (fout_iekf_diag.is_open())
-    {
-      double ck_H = H_sub.sum();
-      double ck_z = z.sum();
-      fout_iekf_diag << std::fixed << std::setprecision(12)
-                     << "frame=" << frame_count
-                     << " level=" << level
-                     << " iter=" << iteration
-                     << " n_meas=" << n_meas
-                     << " error=" << error
-                     << " ck_H=" << ck_H
-                     << " ck_z=" << ck_z << std::endl;
-    }
-    // ===== 诊断结束 =====
 
     if (error <= last_error)
     {
@@ -2328,20 +2301,6 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
       auto &&expo_add = solution.block<1, 1>(6, 0);
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f))  EKF_end = true;
-
-      // ===== 诊断：IEKF 更新量 =====
-      if (fout_iekf_diag.is_open())
-      {
-        fout_iekf_diag << std::fixed << std::setprecision(12)
-                       << "frame=" << frame_count
-                       << " level=" << level
-                       << " iter=" << iteration
-                       << " rot_step_deg=" << rot_step_deg
-                       << " trans_step_m=" << trans_step_m
-                       << " sol_rot=" << rot_add.squaredNorm()
-                       << " sol_trans=" << t_add.squaredNorm() << std::endl;
-      }
-      // ===== 诊断结束 =====
     }
     else
     {
@@ -3220,13 +3179,15 @@ void VIOManager::updateStateWithBoardObservation()
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
-  (void)img_time;
-
-  // ===== 诊断：VIO 全程校验和 =====
-  static std::ofstream fout_vio_diag;
-  if (!fout_vio_diag.is_open() && !timing_log_dir.empty())
-    fout_vio_diag.open(timing_log_dir + "vio_diag.txt", std::ios::out);
-  // ===== 诊断初始化 =====
+  auto rememberVisualGuardPose = [&]()
+  {
+    last_visual_guard_time = img_time;
+    if (state)
+    {
+      last_visual_guard_pos = state->pos_end;
+      has_last_visual_guard_pos = true;
+    }
+  };
 
   if (width != img.cols || height != img.rows)
   {
@@ -3238,7 +3199,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
-  // 强制拷贝到连续缓冲区，避免 cv::cvtColor 内部重分配导致的布局差异
+  // Optional contiguous copy for deterministic replay experiments.
+  if (deterministic_contiguous_image_copy_en)
   {
     cv::Mat tmp(img.rows, img.cols, CV_8UC1);
     uint8_t *src = img.data;
@@ -3250,44 +3212,6 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         dst[r * dst_step + c] = src[r * src_step + c];
     img = tmp;
   }
-
-  // ===== 诊断：图像像素校验和 =====
-  {
-    static std::ofstream fimgck;
-    if (!fimgck.is_open() && !timing_log_dir.empty())
-      fimgck.open(timing_log_dir + "img_checksum.txt", std::ios::out);
-    if (fimgck.is_open())
-    {
-      double ck_img = 0;
-      uint8_t *d = img.data;
-      int step = (int)img.step;
-      for (int r = 0; r < img.rows; r++)
-        for (int c = 0; c < img.cols; c++)
-          ck_img += d[r * step + c];
-      fimgck << std::fixed << std::setprecision(6)
-             << "frame=" << frame_count
-             << " ck_img=" << ck_img
-             << " cols=" << img.cols << " rows=" << img.rows
-             << " step=" << step << std::endl;
-    }
-  }
-  // ===== 诊断结束 =====
-
-  // ===== 诊断：检查 stride 是否匹配 =====
-  {
-    static bool stride_checked = false;
-    static std::ofstream fstride;
-    if (!fstride.is_open() && !timing_log_dir.empty())
-      fstride.open(timing_log_dir + "stride_check.txt", std::ios::out);
-    if (!stride_checked && fstride.is_open())
-    {
-      fstride << "width=" << width << " img.cols=" << img.cols
-              << " img.step=" << img.step << " img.rows=" << img.rows
-              << " channels=" << img.channels() << std::endl;
-      stride_checked = true;
-    }
-  }
-  // ===== 诊断结束 =====
 
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
@@ -3379,6 +3303,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
              image_quality_min_intensity_std,
              vio_time_now);
     }
+    rememberVisualGuardPose();
     return;
   }
   
@@ -3389,25 +3314,6 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   retrieveFromVisualSparseMap(img, pg, feat_map);
   const double t_retrieve = omp_get_wtime() - t1;
 
-  // ===== 诊断：visual_submap 校验和 =====
-  if (fout_vio_diag.is_open())
-  {
-    double ck_pt_pos = 0, ck_pt_normal = 0;
-    size_t n_pts = visual_submap->voxel_points.size();
-    for (size_t i = 0; i < n_pts; i++)
-    {
-      auto *pt = visual_submap->voxel_points[i];
-      if (pt) { ck_pt_pos += pt->pos_.x() + pt->pos_.y() + pt->pos_.z();
-                 ck_pt_normal += pt->normal_.x() + pt->normal_.y() + pt->normal_.z(); }
-    }
-    fout_vio_diag << std::fixed << std::setprecision(9)
-                  << "frame=" << frame_count << " stage=after_retrieve"
-                  << " n_pts=" << n_pts
-                  << " total_points=" << total_points
-                  << " ck_pt_pos=" << ck_pt_pos
-                  << " ck_pt_normal=" << ck_pt_normal << std::endl;
-  }
-  // ===== 诊断结束 =====
   const bool run_aruco_this_frame = aruco_landmarks_en && (aruco_process_stride <= 1 || (frame_count % aruco_process_stride == 0));
   if (run_aruco_this_frame)
   {
@@ -3431,7 +3337,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       total_points >= low_track_force_min_points &&
       (frame_count % low_track_force_update_stride == 0);
   const bool skip_visual_ekf = (total_points < min_retrieve_points) && !low_track_force_update;
-    const bool print_console =
+  const bool print_console =
       console_timing_print_en &&
       ((frame_count % std::max(1, console_timing_print_stride)) == 0);
   double t2 = omp_get_wtime();
@@ -3443,6 +3349,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double visual_update_trans_m = 0.0;
   double visual_update_rot_deg = 0.0;
   double visual_update_backward_m = 0.0;
+  double visual_update_correction_backward_m = 0.0;
+  double visual_update_lateral_m = 0.0;
+  double visual_update_backward_limit_m = visual_update_max_backward_m;
+  double visual_update_lateral_limit_m = visual_update_max_lateral_m;
   double visual_update_exposure_delta = 0.0;
 
   if (!skip_visual_ekf)
@@ -3455,22 +3365,6 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
     computeJacobianAndUpdateEKF(img);
 
-    // ===== 诊断：VIO EKF 更新后的状态校验和 =====
-    if (fout_vio_diag.is_open() && state)
-    {
-      auto vck = [](const V3D &v) -> double { return v.x() + v.y() + v.z(); };
-      auto mck = [](const M3D &m) -> double { return m.trace(); };
-      fout_vio_diag << std::fixed << std::setprecision(9)
-                    << "frame=" << frame_count << " stage=after_ekf"
-                    << " ck_pos=" << vck(state->pos_end)
-                    << " ck_vel=" << vck(state->vel_end)
-                    << " ck_rot=" << mck(state->rot_end)
-                    << " ck_bg=" << vck(state->bias_g)
-                    << " ck_ba=" << vck(state->bias_a)
-                    << " ck_grav=" << vck(state->gravity)
-                    << " ck_cov=" << state->cov.trace() << std::endl;
-    }
-    // ===== 诊断结束 =====
     if (run_aruco_this_frame)
     {
       const double t_aruco_update_begin = omp_get_wtime();
@@ -3507,33 +3401,33 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     frame_count++;
     ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
 
-        if (print_console)
-        {
-          printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
-            total_points, min_retrieve_points, t_map_gen, vio_time_now);
+    if (print_console)
+    {
+      printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
+             total_points, min_retrieve_points, t_map_gen, vio_time_now);
 
-          printf("[ VIO Time ] skip-path: retrieve=%.6f, map_gen=%.6f, aruco_detect=%.6f, aruco_update=%.6f, total=%.6f, avg=%.6f\n",
-            t_retrieve,
-            t_map_gen,
-            aruco_time_total,
-            aruco_time_update,
-            vio_time_now,
-            ave_total);
+      printf("[ VIO Time ] skip-path: retrieve=%.6f, map_gen=%.6f, aruco_detect=%.6f, aruco_update=%.6f, total=%.6f, avg=%.6f\n",
+             t_retrieve,
+             t_map_gen,
+             aruco_time_total,
+             aruco_time_update,
+             vio_time_now,
+             ave_total);
 
-          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-          printf("\033[1;34m|                    VIO Time (Skip Path)                     |\033[0m\n");
-          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-          printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-          printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
-          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t_map_gen);
-          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", vio_time_now);
-          printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-          printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-        }
+      printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;34m|                    VIO Time (Skip Path)                     |\033[0m\n");
+      printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+      printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+      printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t_retrieve);
+      printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t_map_gen);
+      printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+      printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", vio_time_now);
+      printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+      printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    }
 
     if (run_aruco_this_frame)
     {
@@ -3628,6 +3522,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       appendTimingLogLines(lines);
     }
 
+    rememberVisualGuardPose();
     return;
   }
 
@@ -3642,13 +3537,38 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     const double speed = state_before_visual_update.vel_end.norm();
     if (speed > 0.2)
     {
-      visual_update_backward_m = std::max(0.0, -delta_pos.dot(state_before_visual_update.vel_end / speed));
+      const V3D vel_dir = state_before_visual_update.vel_end / speed;
+      const double signed_forward_m = delta_pos.dot(vel_dir);
+      visual_update_correction_backward_m = std::max(0.0, -signed_forward_m);
+      visual_update_lateral_m = (delta_pos - signed_forward_m * vel_dir).norm();
+      if (has_last_visual_guard_pos)
+      {
+        const V3D frame_step = state->pos_end - last_visual_guard_pos;
+        visual_update_backward_m = std::max(0.0, -frame_step.dot(vel_dir));
+      }
+
+      const double visual_guard_dt =
+          (last_visual_guard_time >= 0.0 && img_time > last_visual_guard_time) ? img_time - last_visual_guard_time : 0.0;
+      if (visual_guard_dt > 1e-4)
+      {
+        const double predicted_step_m = speed * visual_guard_dt;
+        const double backward_by_ratio_m = std::max(0.0, visual_update_max_backward_ratio) * predicted_step_m;
+        const double lateral_by_ratio_m = std::max(0.0, visual_update_max_lateral_ratio) * predicted_step_m;
+        visual_update_backward_limit_m =
+            std::min(std::max(0.0, visual_update_max_backward_m),
+                     std::max(std::max(0.0, visual_update_backward_abs_floor_m), backward_by_ratio_m));
+        visual_update_lateral_limit_m =
+            std::min(std::max(0.0, visual_update_max_lateral_m),
+                     std::max(std::max(0.0, visual_update_backward_abs_floor_m), lateral_by_ratio_m));
+      }
     }
 
     const bool finite_state =
         std::isfinite(visual_update_trans_m) &&
         std::isfinite(visual_update_rot_deg) &&
         std::isfinite(visual_update_backward_m) &&
+        std::isfinite(visual_update_correction_backward_m) &&
+        std::isfinite(visual_update_lateral_m) &&
         std::isfinite(visual_update_exposure_delta) &&
         std::isfinite(state->pos_end[0]) && std::isfinite(state->pos_end[1]) && std::isfinite(state->pos_end[2]) &&
         std::isfinite(state->inv_expo_time) && state->inv_expo_time > 0.0;
@@ -3668,10 +3588,15 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       visual_update_rejected_by_guard = true;
       visual_update_reject_reason = "large_rotation";
     }
-    else if (visual_update_backward_m > std::max(0.0, visual_update_max_backward_m))
+    else if (visual_update_backward_m > std::max(0.0, visual_update_backward_limit_m))
     {
       visual_update_rejected_by_guard = true;
       visual_update_reject_reason = "backward_step";
+    }
+    else if (visual_update_lateral_m > std::max(0.0, visual_update_lateral_limit_m))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "lateral_step";
     }
     else if (exposure_estimate_en && visual_update_exposure_delta > std::max(0.0, visual_update_max_exposure_delta))
     {
@@ -3692,11 +3617,13 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
       if (print_console)
       {
-        printf("[ VIO ] Reject visual update by guard (%s): dtrans=%.3f/%.3f m, drot=%.3f/%.3f deg, back=%.3f/%.3f m, dexpo=%.3f/%.3f, total=%.6f s.\n",
+        printf("[ VIO ] Reject visual update by guard (%s): dtrans=%.3f/%.3f m, drot=%.3f/%.3f deg, step_back=%.3f/%.3f m, corr_back=%.3f m, lat=%.3f/%.3f m, dexpo=%.3f/%.3f, total=%.6f s.\n",
                visual_update_reject_reason.c_str(),
                visual_update_trans_m, visual_update_max_trans_m,
                visual_update_rot_deg, visual_update_max_rot_deg,
-               visual_update_backward_m, visual_update_max_backward_m,
+               visual_update_backward_m, visual_update_backward_limit_m,
+               visual_update_correction_backward_m,
+               visual_update_lateral_m, visual_update_lateral_limit_m,
                visual_update_exposure_delta, visual_update_max_exposure_delta,
                vio_time_now);
       }
@@ -3707,20 +3634,27 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         oss << "[ VIO ] Reject visual update by guard (" << visual_update_reject_reason
             << "): dtrans=" << formatDouble6(visual_update_trans_m) << "/" << formatDouble6(visual_update_max_trans_m)
             << " m, drot=" << formatDouble6(visual_update_rot_deg) << "/" << formatDouble6(visual_update_max_rot_deg)
-            << " deg, back=" << formatDouble6(visual_update_backward_m) << "/" << formatDouble6(visual_update_max_backward_m)
+            << " deg, step_back=" << formatDouble6(visual_update_backward_m) << "/" << formatDouble6(visual_update_backward_limit_m)
+            << " m, corr_back=" << formatDouble6(visual_update_correction_backward_m)
+            << " m, lat=" << formatDouble6(visual_update_lateral_m) << "/" << formatDouble6(visual_update_lateral_limit_m)
             << " m, dexpo=" << formatDouble6(visual_update_exposure_delta) << "/" << formatDouble6(visual_update_max_exposure_delta)
             << ", total=" << formatDouble6(vio_time_now) << " s.";
         lines.push_back(oss.str());
         appendTimingLogLines(lines);
       }
 
+      rememberVisualGuardPose();
       return;
     }
   }
 
   // Keep an explicit guard to avoid accidental fall-through if skip-branch
   // return is modified during experiments.
-  if (skip_visual_ekf) return;
+  if (skip_visual_ekf)
+  {
+    rememberVisualGuardPose();
+    return;
+  }
 
   double t3 = omp_get_wtime();
 
@@ -3859,4 +3793,5 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
     appendTimingLogLines(lines);
   }
+  rememberVisualGuardPose();
 }

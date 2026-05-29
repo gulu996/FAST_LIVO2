@@ -15,6 +15,26 @@ common:
   sync_img_buffer_min_size: 5
   sync_img_lookahead_time: 0.12
 
+deterministic_debug:
+  force_single_thread: false
+  visual_update_serial_en: false
+  lio_update_serial_en: false
+  contiguous_image_copy_en: false
+  lio_feature_sort_en: false
+  visual_observed_voxel_sort_en: false
+
+  state_snap_en: false
+  camera_point_snap_en: false
+  pixel_snap_en: false
+
+  imu_accept_out_of_order_en: true
+  imu_buffer_sort_en: true
+  prop_imu_buffer_sort_en: true
+  sync_wait_for_image_lookahead_en: true
+  pending_vio_image_en: true
+  visual_voxel_key_sort_en: true
+  image_buffer_sort_en: true
+
 extrin_calib:
   #extrinsic_T: [-0.011, -0.02329, 0.04412]
   #extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
@@ -64,11 +84,14 @@ vio:
   min_update_meas: 300 # 降低残差下限，让少量特征也能真正进入EKF更新
   low_track_force_update_stride: 1 # 低跟踪时每帧都尝试强制视觉EKF
   low_track_force_min_points: 10 # 至少10个可用点就尝试更新；与min_update_meas保持一致
-  deterministic_visual_update_en: true # 固定视觉更新为确定性顺序，避免多次回放同一bag因并行归约/等分选择产生不同轨迹
   visual_update_guard_en: true # 视觉EKF总修正门限，超过则回滚到LIO/IMU预测，防止出口过曝导致突然倒退
   visual_update_max_trans_m: 0.20 # 放宽单帧视觉总平移修正上限，减少不必要回滚
   visual_update_max_rot_deg: 4.0 # 放宽单帧视觉总旋转修正上限
-  visual_update_max_backward_m: 0.03 # 放宽沿速度反方向的视觉修正上限，但仍保留基本防倒退
+  visual_update_max_backward_m: 0.01 # 视觉更新后的最终位姿相对上一帧允许的反向步长硬上限，不限制VIO正常回拉LIO超前
+  visual_update_max_backward_ratio: 0.08 # 最终位姿反向步长不能超过当前帧预测前进距离的比例
+  visual_update_backward_abs_floor_m: 0.003 # 最终位姿反向步长动态阈值下限，避免低速时过度敏感
+  visual_update_max_lateral_m: 0.08 # 垂直于速度方向的视觉修正硬上限
+  visual_update_max_lateral_ratio: 0.35 # 横向修正不能超过当前帧预测前进距离的比例
   visual_update_max_exposure_delta: 0.50 # 放宽曝光估计单帧变化上限，避免轻微曝光跃迁直接回滚
   image_quality_gate_en: false # 关闭整帧硬拒绝，保留patch级过滤和视觉EKF回滚保护
   image_quality_max_saturated_fraction: 0.20 # 全图过曝比例阈值；关闭整帧门时作为备用默认
@@ -105,7 +128,6 @@ lio:
   icp_early_stop_residual_ratio: 0.03 # 残差相对改善低于该阈值且已收敛时提前停止
   icp_max_rot_step_deg: 1.2 # ICP单次旋转更新上限（度），抑制异常匹配导致姿态突跳
   icp_max_trans_step_m: 0.20 # ICP单次平移更新上限（米），抑制”轨迹上天”
-  deterministic_lio_update_en: true # 固定LIO更新为确定性顺序，禁能BuildResidualListOMP的OpenMP并行以保证确定性
   dept_err: 0.02
   beam_err: 0.15
   min_eigen_value: 0.005 # 0.005
@@ -153,7 +175,7 @@ evo:
 pcd_save:
   pcd_save_en: true
   save_log_en: true # 日志写盘
-  save_path: "/home/jeton/data"
+  save_path: "/home/jetson/data"
   global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05

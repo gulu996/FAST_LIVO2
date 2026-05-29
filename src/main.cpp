@@ -9,13 +9,19 @@ int main(int argc, char **argv)
   {
     ros::console::notifyLoggerLevelsChanged();
   }*/
-  setenv("OMP_NUM_THREADS", "1", 1);
-  setenv("OMP_DYNAMIC", "FALSE", 1);
-  Eigen::setNbThreads(1);
-  cv::setNumThreads(1);
-
   ros::init(argc, argv, "laserMapping");
   ros::NodeHandle nh;
+
+  bool force_single_thread = false;
+  nh.param<bool>("deterministic_debug/force_single_thread", force_single_thread, false);
+  if (force_single_thread)
+  {
+    setenv("OMP_NUM_THREADS", "1", 1);
+    setenv("OMP_DYNAMIC", "FALSE", 1);
+    Eigen::setNbThreads(1);
+    cv::setNumThreads(1);
+  }
+
   image_transport::ImageTransport it(nh);
   LIVMapper mapper(nh); 
   mapper.initializeSubscribersAndPublishers(nh, it);

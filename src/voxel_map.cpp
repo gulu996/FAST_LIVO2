@@ -65,7 +65,11 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<double>("lio/icp_max_rot_step_deg", voxel_config.icp_max_rot_step_deg, 1.2);
   nh.param<double>("lio/icp_max_trans_step_m", voxel_config.icp_max_trans_step_m, 0.20);
 
-  nh.param<bool>("lio/deterministic_lio_update_en", voxel_config.deterministic_lio_update_en, true);
+  bool legacy_deterministic_lio_update_en = true;
+  nh.param<bool>("lio/deterministic_lio_update_en", legacy_deterministic_lio_update_en, true);
+  nh.param<bool>("deterministic_debug/lio_update_serial_en",
+                 voxel_config.deterministic_lio_update_en,
+                 legacy_deterministic_lio_update_en);
 }
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)

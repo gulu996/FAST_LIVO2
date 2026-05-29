@@ -175,10 +175,18 @@ public:
   int low_track_force_update_stride = 0;
   int low_track_force_min_points = 8;
   bool deterministic_visual_update_en = true;
+  bool deterministic_pixel_snap_en = true;
+  bool deterministic_camera_point_snap_en = true;
+  bool deterministic_contiguous_image_copy_en = true;
+  bool deterministic_visual_voxel_key_sort_en = true;
   bool visual_update_guard_en = true;
   double visual_update_max_trans_m = 0.12;
   double visual_update_max_rot_deg = 2.0;
   double visual_update_max_backward_m = 0.03;
+  double visual_update_max_backward_ratio = 0.08;
+  double visual_update_backward_abs_floor_m = 0.003;
+  double visual_update_max_lateral_m = 0.08;
+  double visual_update_max_lateral_ratio = 0.35;
   double visual_update_max_exposure_delta = 0.30;
 
   double img_point_cov, outlier_threshold, ncc_thre;
@@ -228,6 +236,9 @@ public:
   int aruco_profile_frames = 0;
   int aruco_board_candidates = 0;
   int aruco_board_accepted = 0;
+  double last_visual_guard_time = -1.0;
+  bool has_last_visual_guard_pos = false;
+  V3D last_visual_guard_pos = V3D::Zero();
 
   string timing_log_dir;
   string timing_log_file_path;

@@ -125,6 +125,24 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   sync_img_buffer_min_size_ = std::max(1, sync_img_buffer_min_size_);
   sync_img_lookahead_time_ = std::max(0.0, sync_img_lookahead_time_);
 
+  bool legacy_visual_update_serial = true;
+  nh.param<bool>("vio/deterministic_visual_update_en", legacy_visual_update_serial, true);
+  nh.param<bool>("deterministic_debug/state_snap_en", deterministic_state_snap_en_, true);
+  nh.param<bool>("deterministic_debug/pixel_snap_en", deterministic_pixel_snap_en_, true);
+  nh.param<bool>("deterministic_debug/camera_point_snap_en", deterministic_camera_point_snap_en_, true);
+  nh.param<bool>("deterministic_debug/contiguous_image_copy_en", deterministic_contiguous_image_copy_en_, true);
+  nh.param<bool>("deterministic_debug/visual_update_serial_en", vio_deterministic_visual_update_en_, legacy_visual_update_serial);
+  nh.param<bool>("deterministic_debug/imu_accept_out_of_order_en", deterministic_imu_accept_out_of_order_en_, true);
+  nh.param<bool>("deterministic_debug/imu_buffer_sort_en", deterministic_imu_buffer_sort_en_, true);
+  nh.param<bool>("deterministic_debug/prop_imu_buffer_sort_en", deterministic_prop_imu_buffer_sort_en_, true);
+  nh.param<bool>("deterministic_debug/image_buffer_sort_en", deterministic_image_buffer_sort_en_, true);
+  nh.param<bool>("deterministic_debug/sync_wait_for_image_lookahead_en", deterministic_sync_wait_for_image_lookahead_en_, true);
+  nh.param<bool>("deterministic_debug/pending_vio_image_en", deterministic_pending_vio_image_en_, true);
+  nh.param<bool>("deterministic_debug/lio_feature_sort_en", deterministic_lio_feature_sort_en_, true);
+  nh.param<bool>("deterministic_debug/visual_observed_voxel_sort_en", deterministic_visual_observed_voxel_sort_en_, true);
+  nh.param<bool>("deterministic_debug/visual_voxel_key_sort_en", deterministic_visual_voxel_key_sort_en_, true);
+  setStateSnapForDeterminismEnabled(deterministic_state_snap_en_);
+
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
   nh.param<int>("vio/max_iterations", max_iterations, 5);
@@ -153,11 +171,14 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("vio/min_update_meas", vio_min_update_meas_, 900);
   nh.param<int>("vio/low_track_force_update_stride", vio_low_track_force_update_stride_, 0);
   nh.param<int>("vio/low_track_force_min_points", vio_low_track_force_min_points_, 8);
-  nh.param<bool>("vio/deterministic_visual_update_en", vio_deterministic_visual_update_en_, true);
   nh.param<bool>("vio/visual_update_guard_en", vio_visual_update_guard_en_, true);
   nh.param<double>("vio/visual_update_max_trans_m", vio_visual_update_max_trans_m_, 0.12);
   nh.param<double>("vio/visual_update_max_rot_deg", vio_visual_update_max_rot_deg_, 2.0);
   nh.param<double>("vio/visual_update_max_backward_m", vio_visual_update_max_backward_m_, 0.03);
+  nh.param<double>("vio/visual_update_max_backward_ratio", vio_visual_update_max_backward_ratio_, 0.08);
+  nh.param<double>("vio/visual_update_backward_abs_floor_m", vio_visual_update_backward_abs_floor_m_, 0.003);
+  nh.param<double>("vio/visual_update_max_lateral_m", vio_visual_update_max_lateral_m_, 0.08);
+  nh.param<double>("vio/visual_update_max_lateral_ratio", vio_visual_update_max_lateral_ratio_, 0.35);
   nh.param<double>("vio/visual_update_max_exposure_delta", vio_visual_update_max_exposure_delta_, 0.30);
   nh.param<bool>("vio/image_quality_gate_en", vio_image_quality_gate_en_, false);
   nh.param<double>("vio/image_quality_max_saturated_fraction", vio_image_quality_max_saturated_fraction_, 0.20);
@@ -393,10 +414,18 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->low_track_force_update_stride = vio_low_track_force_update_stride_;
   vio_manager->low_track_force_min_points = vio_low_track_force_min_points_;
   vio_manager->deterministic_visual_update_en = vio_deterministic_visual_update_en_;
+  vio_manager->deterministic_pixel_snap_en = deterministic_pixel_snap_en_;
+  vio_manager->deterministic_camera_point_snap_en = deterministic_camera_point_snap_en_;
+  vio_manager->deterministic_contiguous_image_copy_en = deterministic_contiguous_image_copy_en_;
+  vio_manager->deterministic_visual_voxel_key_sort_en = deterministic_visual_voxel_key_sort_en_;
   vio_manager->visual_update_guard_en = vio_visual_update_guard_en_;
   vio_manager->visual_update_max_trans_m = vio_visual_update_max_trans_m_;
   vio_manager->visual_update_max_rot_deg = vio_visual_update_max_rot_deg_;
   vio_manager->visual_update_max_backward_m = vio_visual_update_max_backward_m_;
+  vio_manager->visual_update_max_backward_ratio = vio_visual_update_max_backward_ratio_;
+  vio_manager->visual_update_backward_abs_floor_m = vio_visual_update_backward_abs_floor_m_;
+  vio_manager->visual_update_max_lateral_m = vio_visual_update_max_lateral_m_;
+  vio_manager->visual_update_max_lateral_ratio = vio_visual_update_max_lateral_ratio_;
   vio_manager->visual_update_max_exposure_delta = vio_visual_update_max_exposure_delta_;
   vio_manager->image_quality_gate_en = vio_image_quality_gate_en_;
   vio_manager->image_quality_max_saturated_fraction = vio_image_quality_max_saturated_fraction_;
@@ -465,8 +494,6 @@ void LIVMapper::initializeFiles()
   }
   if(colmap_output_en) fout_points.open(save_path + "points3D.txt", std::ios::out);
   if(save_log_en) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
-  fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
-  fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
 }
 
 void LIVMapper::initializeUdpReporter()
@@ -682,6 +709,13 @@ void LIVMapper::handleVIO()
       state_update_flg = true;
     }
 
+    if (vio_manager)
+    {
+      vio_manager->last_visual_guard_time = LidarMeasures.last_lio_update_time - _first_lidar_time;
+      vio_manager->last_visual_guard_pos = _state.pos_end;
+      vio_manager->has_last_visual_guard_pos = true;
+    }
+
     publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
 
     euler_cur = RotMtoEuler(_state.rot_end);
@@ -856,12 +890,15 @@ void LIVMapper::updateVisualObservationHints()
       observed_voxels.push_back(kv.first);
     }
   }
-  std::sort(observed_voxels.begin(), observed_voxels.end(),
-            [](const VOXEL_LOCATION &a, const VOXEL_LOCATION &b) {
-              if (a.x != b.x) return a.x < b.x;
-              if (a.y != b.y) return a.y < b.y;
-              return a.z < b.z;
-            });
+  if (deterministic_visual_observed_voxel_sort_en_)
+  {
+    std::sort(observed_voxels.begin(), observed_voxels.end(),
+              [](const VOXEL_LOCATION &a, const VOXEL_LOCATION &b) {
+                if (a.x != b.x) return a.x < b.x;
+                if (a.y != b.y) return a.y < b.y;
+                return a.z < b.z;
+              });
+  }
   voxelmap_manager->setVisualObservedVoxels(observed_voxels);
 }
 
@@ -882,12 +919,15 @@ void LIVMapper::handleLIO()
 
   downSizeFilterSurf.setInputCloud(feats_undistort);
   downSizeFilterSurf.filter(*feats_down_body);
-  std::sort(feats_down_body->points.begin(), feats_down_body->points.end(),
-            [](const PointType &a, const PointType &b) {
-              if (a.x != b.x) return a.x < b.x;
-              if (a.y != b.y) return a.y < b.y;
-              return a.z < b.z;
-            });
+  if (deterministic_lio_feature_sort_en_)
+  {
+    std::sort(feats_down_body->points.begin(), feats_down_body->points.end(),
+              [](const PointType &a, const PointType &b) {
+                if (a.x != b.x) return a.x < b.x;
+                if (a.y != b.y) return a.y < b.y;
+                return a.z < b.z;
+              });
+  }
   
   double t_down = omp_get_wtime();
 
@@ -1207,84 +1247,8 @@ void LIVMapper::run()
 
     // if (!p_imu->imu_time_init) continue;
 
-    // ===== 诊断：pipeline 级校验和，定位非确定性首次出现位置 =====
-    static int pipe_frame_cnt = 0;
-    static std::ofstream fout_pipe_order;
-    if (!fout_pipe_order.is_open() && !save_path.empty())
-    {
-      fout_pipe_order.open(save_path + "pipeline_order.txt", std::ios::out);
-    }
-    pipe_frame_cnt++;
-    {
-      auto vec_cksum = [](const V3D &v) -> double { return v.x() + v.y() + v.z(); };
-      auto mat_cksum = [](const M3D &m) -> double { return m.trace(); };
-      auto ptcl_cksum = [](const PointCloudXYZI::Ptr &pc) -> double {
-        double s = 0;
-        for (size_t i = 0; i < pc->size(); i++) {
-          s += pc->points[i].x + pc->points[i].y + pc->points[i].z;
-        }
-        return s;
-      };
-      const double ck_prop_pos = vec_cksum(_state.pos_end);
-      const double ck_prop_vel = vec_cksum(_state.vel_end);
-      const double ck_prop_rot = mat_cksum(_state.rot_end);
-      const double ck_prop_bg  = vec_cksum(_state.bias_g);
-      const double ck_prop_ba  = vec_cksum(_state.bias_a);
-      const double ck_prop_grav = vec_cksum(_state.gravity);
-      const double ck_pcl = ptcl_cksum(feats_undistort);
-      const double ck_cov = _state.cov.trace();
-
-      if (fout_pipe_order.is_open())
-      {
-        fout_pipe_order << std::fixed << std::setprecision(9)
-                        << "frame=" << pipe_frame_cnt
-                        << " mode=" << (LidarMeasures.lio_vio_flg == LIO ? "LIO" : "VIO")
-                        << " after=IMU"
-                        << " ck_pos=" << ck_prop_pos
-                        << " ck_vel=" << ck_prop_vel
-                        << " ck_rot=" << ck_prop_rot
-                        << " ck_bg=" << ck_prop_bg
-                        << " ck_ba=" << ck_prop_ba
-                        << " ck_grav=" << ck_prop_grav
-                        << " ck_cov=" << ck_cov
-                        << " ck_pcl=" << ck_pcl
-                        << " pcl_n=" << feats_undistort->size() << std::endl;
-      }
-    }
-    // ===== 诊断结束（第1部分） =====
-
     const EKF_STATE frame_mode = LidarMeasures.lio_vio_flg;
-
     stateEstimationAndMapping();
-
-    // ===== 诊断（第2部分）：EKF 更新后的状态 =====
-    {
-      auto vec_cksum = [](const V3D &v) -> double { return v.x() + v.y() + v.z(); };
-      auto mat_cksum = [](const M3D &m) -> double { return m.trace(); };
-      const double ck_upd_pos = vec_cksum(_state.pos_end);
-      const double ck_upd_vel = vec_cksum(_state.vel_end);
-      const double ck_upd_rot = mat_cksum(_state.rot_end);
-      const double ck_upd_bg  = vec_cksum(_state.bias_g);
-      const double ck_upd_ba  = vec_cksum(_state.bias_a);
-      const double ck_upd_grav = vec_cksum(_state.gravity);
-      const double ck_upd_cov = _state.cov.trace();
-
-      if (fout_pipe_order.is_open())
-      {
-        fout_pipe_order << std::fixed << std::setprecision(9)
-                        << "frame=" << pipe_frame_cnt
-                        << " mode=" << (frame_mode == LIO ? "LIO" : "VIO")
-                        << " after=EKF"
-                        << " ck_pos=" << ck_upd_pos
-                        << " ck_vel=" << ck_upd_vel
-                        << " ck_rot=" << ck_upd_rot
-                        << " ck_bg=" << ck_upd_bg
-                        << " ck_ba=" << ck_upd_ba
-                        << " ck_grav=" << ck_upd_grav
-                        << " ck_cov=" << ck_upd_cov << std::endl;
-      }
-    }
-    // ===== 诊断结束（第2部分） =====
 
     const double t2 = omp_get_wtime();
     const double frame_time = t2 - t1;
@@ -1386,11 +1350,13 @@ void LIVMapper::imu_prop_callback(const ros::TimerEvent &e)
   new_imu = false; // 控制propagate频率和IMU频率一致
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
-    // 确保 prop_imu_buffer 按时间戳有序，消除乱序送达导致的非确定性
-    std::sort(prop_imu_buffer.begin(), prop_imu_buffer.end(),
-              [](const sensor_msgs::Imu &a, const sensor_msgs::Imu &b) {
-                return a.header.stamp.toSec() < b.header.stamp.toSec();
-              });
+    if (deterministic_prop_imu_buffer_sort_en_)
+    {
+      std::sort(prop_imu_buffer.begin(), prop_imu_buffer.end(),
+                [](const sensor_msgs::Imu &a, const sensor_msgs::Imu &b) {
+                  return a.header.stamp.toSec() < b.header.stamp.toSec();
+                });
+    }
     static double last_t_from_lidar_end_time = 0;
     if (state_update_flg)
     {
@@ -1601,9 +1567,14 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 
   if (last_timestamp_imu > 0.0 && timestamp < last_timestamp_imu)
   {
-    // 乱序但不丢弃，仅警告。下游 sync_packages 会按时间戳排序，保证确定性。
-    ROS_WARN("imu loop back, offset: %lf, inserting anyway (will be sorted downstream)\n",
-             last_timestamp_imu - timestamp);
+    if (!deterministic_imu_accept_out_of_order_en_)
+    {
+      ROS_ERROR("imu loop back. \n");
+      mtx_buffer.unlock();
+      sig_buffer.notify_all();
+      return;
+    }
+    ROS_WARN("imu loop back, offset: %lf, inserting anyway\n", last_timestamp_imu - timestamp);
   }
 
   // if (last_timestamp_imu > 0.0 && timestamp > last_timestamp_imu + 0.2)
@@ -1615,8 +1586,14 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
   //   return;
   // }
 
-  // 追踪最大时间戳而非最后时间戳，避免乱序消息被误判
-  if (timestamp > last_timestamp_imu) last_timestamp_imu = timestamp;
+  if (deterministic_imu_accept_out_of_order_en_)
+  {
+    if (timestamp > last_timestamp_imu) last_timestamp_imu = timestamp;
+  }
+  else
+  {
+    last_timestamp_imu = timestamp;
+  }
 
   imu_buffer.push_back(msg);
   while (max_imu_buffer_size_ > 0 && static_cast<int>(imu_buffer.size()) > max_imu_buffer_size_)
@@ -1669,27 +1646,54 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   }
   // double msg_header_time =  msg->header.stamp.toSec();
   double msg_header_time = msg->header.stamp.toSec() + img_time_offset;
+  if (!deterministic_image_buffer_sort_en_)
+  {
+    if (std::fabs(msg_header_time - last_timestamp_img) < 0.001) return;
+    if (msg_header_time < last_timestamp_img)
+    {
+      ROS_ERROR("image loop back. \n");
+      return;
+    }
+  }
   ROS_INFO_THROTTLE(1.0, "Get image, its header time: %.6f", msg_header_time);
 
   mtx_buffer.lock();
 
   double img_time_correct = msg_header_time; // last_timestamp_lidar + 0.105;
 
-  for (const double buffered_time : img_time_buffer)
+  if (deterministic_image_buffer_sort_en_)
   {
-    if (std::fabs(buffered_time - img_time_correct) < 0.001)
+    for (const double buffered_time : img_time_buffer)
     {
-      mtx_buffer.unlock();
-      sig_buffer.notify_all();
-      return;
+      if (std::fabs(buffered_time - img_time_correct) < 0.001)
+      {
+        mtx_buffer.unlock();
+        sig_buffer.notify_all();
+        return;
+      }
     }
+  }
+  else if (img_time_correct - last_timestamp_img < 0.02)
+  {
+    ROS_WARN("Image need Jumps: %.6f", img_time_correct);
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+    return;
   }
 
   cv::Mat img_cur = getImageFromMsg(msg);
-  const auto insert_it = std::lower_bound(img_time_buffer.begin(), img_time_buffer.end(), img_time_correct);
-  const auto insert_idx = std::distance(img_time_buffer.begin(), insert_it);
-  img_time_buffer.insert(insert_it, img_time_correct);
-  img_buffer.insert(img_buffer.begin() + insert_idx, img_cur);
+  if (deterministic_image_buffer_sort_en_)
+  {
+    const auto insert_it = std::lower_bound(img_time_buffer.begin(), img_time_buffer.end(), img_time_correct);
+    const auto insert_idx = std::distance(img_time_buffer.begin(), insert_it);
+    img_time_buffer.insert(insert_it, img_time_correct);
+    img_buffer.insert(img_buffer.begin() + insert_idx, img_cur);
+  }
+  else
+  {
+    img_buffer.push_back(img_cur);
+    img_time_buffer.push_back(img_time_correct);
+  }
   while (max_img_buffer_size_ > 0 && static_cast<int>(img_buffer.size()) > max_img_buffer_size_)
   {
     img_buffer.pop_front();
@@ -1698,7 +1702,14 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
 
-  if (img_time_correct > last_timestamp_img) last_timestamp_img = img_time_correct;
+  if (deterministic_image_buffer_sort_en_)
+  {
+    if (img_time_correct > last_timestamp_img) last_timestamp_img = img_time_correct;
+  }
+  else
+  {
+    last_timestamp_img = img_time_correct;
+  }
   // cv::imshow("img", img);
   // cv::waitKey(1);
   // cout<<"last_timestamp_img:::"<<last_timestamp_img<<endl;
@@ -1708,7 +1719,8 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 
 bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 {
-  const bool pending_livo_vio = slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_;
+  const bool pending_livo_vio =
+      deterministic_pending_vio_image_en_ && slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_;
   if (lid_raw_data_buffer.empty() && lidar_en && !pending_livo_vio) return false;
   if (img_en && img_buffer.empty() && !pending_livo_vio) return false;
   if (imu_buffer.empty() && imu_en && !pending_livo_vio) return false;
@@ -1744,10 +1756,13 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     m.lio_time = meas.lidar_frame_end_time;
     mtx_buffer.lock();
     // 确保 imu_buffer 按时间戳有序，消除乱序送达导致的 draining 非确定性
-    std::sort(imu_buffer.begin(), imu_buffer.end(),
-              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
-                return a->header.stamp.toSec() < b->header.stamp.toSec();
-              });
+    if (deterministic_imu_buffer_sort_en_)
+    {
+      std::sort(imu_buffer.begin(), imu_buffer.end(),
+                [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                  return a->header.stamp.toSec() < b->header.stamp.toSec();
+                });
+    }
     while (!imu_buffer.empty())
     {
       if (imu_buffer.front()->header.stamp.toSec() > meas.lidar_frame_end_time) break;
@@ -1760,10 +1775,13 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     sig_buffer.notify_all();
 
     // 确保 IMU 按时间戳严格有序，消除回调乱序导致的非确定性
-    std::sort(m.imu.begin(), m.imu.end(),
-              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
-                return a->header.stamp.toSec() < b->header.stamp.toSec();
-              });
+    if (deterministic_imu_buffer_sort_en_)
+    {
+      std::sort(m.imu.begin(), m.imu.end(),
+                [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                  return a->header.stamp.toSec() < b->header.stamp.toSec();
+                });
+    }
 
     meas.lio_vio_flg = LIO; // process lidar topic, so timestamp should be lidar scan end.
     meas.measures.push_back(m);
@@ -1787,8 +1805,13 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     case VIO:
     {
       // printf("!!! meas.lio_vio_flg: %d \n", meas.lio_vio_flg);
-      if (static_cast<int>(img_time_buffer.size()) < sync_img_buffer_min_size_) return false;
-      if (sync_img_lookahead_time_ > 0.0 &&
+      if (deterministic_sync_wait_for_image_lookahead_en_ &&
+          static_cast<int>(img_time_buffer.size()) < sync_img_buffer_min_size_)
+      {
+        return false;
+      }
+      if (deterministic_sync_wait_for_image_lookahead_en_ &&
+          sync_img_lookahead_time_ > 0.0 &&
           img_time_buffer.back() < img_time_buffer.front() + sync_img_lookahead_time_)
       {
         return false;
@@ -1829,10 +1852,13 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       m.lio_time = img_capture_time;
       mtx_buffer.lock();
       // 确保 imu_buffer 按时间戳有序，消除乱序送达导致的 draining 非确定性
-      std::sort(imu_buffer.begin(), imu_buffer.end(),
-                [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
-                  return a->header.stamp.toSec() < b->header.stamp.toSec();
-                });
+      if (deterministic_imu_buffer_sort_en_)
+      {
+        std::sort(imu_buffer.begin(), imu_buffer.end(),
+                  [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                    return a->header.stamp.toSec() < b->header.stamp.toSec();
+                  });
+      }
       while (!imu_buffer.empty())
       {
         if (imu_buffer.front()->header.stamp.toSec() > m.lio_time) break;
@@ -1847,10 +1873,13 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       sig_buffer.notify_all();
 
       // 确保 IMU 按时间戳严格有序，消除回调乱序导致的非确定性
-      std::sort(m.imu.begin(), m.imu.end(),
-                [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
-                  return a->header.stamp.toSec() < b->header.stamp.toSec();
-                });
+      if (deterministic_imu_buffer_sort_en_)
+      {
+        std::sort(m.imu.begin(), m.imu.end(),
+                  [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                    return a->header.stamp.toSec() < b->header.stamp.toSec();
+                  });
+      }
 
       *(meas.pcl_proc_cur) = *(meas.pcl_proc_next);
       PointCloudXYZI().swap(*meas.pcl_proc_next);
@@ -1886,17 +1915,21 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
         lid_header_time_buffer.pop_front();
       }
 
-      pending_vio_img_ = img_buffer.front();
-      pending_vio_time_ = img_capture_time;
-      has_pending_vio_img_ = true;
-      img_buffer.pop_front();
-      img_time_buffer.pop_front();
-      if (static_cast<int>(img_buffer.size()) < sync_img_buffer_min_size_ ||
-          (sync_img_lookahead_time_ > 0.0 &&
-           !img_time_buffer.empty() &&
-           img_time_buffer.back() < img_time_buffer.front() + sync_img_lookahead_time_))
+      if (deterministic_pending_vio_image_en_)
       {
-        sig_buffer.notify_all();
+        pending_vio_img_ = img_buffer.front();
+        pending_vio_time_ = img_capture_time;
+        has_pending_vio_img_ = true;
+        img_buffer.pop_front();
+        img_time_buffer.pop_front();
+        if (deterministic_sync_wait_for_image_lookahead_en_ &&
+            (static_cast<int>(img_buffer.size()) < sync_img_buffer_min_size_ ||
+             (sync_img_lookahead_time_ > 0.0 &&
+              !img_time_buffer.empty() &&
+              img_time_buffer.back() < img_time_buffer.front() + sync_img_lookahead_time_)))
+        {
+          sig_buffer.notify_all();
+        }
       }
 
       meas.measures.push_back(m);
@@ -1911,8 +1944,10 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
     case LIO:
     {
-      if (!has_pending_vio_img_) return false;
-      double img_capture_time = pending_vio_time_;
+      if (deterministic_pending_vio_image_en_ && !has_pending_vio_img_) return false;
+      if (!deterministic_pending_vio_image_en_ && img_buffer.empty()) return false;
+      double img_capture_time =
+          deterministic_pending_vio_image_en_ ? pending_vio_time_ : img_time_buffer.front() + exposure_time_init;
       meas.lio_vio_flg = VIO;
       // printf("[ Data Cut ] VIO \n");
       meas.measures.clear();
@@ -1920,7 +1955,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       struct MeasureGroup m;
       m.vio_time = img_capture_time;
       m.lio_time = meas.last_lio_update_time;
-      m.img = pending_vio_img_;
+      m.img = deterministic_pending_vio_image_en_ ? pending_vio_img_ : img_buffer.front();
       mtx_buffer.lock();
       // while ((!imu_buffer.empty() && (imu_time < img_capture_time)))
       // {
@@ -1931,9 +1966,17 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       //   printf("[ Data Cut ] imu time: %lf \n",
       //   imu_buffer.front()->header.stamp.toSec());
       // }
-      pending_vio_img_.release();
-      pending_vio_time_ = 0.0;
-      has_pending_vio_img_ = false;
+      if (deterministic_pending_vio_image_en_)
+      {
+        pending_vio_img_.release();
+        pending_vio_time_ = 0.0;
+        has_pending_vio_img_ = false;
+      }
+      else
+      {
+        img_buffer.pop_front();
+        img_time_buffer.pop_front();
+      }
       mtx_buffer.unlock();
       sig_buffer.notify_all();
       meas.measures.push_back(m);

@@ -229,8 +229,17 @@ inline double snapDoubleForDeterminism(double value, double scale)
   return std::round(value * scale) / scale;
 }
 
+inline bool g_state_snap_for_determinism_enabled = true;
+
+inline void setStateSnapForDeterminismEnabled(bool enabled)
+{
+  g_state_snap_for_determinism_enabled = enabled;
+}
+
 inline void snapStateForDeterminism(StatesGroup &state)
 {
+  if (!g_state_snap_for_determinism_enabled) return;
+
   constexpr double kStateSnapScale = 1e8;
   constexpr double kCovSnapScale = 1e10;
 
