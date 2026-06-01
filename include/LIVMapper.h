@@ -16,6 +16,7 @@ which is included as part of this source code package.
 #include "IMU_Processing.h"
 #include "vio.h"
 #include "preprocess.h"
+#include "uwb_manager.h"
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 #include <nav_msgs/Path.h>
@@ -36,6 +37,7 @@ public:
   void stateEstimationAndMapping();
   void handleVIO();
   void handleLIO();
+  void applyUwbUpdate(const char *stage);
   void savePCD();
   void print_landmarks();
   void processImu();
@@ -237,6 +239,7 @@ public:
   ImuProcessPtr p_imu;
   VoxelMapManagerPtr voxelmap_manager;
   VIOManagerPtr vio_manager;
+  UwbManagerPtr uwb_manager;
 
   ros::Publisher plane_pub;
   ros::Publisher voxel_pub;

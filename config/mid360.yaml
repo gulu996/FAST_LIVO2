@@ -121,6 +121,62 @@ imu:
   b_acc_cov: 0.001 # 0.1
   b_gyr_cov: 0.001 # 0.1
 
+uwb:
+  en: true
+  update_en: true
+  source: "serial" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
+  serial_port: "/dev/ttyUSB0"
+  baudrate: 115200
+  dtr: true
+  rts: false
+  log_filename: "uwb_ranges.txt" # 保存到当前save_path时间戳目录下
+  log_flush_stride: 1 # 每几行刷新一次，1表示便于tail -f实时观察
+  replay_file: "" # source=file时填写，例如"/home/gulu/data/2026-06-01-121010/uwb_ranges.txt"
+  replay_time_mode: "relative" # relative按文件首条UWB时间对齐本次开始；absolute按文件原始时间戳对齐/clock
+  replay_speed: 1.0
+  
+  parser_mode: "uwb" # uwb识别distance[id],dist和UWBDBG target/dist；也支持pairs/ordered/auto
+  range_scale: 1.0 # 串口里若是cm填0.01，若是mm填0.001
+  min_range_m: 0.05
+  max_range_m: 100.0
+  max_age_s: 0.5
+  max_queue_size: 512
+  min_update_anchors: 1
+  range_noise_m: 0.20
+  max_residual_m: 3.0
+  update_max_rot_step_deg: 1.0
+  update_max_trans_step_m: 0.10
+  tag_offset_body: [0.0, 0.0, 0.0] # UWB天线相对IMU/body坐标系的位置
+  tag_offset_estimate_en: false # 可选在线估计UWB天线杆臂；需要anchor世界坐标有效且运动/观测充分
+  tag_offset_estimate_min_anchors: 2
+  tag_offset_init_cov_m: 0.10
+  tag_offset_process_noise_m: 0.0 # 刚性安装建议为0；非0会允许杆臂缓慢变化
+  tag_offset_update_max_step_m: 0.01
+  tag_offset_max_norm_m: 1.0
+  anchor_position_estimate_en: false # true时flag=0的anchor先用轨迹+距离估计世界坐标，估计成功后再参与更新
+  anchor_estimate_use_for_update: true
+  anchor_estimate_freeze_after_init: true
+  anchor_estimate_min_samples: 30
+  anchor_estimate_max_samples: 300
+  anchor_estimate_min_rank: 1 # 3D充分运动建议3；隧道近似直线可降到1/2，但3D位置会有歧义
+  anchor_estimate_min_motion_m: 1.0
+  anchor_estimate_max_rmse_m: 0.50
+  anchor_estimate_max_step_m: 2.0
+  anchor_distance_constraints: [] # 例如 [{from: 0, to: 1, distance: 30.0}]，单位米
+  anchors:
+    - id: 0
+      flag: 0 # 0只记录不更新；改成1并填写真实世界坐标后，该距离才会进入EKF更新
+      position: [0.0, 0.0, 0.0]
+    - id: 1
+      flag: 0
+      position: [0.0, 0.0, 0.0]
+    - id: 2
+      flag: 0
+      position: [0.0, 0.0, 0.0]
+    - id: 3
+      flag: 0
+      position: [0.0, 0.0, 0.0]
+
 lio:
   max_iterations: 3
   map_update_stride: 2 # 仅每2帧更新一次地图体素，优先实时定位（可降建图细节）
@@ -173,9 +229,9 @@ evo:
   pose_output_en: false
 
 pcd_save:
-  pcd_save_en: true
+  pcd_save_en: false
   save_log_en: true # 日志写盘
-  save_path: "/home/jetson/data"
+  save_path: "/home/gulu/data"
   global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
   colmap_output_en: false # need to set interval = -1
   filter_size_pcd: 0.05

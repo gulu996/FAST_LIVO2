@@ -89,8 +89,10 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   pcl_wait_save_intensity.reset(new PointCloudXYZI());
   voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map));
   vio_manager.reset(new VIOManager());
+  uwb_manager.reset(new UwbManager());
   root_dir = ROOT_DIR;
   initializeFiles();
+  uwb_manager->initialize(nh, save_path);
   initializeComponents(nh);
   path.header.stamp = ros::Time::now();
   path.header.frame_id = "camera_init";
@@ -98,6 +100,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
 
 LIVMapper::~LIVMapper()
 {
+  if (uwb_manager) uwb_manager->shutdown();
   if (udp_socket_fd_ >= 0)
   {
     ::close(udp_socket_fd_);
@@ -660,6 +663,29 @@ void LIVMapper::stateEstimationAndMapping()
   if (state_update_flg) latest_ekf_state = _state;
 }
 
+void LIVMapper::applyUwbUpdate(const char *stage)
+{
+  if (!uwb_manager || !uwb_manager->updateEnabled()) return;
+
+  const int used_count = uwb_manager->applyRangeUpdate(_state);
+  if (used_count <= 0) return;
+
+  snapStateForDeterminism(_state);
+  voxelmap_manager->state_ = _state;
+  if (vio_manager) vio_manager->updateFrameState(_state);
+
+  if (imu_prop_enable)
+  {
+    ekf_finish_once = true;
+    latest_ekf_state = _state;
+    latest_ekf_time = LidarMeasures.last_lio_update_time;
+    state_update_flg = true;
+  }
+
+  ROS_INFO_THROTTLE(1.0, "[UWB] Applied %d range measurements after %s update.",
+                    used_count, stage ? stage : "state");
+}
+
 void LIVMapper::handleVIO() 
 {
 
@@ -716,6 +742,8 @@ void LIVMapper::handleVIO()
       vio_manager->has_last_visual_guard_pos = true;
     }
 
+    applyUwbUpdate("VIO-skip");
+
     publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
 
     euler_cur = RotMtoEuler(_state.rot_end);
@@ -767,6 +795,7 @@ void LIVMapper::handleVIO()
   snapStateForDeterminism(_state);
   vio_manager->updateFrameState(_state);
   updateVisualObservationHints();
+  applyUwbUpdate("VIO");
 
   if (imu_prop_enable) 
   {
@@ -950,6 +979,7 @@ void LIVMapper::handleLIO()
   _pv_list = voxelmap_manager->pv_list_;
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
+  applyUwbUpdate("LIO");
 
   double t2 = omp_get_wtime();
 
