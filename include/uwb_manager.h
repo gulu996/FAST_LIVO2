@@ -71,11 +71,15 @@ private:
   std::vector<UwbRangeMeasurement> parseLine(const std::string &line, double stamp) const;
   std::vector<UwbRangeMeasurement> takeRecentMeasurements(double now);
   void logRawLine(double stamp, const std::string &line, const std::vector<UwbRangeMeasurement> &measurements);
+  void logEvent(double stamp, const std::string &level, const std::string &message);
+  void logEventThrottled(double stamp, const std::string &key, double period_s,
+                         const std::string &level, const std::string &message);
   void logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
                  const V3D &trans_add, const V3D &tag_offset_add);
   int applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
   void collectAnchorEstimateSamples(const StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
-  bool estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double &rmse, int &rank) const;
+  bool estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double &rmse, int &rank,
+                              std::string *failure_reason = nullptr) const;
   void applyAnchorDistanceConstraints();
   void logAnchorEstimate(int anchor_id, const V3D &position_w, double rmse, int rank, int sample_count);
 
@@ -94,7 +98,7 @@ private:
   double replay_speed_ = 1.0;
   double range_scale_ = 1.0;
   double min_range_m_ = 0.05;
-  double max_range_m_ = 100.0;
+  double max_range_m_ = 250.0;
   double max_age_s_ = 0.5;
   int max_queue_size_ = 512;
   int min_update_anchors_ = 1;
@@ -129,6 +133,7 @@ private:
   std::mutex log_mutex_;
   std::ofstream log_file_;
   int log_pending_lines_ = 0;
+  std::map<std::string, double> event_log_last_stamp_;
 
   std::map<int, UwbAnchor> anchors_;
   std::map<int, UwbAnchor> configured_anchors_;

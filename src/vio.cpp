@@ -534,10 +534,15 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
 
 bool VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 {
-  if (pt_new == nullptr) return false;
+  if (pt_new == nullptr)
+  {
+    last_visual_map_insert_reject_invalid++;
+    return false;
+  }
 
   if (visual_voxel_size <= 1e-6)
   {
+    last_visual_map_insert_reject_invalid++;
     delete pt_new;
     return false;
   }
@@ -545,6 +550,7 @@ bool VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
   V3D pt_w(pt_new->pos_[0], pt_new->pos_[1], pt_new->pos_[2]);
   if (!std::isfinite(pt_w[0]) || !std::isfinite(pt_w[1]) || !std::isfinite(pt_w[2]))
   {
+    last_visual_map_insert_reject_invalid++;
     delete pt_new;
     return false;
   }
@@ -564,24 +570,20 @@ bool VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
     if (visual_map_max_points_per_voxel > 0 &&
         pts.size() >= static_cast<size_t>(visual_map_max_points_per_voxel))
     {
-      delete pt_new;
-      return false;
+      if (!eraseOldestVisualPointFromVoxel(iter->second, true) ||
+          pts.size() >= static_cast<size_t>(visual_map_max_points_per_voxel))
+      {
+        last_visual_map_insert_reject_voxel_full++;
+        delete pt_new;
+        return false;
+      }
     }
     pts.push_back(pt_new);
-    // Do not erase here: tracked pointers in current visual_submap may still
-    // reference points in this voxel during the same frame.
     iter->second->count = pts.size();
     return true;
   }
   else
   {
-    if (visual_map_max_voxels > 0 &&
-        feat_map.size() >= static_cast<size_t>(visual_map_max_voxels))
-    {
-      delete pt_new;
-      return false;
-    }
-
     VOXEL_POINTS *ot = new VOXEL_POINTS(0);
     ot->voxel_points.push_back(pt_new);
     ot->count = ot->voxel_points.size();
@@ -600,6 +602,226 @@ size_t VIOManager::getVisualPointCount() const
   return total;
 }
 
+void VIOManager::refreshProtectedVisualPointSet()
+{
+  protected_visual_points_.clear();
+  if (visual_submap == nullptr) return;
+  protected_visual_points_.reserve(visual_submap->voxel_points.size());
+  for (const VisualPoint *pt : visual_submap->voxel_points)
+  {
+    if (pt != nullptr) protected_visual_points_.insert(pt);
+  }
+}
+
+bool VIOManager::isVisualPointProtected(const VisualPoint *pt) const
+{
+  if (pt == nullptr) return false;
+  return protected_visual_points_.find(pt) != protected_visual_points_.end();
+}
+
+int VIOManager::getVisualPointOldestFrameId(const VisualPoint *pt) const
+{
+  if (pt == nullptr) return std::numeric_limits<int>::max();
+
+  int oldest = std::numeric_limits<int>::max();
+  for (const Feature *ftr : pt->obs_)
+  {
+    if (ftr != nullptr && ftr->id_ >= 0) oldest = std::min(oldest, ftr->id_);
+  }
+  return oldest;
+}
+
+bool VIOManager::eraseOldestVisualPointFromVoxel(VOXEL_POINTS *voxel, bool protect_current_submap)
+{
+  if (voxel == nullptr || voxel->voxel_points.empty()) return false;
+
+  size_t best_idx = voxel->voxel_points.size();
+  int best_frame_id = std::numeric_limits<int>::max();
+  for (size_t i = 0; i < voxel->voxel_points.size(); ++i)
+  {
+    VisualPoint *pt = voxel->voxel_points[i];
+    if (pt == nullptr) continue;
+    if (protect_current_submap && isVisualPointProtected(pt)) continue;
+
+    const int frame_id = getVisualPointOldestFrameId(pt);
+    if (best_idx == voxel->voxel_points.size() || frame_id < best_frame_id)
+    {
+      best_idx = i;
+      best_frame_id = frame_id;
+    }
+  }
+
+  if (best_idx == voxel->voxel_points.size()) return false;
+
+  delete voxel->voxel_points[best_idx];
+  voxel->voxel_points.erase(voxel->voxel_points.begin() + best_idx);
+  voxel->count = voxel->voxel_points.size();
+  last_visual_map_evicted_points++;
+  return true;
+}
+
+size_t VIOManager::pruneOldestVisualPointsTo(size_t target_points, bool protect_current_submap)
+{
+  const size_t total_points = getVisualPointCount();
+  if (total_points <= target_points) return 0;
+
+  const size_t wanted_remove = total_points - target_points;
+  struct PointCandidate
+  {
+    int frame_id;
+    VOXEL_LOCATION key;
+    VisualPoint *point;
+  };
+
+  std::vector<PointCandidate> candidates;
+  candidates.reserve(total_points);
+  for (const auto &kv : feat_map)
+  {
+    VOXEL_POINTS *voxel = kv.second;
+    if (voxel == nullptr) continue;
+
+    for (VisualPoint *pt : voxel->voxel_points)
+    {
+      if (pt == nullptr) continue;
+      if (protect_current_submap && isVisualPointProtected(pt)) continue;
+      candidates.push_back({getVisualPointOldestFrameId(pt), kv.first, pt});
+    }
+  }
+
+  if (candidates.empty()) return 0;
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const PointCandidate &a, const PointCandidate &b)
+            {
+              if (a.frame_id != b.frame_id) return a.frame_id < b.frame_id;
+              if (voxelLocationLess(a.key, b.key)) return true;
+              if (voxelLocationLess(b.key, a.key)) return false;
+              return a.point < b.point;
+            });
+
+  const size_t remove_count = std::min(wanted_remove, candidates.size());
+  std::unordered_set<VisualPoint *> points_to_delete;
+  points_to_delete.reserve(remove_count * 2 + 1);
+  for (size_t i = 0; i < remove_count; ++i)
+  {
+    points_to_delete.insert(candidates[i].point);
+  }
+
+  size_t removed_points = 0;
+  size_t removed_voxels = 0;
+  for (auto it = feat_map.begin(); it != feat_map.end();)
+  {
+    VOXEL_POINTS *voxel = it->second;
+    if (voxel == nullptr)
+    {
+      it = feat_map.erase(it);
+      ++removed_voxels;
+      continue;
+    }
+
+    auto &pts = voxel->voxel_points;
+    for (auto pt_it = pts.begin(); pt_it != pts.end();)
+    {
+      VisualPoint *pt = *pt_it;
+      if (pt != nullptr && points_to_delete.find(pt) != points_to_delete.end())
+      {
+        delete pt;
+        pt_it = pts.erase(pt_it);
+        ++removed_points;
+      }
+      else
+      {
+        ++pt_it;
+      }
+    }
+
+    voxel->count = pts.size();
+    if (pts.empty())
+    {
+      delete voxel;
+      it = feat_map.erase(it);
+      ++removed_voxels;
+    }
+    else
+    {
+      ++it;
+    }
+  }
+
+  last_visual_map_evicted_points += static_cast<int>(removed_points);
+  last_visual_map_evicted_voxels += static_cast<int>(removed_voxels);
+  return removed_points;
+}
+
+size_t VIOManager::pruneOldestVisualVoxelsTo(size_t target_voxels, bool protect_current_submap)
+{
+  if (feat_map.size() <= target_voxels) return 0;
+
+  const size_t wanted_remove = feat_map.size() - target_voxels;
+  struct VoxelCandidate
+  {
+    int frame_id;
+    VOXEL_LOCATION key;
+  };
+
+  std::vector<VoxelCandidate> candidates;
+  candidates.reserve(feat_map.size());
+  for (const auto &kv : feat_map)
+  {
+    VOXEL_POINTS *voxel = kv.second;
+    if (voxel == nullptr)
+    {
+      candidates.push_back({std::numeric_limits<int>::max(), kv.first});
+      continue;
+    }
+
+    bool has_protected = false;
+    int oldest_id = std::numeric_limits<int>::max();
+    for (VisualPoint *pt : voxel->voxel_points)
+    {
+      if (pt == nullptr) continue;
+      if (protect_current_submap && isVisualPointProtected(pt))
+      {
+        has_protected = true;
+        break;
+      }
+      oldest_id = std::min(oldest_id, getVisualPointOldestFrameId(pt));
+    }
+    if (has_protected) continue;
+    candidates.push_back({oldest_id, kv.first});
+  }
+
+  if (candidates.empty()) return 0;
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const VoxelCandidate &a, const VoxelCandidate &b)
+            {
+              if (a.frame_id != b.frame_id) return a.frame_id < b.frame_id;
+              return voxelLocationLess(a.key, b.key);
+            });
+
+  size_t removed_points = 0;
+  size_t removed_voxels = 0;
+  for (size_t i = 0; i < candidates.size() && removed_voxels < wanted_remove; ++i)
+  {
+    auto it = feat_map.find(candidates[i].key);
+    if (it == feat_map.end()) continue;
+
+    VOXEL_POINTS *voxel = it->second;
+    if (voxel != nullptr)
+    {
+      removed_points += voxel->voxel_points.size();
+      delete voxel;
+    }
+    feat_map.erase(it);
+    ++removed_voxels;
+  }
+
+  last_visual_map_evicted_points += static_cast<int>(removed_points);
+  last_visual_map_evicted_voxels += static_cast<int>(removed_voxels);
+  return removed_points;
+}
+
 void VIOManager::pruneVisualMap()
 {
   if (!visual_map_prune_en || feat_map.empty()) return;
@@ -616,8 +838,7 @@ void VIOManager::pruneVisualMap()
       auto &pts = voxel->voxel_points;
       while (pts.size() > static_cast<size_t>(visual_map_max_points_per_voxel))
       {
-        delete pts.front();
-        pts.erase(pts.begin());
+        if (!eraseOldestVisualPointFromVoxel(voxel, true)) break;
         ++removed_points;
       }
       voxel->count = pts.size();
@@ -636,44 +857,24 @@ void VIOManager::pruneVisualMap()
     return;
   }
 
-  V3D center(0, 0, 0);
-  if (state != nullptr) center = state->pos_end;
-
-  std::vector<std::pair<double, VOXEL_LOCATION>> ordered_voxels;
-  ordered_voxels.reserve(feat_map.size());
-  for (const auto &kv : feat_map)
+  if (over_point_limit)
   {
-    const VOXEL_LOCATION &loc = kv.first;
-    V3D voxel_center((loc.x + 0.5) * visual_voxel_size,
-                     (loc.y + 0.5) * visual_voxel_size,
-                     (loc.z + 0.5) * visual_voxel_size);
-    ordered_voxels.emplace_back((voxel_center - center).squaredNorm(), loc);
+    const size_t before_points = total_points;
+    const size_t before_voxels = feat_map.size();
+    pruneOldestVisualPointsTo(static_cast<size_t>(visual_map_max_total_points), true);
+    total_points = getVisualPointCount();
+    if (before_points >= total_points) removed_points += before_points - total_points;
+    if (before_voxels >= feat_map.size()) removed_voxels += before_voxels - feat_map.size();
   }
 
-  std::sort(ordered_voxels.begin(), ordered_voxels.end(),
-            [](const std::pair<double, VOXEL_LOCATION> &a, const std::pair<double, VOXEL_LOCATION> &b)
-            {
-              if (std::fabs(a.first - b.first) > 1e-9) return a.first > b.first;
-              return voxelLocationLess(a.second, b.second);
-            });
-
-  for (const auto &item : ordered_voxels)
+  if (visual_map_max_voxels > 0 && feat_map.size() > static_cast<size_t>(visual_map_max_voxels))
   {
-    const bool still_over_voxels = visual_map_max_voxels > 0 && feat_map.size() > static_cast<size_t>(visual_map_max_voxels);
-    const bool still_over_points = visual_map_max_total_points > 0 && total_points > static_cast<size_t>(visual_map_max_total_points);
-    if (!still_over_voxels && !still_over_points) break;
-
-    auto it = feat_map.find(item.second);
-    if (it == feat_map.end() || it->second == nullptr) continue;
-
-    VOXEL_POINTS *voxel = it->second;
-    const size_t voxel_points = voxel->voxel_points.size();
-    delete voxel;
-    feat_map.erase(it);
-    if (total_points >= voxel_points) total_points -= voxel_points;
-    else total_points = 0;
-    ++removed_voxels;
-    removed_points += voxel_points;
+    const size_t before_points = total_points;
+    const size_t before_voxels = feat_map.size();
+    pruneOldestVisualVoxelsTo(static_cast<size_t>(visual_map_max_voxels), true);
+    total_points = getVisualPointCount();
+    if (before_points >= total_points) removed_points += before_points - total_points;
+    if (before_voxels >= feat_map.size()) removed_voxels += before_voxels - feat_map.size();
   }
 
   if (removed_points > 0 || removed_voxels > 0)
@@ -1278,22 +1479,25 @@ bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 
 void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 {
-  if (pg.size() <= 10) return;
+  last_visual_map_pg_size = static_cast<int>(pg.size());
+  last_visual_map_candidate_slots = 0;
+  last_visual_map_patch_rejects = 0;
+  last_visual_map_added_points = 0;
+  last_visual_map_insert_reject_invalid = 0;
+  last_visual_map_insert_reject_voxel_full = 0;
+  last_visual_map_insert_reject_voxel_cap = 0;
+  last_visual_map_evicted_points = 0;
+  last_visual_map_evicted_voxels = 0;
+  last_visual_map_total_points_before = getVisualPointCount();
+  last_visual_map_total_points_after = last_visual_map_total_points_before;
+  last_visual_map_voxels_before = feat_map.size();
+  last_visual_map_voxels_after = last_visual_map_voxels_before;
+  refreshProtectedVisualPointSet();
+
+  if (pg.empty()) return;
 
   const int configured_cap = std::max(1, visual_map_max_add_per_frame);
   int max_add_this_frame = configured_cap;
-  if (visual_map_max_total_points > 0)
-  {
-    const size_t total_points_now = getVisualPointCount();
-    if (total_points_now >= static_cast<size_t>(visual_map_max_total_points))
-    {
-      printf("[ VIO ] Skip appending map points: visual map already at cap (%zu/%d)\n",
-             total_points_now, visual_map_max_total_points);
-      return;
-    }
-    const size_t remain = static_cast<size_t>(visual_map_max_total_points) - total_points_now;
-    max_add_this_frame = std::min(max_add_this_frame, static_cast<int>(remain));
-  }
 
   if (max_add_this_frame <= 0) return;
 
@@ -1374,6 +1578,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
     if (grid_num[i] == TYPE_POINTCLOUD) // && (scan_value[i]>=50))
     {
+      last_visual_map_candidate_slots++;
       pointWithVar pt_var = append_voxel_points[i];
       V3D pt = pt_var.point_w;
       if (!std::isfinite(pt[0]) || !std::isfinite(pt[1]) || !std::isfinite(pt[2])) continue;
@@ -1404,6 +1609,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
         if (!isPatchPhotometricallyUsable(patch, patch_size_total, sat_threshold,
                                           visual_patch_max_saturated_fraction, visual_patch_min_intensity_std))
         {
+          last_visual_map_patch_rejects++;
           delete[] patch;
           continue;
         }
@@ -1433,13 +1639,17 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       // map_cur_frame.push_back(pt_new);
     }
   }
+  last_visual_map_added_points = add;
+  last_visual_map_total_points_after = getVisualPointCount();
+  last_visual_map_voxels_after = feat_map.size();
 
   // double t_b2 = omp_get_wtime() - t0;
 
   if (console_timing_print_en && (frame_count % std::max(1, console_timing_print_stride) == 0))
   {
-    printf("[ VIO ] Append %d new visual map points (cap=%d, score>=%.1f)\n",
-           add, max_add_this_frame, min_corner_score);
+    printf("[ VIO ] Append %d new visual map points (cap=%d, score>=%.1f, evicted=%d/%d)\n",
+           add, max_add_this_frame, min_corner_score,
+           last_visual_map_evicted_points, last_visual_map_evicted_voxels);
   }
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
@@ -3394,6 +3604,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     const double t_map_gen_begin = omp_get_wtime();
     generateVisualMapPoints(img, pg);
     pruneVisualMap();
+    last_visual_map_total_points_after = getVisualPointCount();
+    last_visual_map_voxels_after = feat_map.size();
     const double t_map_gen = omp_get_wtime() - t_map_gen_begin;
 
     const double t_low_exit = omp_get_wtime();
@@ -3405,6 +3617,20 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     {
       printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
              total_points, min_retrieve_points, t_map_gen, vio_time_now);
+      printf("[ VIO ] Visual map gen stats: pg=%d, candidates=%d, patch_reject=%d, added=%d, reject(invalid/full/cap)=%d/%d/%d, evicted(points/voxels)=%d/%d, map_points=%zu->%zu, voxels=%zu->%zu.\n",
+             last_visual_map_pg_size,
+             last_visual_map_candidate_slots,
+             last_visual_map_patch_rejects,
+             last_visual_map_added_points,
+             last_visual_map_insert_reject_invalid,
+             last_visual_map_insert_reject_voxel_full,
+             last_visual_map_insert_reject_voxel_cap,
+             last_visual_map_evicted_points,
+             last_visual_map_evicted_voxels,
+             last_visual_map_total_points_before,
+             last_visual_map_total_points_after,
+             last_visual_map_voxels_before,
+             last_visual_map_voxels_after);
 
       printf("[ VIO Time ] skip-path: retrieve=%.6f, map_gen=%.6f, aruco_detect=%.6f, aruco_update=%.6f, total=%.6f, avg=%.6f\n",
              t_retrieve,
@@ -3468,6 +3694,23 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         oss << "[ VIO ] Skip visual EKF update: low tracked points (" << total_points << " < "
             << min_retrieve_points << "), map-gen=" << formatDouble6(t_map_gen)
             << " s, total=" << formatDouble6(vio_time_now) << " s.";
+        lines.push_back(oss.str());
+      }
+      {
+        std::ostringstream oss;
+        oss << "[ VIO ] Visual map gen stats: pg=" << last_visual_map_pg_size
+            << ", candidates=" << last_visual_map_candidate_slots
+            << ", patch_reject=" << last_visual_map_patch_rejects
+            << ", added=" << last_visual_map_added_points
+            << ", reject(invalid/full/cap)=" << last_visual_map_insert_reject_invalid
+            << "/" << last_visual_map_insert_reject_voxel_full
+            << "/" << last_visual_map_insert_reject_voxel_cap
+            << ", evicted(points/voxels)=" << last_visual_map_evicted_points
+            << "/" << last_visual_map_evicted_voxels
+            << ", map_points=" << last_visual_map_total_points_before
+            << "->" << last_visual_map_total_points_after
+            << ", voxels=" << last_visual_map_voxels_before
+            << "->" << last_visual_map_voxels_after << ".";
         lines.push_back(oss.str());
       }
       {
@@ -3675,6 +3918,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   updateReferencePatch(feat_map);
 
   pruneVisualMap();
+  last_visual_map_total_points_after = getVisualPointCount();
+  last_visual_map_voxels_after = feat_map.size();
 
   double t7 = omp_get_wtime();
   
@@ -3699,6 +3944,21 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   
   if (print_console)
   {
+    printf("[ VIO ] Visual map gen stats: pg=%d, candidates=%d, patch_reject=%d, added=%d, reject(invalid/full/cap)=%d/%d/%d, evicted(points/voxels)=%d/%d, map_points=%zu->%zu, voxels=%zu->%zu.\n",
+           last_visual_map_pg_size,
+           last_visual_map_candidate_slots,
+           last_visual_map_patch_rejects,
+           last_visual_map_added_points,
+           last_visual_map_insert_reject_invalid,
+           last_visual_map_insert_reject_voxel_full,
+           last_visual_map_insert_reject_voxel_cap,
+           last_visual_map_evicted_points,
+           last_visual_map_evicted_voxels,
+           last_visual_map_total_points_before,
+           last_visual_map_total_points_after,
+           last_visual_map_voxels_before,
+           last_visual_map_voxels_after);
+
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
     printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
@@ -3750,6 +4010,23 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   {
     vector<string> lines;
+    {
+      std::ostringstream oss;
+      oss << "[ VIO ] Visual map gen stats: pg=" << last_visual_map_pg_size
+          << ", candidates=" << last_visual_map_candidate_slots
+          << ", patch_reject=" << last_visual_map_patch_rejects
+          << ", added=" << last_visual_map_added_points
+          << ", reject(invalid/full/cap)=" << last_visual_map_insert_reject_invalid
+          << "/" << last_visual_map_insert_reject_voxel_full
+          << "/" << last_visual_map_insert_reject_voxel_cap
+          << ", evicted(points/voxels)=" << last_visual_map_evicted_points
+          << "/" << last_visual_map_evicted_voxels
+          << ", map_points=" << last_visual_map_total_points_before
+          << "->" << last_visual_map_total_points_after
+          << ", voxels=" << last_visual_map_voxels_before
+          << "->" << last_visual_map_voxels_after << ".";
+      lines.push_back(oss.str());
+    }
     lines.push_back("+-------------------------------------------------------------+");
     lines.push_back("|                         VIO Time                            |");
     lines.push_back("+-------------------------------------------------------------+");

@@ -75,15 +75,15 @@ vio:
   max_iterations: 5 # 提高视觉EKF迭代次数，优先把可用帧跑起来
   outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
   visual_map_prune_en: true
-  visual_map_max_voxels: 1800 # 降低视觉地图规模，优先实时性
-  visual_map_max_points_per_voxel: 10 # 每个视觉体素最多保留点数
-  visual_map_max_total_points: 20000 # 视觉点总量硬上限
-  visual_map_max_add_per_frame: 500 # 提高每帧可新增视觉点数，帮助更快建立可跟踪地图
-  visual_map_min_shi_tomasi_score: 4.0 # 进一步放宽角点阈值，优先让视觉点数量上来
-  min_retrieve_points: 10 # 尽量不跳过视觉EKF，只在极低点数时退回建图
-  min_update_meas: 300 # 降低残差下限，让少量特征也能真正进入EKF更新
+  visual_map_max_voxels: 1800 # 视觉体素硬上限；到上限后淘汰最早的非当前子图体素
+  visual_map_max_points_per_voxel: 10 # 每个视觉体素最多保留点数；满后用新点替换更早的点
+  visual_map_max_total_points: 20000 # 视觉点总量硬上限；满后按frame id淘汰最早的点
+  visual_map_max_add_per_frame: 300 # 控制单帧新增点数量，适合Jetson长时间运行
+  visual_map_min_shi_tomasi_score: 2.0 # 进一步放宽角点阈值，优先让视觉点数量上来
+  min_retrieve_points: 3 # 离线诊断时允许少量跟踪点进入视觉EKF
+  min_update_meas: 120 # 降低残差下限，让少量特征也能真正进入EKF更新
   low_track_force_update_stride: 1 # 低跟踪时每帧都尝试强制视觉EKF
-  low_track_force_min_points: 10 # 至少10个可用点就尝试更新；与min_update_meas保持一致
+  low_track_force_min_points: 3 # 至少3个可用点就尝试更新；低于该值仍只建图不更新
   visual_update_guard_en: true # 视觉EKF总修正门限，超过则回滚到LIO/IMU预测，防止出口过曝导致突然倒退
   visual_update_max_trans_m: 0.20 # 放宽单帧视觉总平移修正上限，减少不必要回滚
   visual_update_max_rot_deg: 4.0 # 放宽单帧视觉总旋转修正上限
@@ -99,7 +99,7 @@ vio:
   image_quality_max_dark_fraction: 0.98 # 灰度<=阈值的像素比例超过该值认为画面近乎全黑
   image_quality_min_intensity_std: 6.0 # 灰度标准差低于该值认为低纹理/低对比
   visual_patch_quality_gate_en: true # 对单个视觉patch做过曝/低纹理过滤，处理出口刚出现时面积小、全图门限尚未触发的纯白区域
-  visual_patch_max_saturated_fraction: 0.10 # 放宽patch内过曝像素比例阈值，保留局部保护但不过早丢帧
+  visual_patch_max_saturated_fraction: 0.20 # 放宽patch内过曝像素比例阈值，保留局部保护但不过早丢帧
   visual_patch_min_intensity_std: 2.0 # patch灰度标准差过低时不参与跟踪/建图
   image_quality_saturated_pixel_value: 250 # 饱和像素定义放宽到更接近代码默认值
   image_quality_dark_pixel_value: 5
@@ -124,21 +124,21 @@ imu:
 uwb:
   en: true
   update_en: true
-  source: "serial" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
+  source: "file" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
   serial_port: "/dev/ttyUSB0"
   baudrate: 115200
   dtr: true
   rts: false
   log_filename: "uwb_ranges.txt" # 保存到当前save_path时间戳目录下
   log_flush_stride: 1 # 每几行刷新一次，1表示便于tail -f实时观察
-  replay_file: "" # source=file时填写，例如"/home/gulu/data/2026-06-01-121010/uwb_ranges.txt"
-  replay_time_mode: "relative" # relative按文件首条UWB时间对齐本次开始；absolute按文件原始时间戳对齐/clock
+  replay_file: "/home/gulu/data/1970-01-01-080146/uwb_ranges.txt" # source=file时填写，例如"/home/gulu/data/2026-06-01-121010/uwb_ranges.txt"
+  replay_time_mode: "absolute" # rosbag+use_sim_time时用absolute按原始时间戳对齐；不用/clock时改回relative
   replay_speed: 1.0
   
   parser_mode: "uwb" # uwb识别distance[id],dist和UWBDBG target/dist；也支持pairs/ordered/auto
   range_scale: 1.0 # 串口里若是cm填0.01，若是mm填0.001
   min_range_m: 0.05
-  max_range_m: 100.0
+  max_range_m: 250.0 # 入口/出口基站相距178m，远端测距不能用100m门限提前丢弃
   max_age_s: 0.5
   max_queue_size: 512
   min_update_anchors: 1
@@ -153,19 +153,19 @@ uwb:
   tag_offset_process_noise_m: 0.0 # 刚性安装建议为0；非0会允许杆臂缓慢变化
   tag_offset_update_max_step_m: 0.01
   tag_offset_max_norm_m: 1.0
-  anchor_position_estimate_en: false # true时flag=0的anchor先用轨迹+距离估计世界坐标，估计成功后再参与更新
+  anchor_position_estimate_en: true # true时flag=0的anchor先用轨迹+距离估计世界坐标，估计成功后再参与更新
   anchor_estimate_use_for_update: true
   anchor_estimate_freeze_after_init: true
   anchor_estimate_min_samples: 30
   anchor_estimate_max_samples: 300
   anchor_estimate_min_rank: 1 # 3D充分运动建议3；隧道近似直线可降到1/2，但3D位置会有歧义
   anchor_estimate_min_motion_m: 1.0
-  anchor_estimate_max_rmse_m: 0.50
-  anchor_estimate_max_step_m: 2.0
-  anchor_distance_constraints: [] # 例如 [{from: 0, to: 1, distance: 30.0}]，单位米
+  anchor_estimate_max_rmse_m: 2.0
+  anchor_estimate_max_step_m: 0.0 # 0表示不限制GN单步，避免几十米外的anchor被2m步长卡住
+  anchor_distance_constraints: [{from: 0, to: 1, distance: 178.0}] # 例如 [{from: 0, to: 1, distance: 30.0}]，单位米
   anchors:
     - id: 0
-      flag: 0 # 0只记录不更新；改成1并填写真实世界坐标后，该距离才会进入EKF更新
+      flag: 0 # 0表示不使用手填坐标；若anchor_position_estimate_en=true，会先估计该anchor再更新
       position: [0.0, 0.0, 0.0]
     - id: 1
       flag: 0
@@ -200,7 +200,13 @@ local_map:
   long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
 
 adaptive_selector:
-  en: true # 启用自适应选帧
+  en: false # 离线诊断时先处理每一帧图像，避免视觉地图断点；实时跑不动时再改true
+  trans_thresh_min: 0.03
+  trans_thresh_max: 0.08
+  rot_thresh_min_deg: 0.4
+  rot_thresh_max_deg: 1.0
+  constraint_ratio_full: 0.2
+  max_skip_frames: 1
 
 runtime_guard:
   enable: false # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复

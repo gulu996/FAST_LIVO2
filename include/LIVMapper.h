@@ -134,10 +134,10 @@ public:
   bool normal_en = true;
   bool exposure_estimate_en = false;
   bool visual_map_prune_en = true;
-  int visual_map_max_voxels = 12000;
-  int visual_map_max_points_per_voxel = 24;
-  int visual_map_max_total_points = 180000;
-  int visual_map_max_add_per_frame_ = 600;
+  int visual_map_max_voxels = 1800;
+  int visual_map_max_points_per_voxel = 10;
+  int visual_map_max_total_points = 20000;
+  int visual_map_max_add_per_frame_ = 300;
   double visual_map_min_shi_tomasi_score_ = 10.0;
   int pcd_cache_max_points = 300000;
   double exposure_time_init = 0.0;

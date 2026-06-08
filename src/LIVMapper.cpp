@@ -154,10 +154,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("vio/exposure_estimate_en", exposure_estimate_en, true);
   nh.param<double>("vio/inv_expo_cov", inv_expo_cov, 0.2);
   nh.param<bool>("vio/visual_map_prune_en", visual_map_prune_en, true);
-  nh.param<int>("vio/visual_map_max_voxels", visual_map_max_voxels, 12000);
-  nh.param<int>("vio/visual_map_max_points_per_voxel", visual_map_max_points_per_voxel, 24);
-  nh.param<int>("vio/visual_map_max_total_points", visual_map_max_total_points, 180000);
-  nh.param<int>("vio/visual_map_max_add_per_frame", visual_map_max_add_per_frame_, 600);
+  nh.param<int>("vio/visual_map_max_voxels", visual_map_max_voxels, 1800);
+  nh.param<int>("vio/visual_map_max_points_per_voxel", visual_map_max_points_per_voxel, 10);
+  nh.param<int>("vio/visual_map_max_total_points", visual_map_max_total_points, 20000);
+  nh.param<int>("vio/visual_map_max_add_per_frame", visual_map_max_add_per_frame_, 300);
   nh.param<double>("vio/visual_map_min_shi_tomasi_score", visual_map_min_shi_tomasi_score_, 10.0);
   nh.param<int>("vio/grid_size", grid_size, 5);
   nh.param<int>("vio/grid_n_height", grid_n_height, 17);
@@ -262,6 +262,18 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   keyframe_rot_thresh_max_deg_ = 2.5;
   keyframe_constraint_ratio_full_ = 0.2;
   keyframe_max_skip_frames_ = 4;
+  nh.param<double>("adaptive_selector/trans_thresh_min", keyframe_trans_thresh_min_, keyframe_trans_thresh_min_);
+  nh.param<double>("adaptive_selector/trans_thresh_max", keyframe_trans_thresh_max_, keyframe_trans_thresh_max_);
+  nh.param<double>("adaptive_selector/rot_thresh_min_deg", keyframe_rot_thresh_min_deg_, keyframe_rot_thresh_min_deg_);
+  nh.param<double>("adaptive_selector/rot_thresh_max_deg", keyframe_rot_thresh_max_deg_, keyframe_rot_thresh_max_deg_);
+  nh.param<double>("adaptive_selector/constraint_ratio_full", keyframe_constraint_ratio_full_, keyframe_constraint_ratio_full_);
+  nh.param<int>("adaptive_selector/max_skip_frames", keyframe_max_skip_frames_, keyframe_max_skip_frames_);
+  keyframe_trans_thresh_min_ = std::max(0.0, keyframe_trans_thresh_min_);
+  keyframe_trans_thresh_max_ = std::max(keyframe_trans_thresh_min_, keyframe_trans_thresh_max_);
+  keyframe_rot_thresh_min_deg_ = std::max(0.0, keyframe_rot_thresh_min_deg_);
+  keyframe_rot_thresh_max_deg_ = std::max(keyframe_rot_thresh_min_deg_, keyframe_rot_thresh_max_deg_);
+  keyframe_constraint_ratio_full_ = std::max(1e-6, keyframe_constraint_ratio_full_);
+  keyframe_max_skip_frames_ = std::max(0, keyframe_max_skip_frames_);
 
   keyframe_trans_thresh_min_nominal_ = keyframe_trans_thresh_min_;
   keyframe_trans_thresh_max_nominal_ = keyframe_trans_thresh_max_;
@@ -288,6 +300,14 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     frame_time_budget_s_ = 0.1;
   }
   ROS_INFO("[RuntimeGuard] enable=%d, frame_time_budget_s=%.6f s", static_cast<int>(runtime_guard_en_), frame_time_budget_s_);
+  ROS_INFO("[AdaptiveSelector] enable=%d, trans=[%.3f %.3f] m, rot=[%.3f %.3f] deg, ratio_full=%.3f, max_skip=%d",
+           static_cast<int>(adaptive_visual_selector_en),
+           keyframe_trans_thresh_min_,
+           keyframe_trans_thresh_max_,
+           keyframe_rot_thresh_min_deg_,
+           keyframe_rot_thresh_max_deg_,
+           keyframe_constraint_ratio_full_,
+           keyframe_max_skip_frames_);
 
   pub_scan_num_degraded_ = std::max(1, pub_scan_num_degraded_);
   runtime_over_budget_trigger_frames_ = std::max(1, runtime_over_budget_trigger_frames_);

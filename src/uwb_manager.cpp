@@ -210,7 +210,7 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
     log_file_.open(log_path, std::ios::out | std::ios::app);
     if (log_file_.is_open())
     {
-      log_file_ << "# stamp raw_line parsed_ranges_m update_info\n";
+      log_file_ << "# stamp raw_line parsed_ranges_m update_info_or_event\n";
       log_file_.flush();
     }
     else
@@ -225,13 +225,33 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
     if (!loadReplayFile())
     {
       ROS_WARN("[UWB] Replay source is enabled, but replay file could not be loaded.");
+      logEvent(ros::Time::now().toSec(), "WARN", "REPLAY_LOAD_FAILED file=" + replay_file_);
       return false;
     }
     ROS_INFO("[UWB] Replay source loaded: file=%s measurements=%zu time_mode=%s speed=%.3f",
              replay_file_.c_str(), replay_measurements_.size(), replay_time_mode_.c_str(), replay_speed_);
+    {
+      std::ostringstream oss;
+      oss << "REPLAY_LOADED file=" << replay_file_
+          << " measurements=" << replay_measurements_.size()
+          << " time_mode=" << replay_time_mode_
+          << " speed=" << replay_speed_;
+      logEvent(ros::Time::now().toSec(), "INFO", oss.str());
+    }
     if (update_en_ && anchors_.empty())
     {
-      ROS_WARN("[UWB] uwb/update_en is true, but no enabled anchors with positions were configured. Replay data will be parsed only.");
+      if (anchor_position_estimate_en_)
+      {
+        ROS_WARN("[UWB] No fixed anchors were configured. flag=0 anchors will be estimated from replay ranges before EKF updates start.");
+        logEvent(ros::Time::now().toSec(), "WARN",
+                 "NO_FIXED_ANCHORS flag0_anchors_will_be_estimated source=replay");
+      }
+      else
+      {
+        ROS_WARN("[UWB] No UWB EKF update is possible: all anchors are flag=0 and uwb/anchor_position_estimate_en is false.");
+        logEvent(ros::Time::now().toSec(), "WARN",
+                 "NO_UWB_EKF_UPDATE no_anchor_positions anchor_position_estimate_en=false");
+      }
     }
     return true;
   }
@@ -246,10 +266,29 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
   read_thread_ = std::thread(&UwbManager::readLoop, this);
   ROS_INFO("[UWB] Serial reader started: port=%s baud=%d DTR=%d RTS=%d log=%s",
            serial_port_.c_str(), baudrate_, static_cast<int>(dtr_high_), static_cast<int>(rts_high_), log_path.c_str());
+  {
+    std::ostringstream oss;
+    oss << "SERIAL_STARTED port=" << serial_port_
+        << " baud=" << baudrate_
+        << " dtr=" << static_cast<int>(dtr_high_)
+        << " rts=" << static_cast<int>(rts_high_);
+    logEvent(ros::Time::now().toSec(), "INFO", oss.str());
+  }
 
   if (update_en_ && anchors_.empty())
   {
-    ROS_WARN("[UWB] uwb/update_en is true, but no enabled anchors with positions were configured. Data will be logged only.");
+    if (anchor_position_estimate_en_)
+    {
+      ROS_WARN("[UWB] No fixed anchors were configured. flag=0 anchors will be estimated from serial ranges before EKF updates start.");
+      logEvent(ros::Time::now().toSec(), "WARN",
+               "NO_FIXED_ANCHORS flag0_anchors_will_be_estimated source=serial");
+    }
+    else
+    {
+      ROS_WARN("[UWB] No UWB EKF update is possible: all anchors are flag=0 and uwb/anchor_position_estimate_en is false.");
+      logEvent(ros::Time::now().toSec(), "WARN",
+               "NO_UWB_EKF_UPDATE no_anchor_positions anchor_position_estimate_en=false");
+    }
   }
   return true;
 }
@@ -286,7 +325,7 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("uwb/replay_speed", replay_speed_, 1.0);
   nh.param<double>("uwb/range_scale", range_scale_, 1.0);
   nh.param<double>("uwb/min_range_m", min_range_m_, 0.05);
-  nh.param<double>("uwb/max_range_m", max_range_m_, 100.0);
+  nh.param<double>("uwb/max_range_m", max_range_m_, 250.0);
   nh.param<double>("uwb/max_age_s", max_age_s_, 0.5);
   nh.param<int>("uwb/max_queue_size", max_queue_size_, 512);
   nh.param<int>("uwb/min_update_anchors", min_update_anchors_, 1);
@@ -643,6 +682,24 @@ std::vector<UwbRangeMeasurement> UwbManager::takeReplayMeasurements(double now)
     }
 
     if (due_time > now) break;
+    if (max_age_s_ > 0.0 && now - due_time > max_age_s_)
+    {
+      ROS_WARN_THROTTLE(3.0,
+                        "[UWB] Drop stale replay range: anchor=%d, replay_time=%.6f, now=%.6f, age=%.3f s > max_age_s=%.3f. Check /use_sim_time, rosbag --clock, or set replay_time_mode=relative.",
+                        measurement.anchor_id, due_time, now, now - due_time, max_age_s_);
+      {
+        std::ostringstream oss;
+        oss << "DROP_STALE_REPLAY anchor=" << measurement.anchor_id
+            << " replay_time=" << due_time
+            << " now=" << now
+            << " age=" << (now - due_time)
+            << " max_age_s=" << max_age_s_
+            << " hint=check_use_sim_time_rosbag_clock_or_set_relative";
+        logEventThrottled(now, "drop_stale_replay", 3.0, "WARN", oss.str());
+      }
+      replay_index_++;
+      continue;
+    }
     measurements.push_back(measurement);
     replay_index_++;
   }
@@ -812,6 +869,34 @@ void UwbManager::logRawLine(double stamp, const std::string &line, const std::ve
   }
 }
 
+void UwbManager::logEvent(double stamp, const std::string &level, const std::string &message)
+{
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  if (!log_file_.is_open()) return;
+
+  log_file_ << std::fixed << std::setprecision(6)
+            << stamp << " " << level << " " << message << '\n';
+  log_file_.flush();
+}
+
+void UwbManager::logEventThrottled(double stamp, const std::string &key, double period_s,
+                                   const std::string &level, const std::string &message)
+{
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  if (!log_file_.is_open()) return;
+
+  const auto it = event_log_last_stamp_.find(key);
+  if (period_s > 0.0 && it != event_log_last_stamp_.end() && stamp - it->second < period_s)
+  {
+    return;
+  }
+  event_log_last_stamp_[key] = stamp;
+
+  log_file_ << std::fixed << std::setprecision(6)
+            << stamp << " " << level << " " << message << '\n';
+  log_file_.flush();
+}
+
 void UwbManager::logAnchorEstimate(int anchor_id, const V3D &position_w, double rmse, int rank, int sample_count)
 {
   std::lock_guard<std::mutex> lock(log_mutex_);
@@ -867,7 +952,23 @@ void UwbManager::collectAnchorEstimateSamples(const StatesGroup &state, const st
     UwbAnchor estimated_anchor;
     double rmse = 0.0;
     int rank = 0;
-    if (!estimateAnchorPosition(anchor_id, estimated_anchor, rmse, rank)) continue;
+    std::string failure_reason;
+    if (!estimateAnchorPosition(anchor_id, estimated_anchor, rmse, rank, &failure_reason))
+    {
+      if (static_cast<int>(item.second.size()) >= anchor_estimate_min_samples_)
+      {
+        std::ostringstream oss;
+        oss << "ANCHOR_ESTIMATE_PENDING id=" << anchor_id
+            << " reason=" << failure_reason
+            << " samples=" << item.second.size()
+            << " rank=" << rank
+            << " rmse=" << rmse;
+        logEventThrottled(ros::Time::now().toSec(),
+                          "anchor_estimate_pending_" + std::to_string(anchor_id),
+                          3.0, "WARN", oss.str());
+      }
+      continue;
+    }
 
     configured_anchors_[anchor_id] = estimated_anchor;
     if (anchor_estimate_use_for_update_)
@@ -893,14 +994,20 @@ void UwbManager::collectAnchorEstimateSamples(const StatesGroup &state, const st
   }
 }
 
-bool UwbManager::estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double &rmse, int &rank) const
+bool UwbManager::estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double &rmse, int &rank,
+                                        std::string *failure_reason) const
 {
+  auto fail = [&](const std::string &reason) {
+    if (failure_reason != nullptr) *failure_reason = reason;
+    return false;
+  };
+
   const auto samples_it = anchor_samples_.find(anchor_id);
-  if (samples_it == anchor_samples_.end()) return false;
+  if (samples_it == anchor_samples_.end()) return fail("no_samples");
 
   const auto &samples = samples_it->second;
   const int n = static_cast<int>(samples.size());
-  if (n < anchor_estimate_min_samples_) return false;
+  if (n < anchor_estimate_min_samples_) return fail("not_enough_samples");
 
   V3D min_p = samples.front().tag_position_w;
   V3D max_p = samples.front().tag_position_w;
@@ -909,7 +1016,7 @@ bool UwbManager::estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double
     min_p = min_p.cwiseMin(sample.tag_position_w);
     max_p = max_p.cwiseMax(sample.tag_position_w);
   }
-  if ((max_p - min_p).norm() < anchor_estimate_min_motion_m_) return false;
+  if ((max_p - min_p).norm() < anchor_estimate_min_motion_m_) return fail("not_enough_motion");
 
   const auto &ref = samples.front();
   Eigen::MatrixXd A(n - 1, 3);
@@ -923,17 +1030,17 @@ bool UwbManager::estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double
   }
 
   Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeThinU | Eigen::ComputeThinV);
-  if (svd.singularValues().size() == 0) return false;
+  if (svd.singularValues().size() == 0) return fail("empty_svd");
   const double max_sv = svd.singularValues()(0);
   rank = 0;
   for (int i = 0; i < svd.singularValues().size(); ++i)
   {
     if (svd.singularValues()(i) > std::max(1e-6, max_sv * 1e-3)) rank++;
   }
-  if (rank < anchor_estimate_min_rank_) return false;
+  if (rank < anchor_estimate_min_rank_) return fail("rank_too_low");
 
   V3D estimate = svd.solve(b);
-  if (!estimate.allFinite()) return false;
+  if (!estimate.allFinite()) return fail("non_finite_linear_solution");
 
   for (int iter = 0; iter < 8; ++iter)
   {
@@ -943,14 +1050,14 @@ bool UwbManager::estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double
     {
       const V3D diff = estimate - samples[i].tag_position_w;
       const double predicted = diff.norm();
-      if (predicted < 1e-6) return false;
+      if (predicted < 1e-6) return fail("zero_predicted_range");
       H.row(i) = (diff / predicted).transpose();
       residual(i) = samples[i].range_m - predicted;
     }
 
     Eigen::Matrix3d normal = H.transpose() * H + Eigen::Matrix3d::Identity() * 1e-6;
     V3D delta = normal.ldlt().solve(H.transpose() * residual);
-    if (!delta.allFinite()) return false;
+    if (!delta.allFinite()) return fail("non_finite_gn_step");
     if (anchor_estimate_max_step_m_ > 0.0 && delta.norm() > anchor_estimate_max_step_m_)
     {
       delta = delta.normalized() * anchor_estimate_max_step_m_;
@@ -966,7 +1073,7 @@ bool UwbManager::estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double
     residual_sum += residual * residual;
   }
   rmse = std::sqrt(residual_sum / std::max(1, n));
-  if (anchor_estimate_max_rmse_m_ > 0.0 && rmse > anchor_estimate_max_rmse_m_) return false;
+  if (anchor_estimate_max_rmse_m_ > 0.0 && rmse > anchor_estimate_max_rmse_m_) return fail("rmse_too_high");
 
   anchor.id = anchor_id;
   anchor.enabled = true;
@@ -1032,7 +1139,30 @@ int UwbManager::applyRangeUpdate(StatesGroup &state)
                             takeRecentMeasurements(now);
   if (measurements.empty()) return 0;
   collectAnchorEstimateSamples(state, measurements);
-  if (anchors_.empty()) return 0;
+  if (anchors_.empty())
+  {
+    if (anchor_position_estimate_en_)
+    {
+      ROS_WARN_THROTTLE(3.0,
+                        "[UWB] Waiting for anchor estimates before EKF update: replay/serial measurements=%zu, tracked_anchor_ids=%zu, min_samples=%d.",
+                        measurements.size(), anchor_samples_.size(), anchor_estimate_min_samples_);
+      {
+        std::ostringstream oss;
+        oss << "WAIT_ANCHOR_ESTIMATE measurements=" << measurements.size()
+            << " tracked_anchor_ids=" << anchor_samples_.size()
+            << " min_samples=" << anchor_estimate_min_samples_;
+        logEventThrottled(now, "wait_anchor_estimate", 3.0, "WARN", oss.str());
+      }
+    }
+    else
+    {
+      ROS_WARN_THROTTLE(3.0,
+                        "[UWB] Skip EKF update: no anchor positions are available. Set anchor flag=1 with position, or enable uwb/anchor_position_estimate_en.");
+      logEventThrottled(now, "skip_no_anchor_positions", 3.0, "WARN",
+                        "SKIP_EKF_UPDATE no_anchor_positions hint=set_anchor_flag1_or_enable_anchor_position_estimate");
+    }
+    return 0;
+  }
   return applyLatestMeasurements(state, measurements);
 }
 
@@ -1075,6 +1205,17 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     {
       ROS_WARN_THROTTLE(2.0, "[UWB] Reject range anchor=%d residual=%.3f m > %.3f m",
                         measurement.anchor_id, residual, max_residual_m_);
+      {
+        std::ostringstream oss;
+        oss << "REJECT_RANGE anchor=" << measurement.anchor_id
+            << " residual=" << residual
+            << " max_residual=" << max_residual_m_
+            << " measured=" << measurement.range_m
+            << " predicted=" << predicted_range;
+        logEventThrottled(ros::Time::now().toSec(),
+                          "reject_range_" + std::to_string(measurement.anchor_id),
+                          2.0, "WARN", oss.str());
+      }
       continue;
     }
 
@@ -1105,6 +1246,13 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
       ROS_WARN_THROTTLE(3.0,
                         "[UWB] Skip tag_offset estimation in this update: used anchors=%d < required=%d. Pose update still runs.",
                         row, tag_offset_estimate_min_anchors_);
+      {
+        std::ostringstream oss;
+        oss << "SKIP_TAG_OFFSET_ESTIMATION used_anchors=" << row
+            << " required=" << tag_offset_estimate_min_anchors_
+            << " pose_update_still_runs=1";
+        logEventThrottled(ros::Time::now().toSec(), "skip_tag_offset_estimation", 3.0, "WARN", oss.str());
+      }
     }
 
     const Eigen::MatrixXd S = H * state.cov * H.transpose() + R;
@@ -1112,6 +1260,8 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     if (ldlt.info() != Eigen::Success)
     {
       ROS_WARN_THROTTLE(2.0, "[UWB] Skip update: innovation covariance decomposition failed.");
+      logEventThrottled(ros::Time::now().toSec(), "skip_cov_decomposition", 2.0, "WARN",
+                        "SKIP_EKF_UPDATE innovation_covariance_decomposition_failed");
       return 0;
     }
 
@@ -1171,6 +1321,8 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
   if (ldlt.info() != Eigen::Success)
   {
     ROS_WARN_THROTTLE(2.0, "[UWB] Skip update: innovation covariance decomposition failed.");
+    logEventThrottled(ros::Time::now().toSec(), "skip_cov_decomposition", 2.0, "WARN",
+                      "SKIP_EKF_UPDATE innovation_covariance_decomposition_failed");
     return 0;
   }
 

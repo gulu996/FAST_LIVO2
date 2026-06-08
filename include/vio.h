@@ -21,6 +21,7 @@ which is included as part of this source code package.
 #include <opencv2/core/eigen.hpp>
 #include <pcl/filters/voxel_grid.h>
 #include <set>
+#include <unordered_set>
 #include <vikit/math_utils.h>
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
@@ -205,11 +206,24 @@ public:
   double max_state_update_rot_deg = 0.8;
   double max_state_update_trans_m = 0.08;
   bool visual_map_prune_en = true;
-  int visual_map_max_voxels = 12000;
-  int visual_map_max_points_per_voxel = 24;
-  int visual_map_max_total_points = 180000;
-  int visual_map_max_add_per_frame = 600;
+  int visual_map_max_voxels = 1800;
+  int visual_map_max_points_per_voxel = 10;
+  int visual_map_max_total_points = 20000;
+  int visual_map_max_add_per_frame = 300;
   float visual_map_min_shi_tomasi_score = 10.0f;
+  int last_visual_map_pg_size = 0;
+  int last_visual_map_candidate_slots = 0;
+  int last_visual_map_patch_rejects = 0;
+  int last_visual_map_added_points = 0;
+  int last_visual_map_insert_reject_invalid = 0;
+  int last_visual_map_insert_reject_voxel_full = 0;
+  int last_visual_map_insert_reject_voxel_cap = 0;
+  int last_visual_map_evicted_points = 0;
+  int last_visual_map_evicted_voxels = 0;
+  size_t last_visual_map_total_points_before = 0;
+  size_t last_visual_map_total_points_after = 0;
+  size_t last_visual_map_voxels_before = 0;
+  size_t last_visual_map_voxels_after = 0;
   double visual_voxel_size = 0.5;
   bool console_timing_print_en = true;
   int console_timing_print_stride = 1;
@@ -254,6 +268,7 @@ public:
   ofstream timing_log_file;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
+  std::unordered_set<const VisualPoint *> protected_visual_points_;
   unordered_map<int, Warp *> warp_map;
   vector<VisualPoint *> retrieve_voxel_points;
   vector<pointWithVar> append_voxel_points;
@@ -291,6 +306,12 @@ public:
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool insertPointIntoVoxelMap(VisualPoint *pt_new);
   size_t getVisualPointCount() const;
+  void refreshProtectedVisualPointSet();
+  bool isVisualPointProtected(const VisualPoint *pt) const;
+  int getVisualPointOldestFrameId(const VisualPoint *pt) const;
+  bool eraseOldestVisualPointFromVoxel(VOXEL_POINTS *voxel, bool protect_current_submap);
+  size_t pruneOldestVisualPointsTo(size_t target_points, bool protect_current_submap);
+  size_t pruneOldestVisualVoxelsTo(size_t target_voxels, bool protect_current_submap);
   void pruneVisualMap();
   void plotTrackedPoints();
   void updateFrameState(StatesGroup state);
