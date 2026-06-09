@@ -3513,6 +3513,25 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
              image_quality_min_intensity_std,
              vio_time_now);
     }
+    {
+      auto formatDouble6 = [](double value)
+      {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(6) << value;
+        return oss.str();
+      };
+
+      std::vector<std::string> lines;
+      std::ostringstream oss;
+      oss << "[ VIO ] Skip visual update: bad image quality"
+          << " sat=" << formatDouble6(saturated_fraction) << "/" << formatDouble6(image_quality_max_saturated_fraction)
+          << " tile_sat=" << formatDouble6(max_tile_saturated_fraction) << "/" << formatDouble6(image_quality_max_tile_saturated_fraction)
+          << " dark=" << formatDouble6(dark_fraction) << "/" << formatDouble6(image_quality_max_dark_fraction)
+          << " std=" << formatDouble6(intensity_std) << "/" << formatDouble6(image_quality_min_intensity_std)
+          << " total=" << formatDouble6(vio_time_now);
+      lines.push_back(oss.str());
+      appendTimingLogLines(lines);
+    }
     rememberVisualGuardPose();
     return;
   }

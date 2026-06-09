@@ -202,6 +202,12 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("time_offset/lidar_time_offset", lidar_time_offset, 0.0);
   nh.param<bool>("uav/imu_rate_odom", imu_prop_enable, false);
   nh.param<bool>("uav/gravity_align_en", gravity_align_en, false);
+  nh.param<bool>("uwb/output_correction_en", uwb_output_correction_en_, true);
+  nh.param<bool>("uwb/output_smooth_en", uwb_output_smooth_en_, true);
+  nh.param<double>("uwb/output_smooth_alpha", uwb_output_smooth_alpha_, 0.15);
+  nh.param<double>("uwb/output_smooth_max_step_m", uwb_output_smooth_max_step_m_, 0.05);
+  uwb_output_smooth_alpha_ = std::max(0.0, std::min(1.0, uwb_output_smooth_alpha_));
+  uwb_output_smooth_max_step_m_ = std::max(0.0, uwb_output_smooth_max_step_m_);
 
   nh.param<string>("evo/seq_name", seq_name, "01");
   nh.param<bool>("evo/pose_output_en", pose_output_en, false);
@@ -687,23 +693,90 @@ void LIVMapper::applyUwbUpdate(const char *stage)
 {
   if (!uwb_manager || !uwb_manager->updateEnabled()) return;
 
-  const int used_count = uwb_manager->applyRangeUpdate(_state);
-  if (used_count <= 0) return;
-
-  snapStateForDeterminism(_state);
-  voxelmap_manager->state_ = _state;
-  if (vio_manager) vio_manager->updateFrameState(_state);
-
-  if (imu_prop_enable)
+  V3D output_delta = V3D::Zero();
+  int used_count = 0;
+  if (uwb_output_correction_en_)
   {
-    ekf_finish_once = true;
-    latest_ekf_state = _state;
-    latest_ekf_time = LidarMeasures.last_lio_update_time;
-    state_update_flg = true;
+    StatesGroup corrected_state = _state;
+    corrected_state.pos_end += uwb_output_target_offset_;
+    const V3D pos_before = corrected_state.pos_end;
+    used_count = uwb_manager->applyRangeUpdate(corrected_state);
+    if (used_count <= 0) return;
+
+    output_delta = corrected_state.pos_end - pos_before;
+    uwb_output_target_offset_ += output_delta;
+    if (!uwb_output_smooth_en_)
+    {
+      uwb_output_pos_offset_ = uwb_output_target_offset_;
+    }
+  }
+  else
+  {
+    const V3D pos_before = _state.pos_end;
+    used_count = uwb_manager->applyRangeUpdate(_state);
+    if (used_count <= 0) return;
+    output_delta = _state.pos_end - pos_before;
+
+    snapStateForDeterminism(_state);
+    voxelmap_manager->state_ = _state;
+    if (vio_manager) vio_manager->updateFrameState(_state);
+
+    if (imu_prop_enable)
+    {
+      ekf_finish_once = true;
+      latest_ekf_state = _state;
+      latest_ekf_time = LidarMeasures.last_lio_update_time;
+      state_update_flg = true;
+    }
   }
 
   ROS_INFO_THROTTLE(1.0, "[UWB] Applied %d range measurements after %s update.",
                     used_count, stage ? stage : "state");
+  if (vio_manager)
+  {
+    std::vector<std::string> lines;
+    std::ostringstream oss;
+    oss << "[ UWB ] Applied " << used_count
+        << " range measurement(s) after " << (stage ? stage : "state")
+        << " update.";
+    lines.push_back(oss.str());
+    if (uwb_output_correction_en_)
+    {
+      std::ostringstream offset_oss;
+      offset_oss << "[ UWB ] output_delta=" << output_delta.transpose()
+                 << " output_offset=" << uwb_output_pos_offset_.transpose()
+                 << " output_target=" << uwb_output_target_offset_.transpose();
+      lines.push_back(offset_oss.str());
+    }
+    vio_manager->appendTimingLogLines(lines);
+  }
+}
+
+void LIVMapper::advanceUwbOutputCorrection()
+{
+  if (!uwb_output_correction_en_) return;
+  if (!uwb_output_smooth_en_)
+  {
+    uwb_output_pos_offset_ = uwb_output_target_offset_;
+    return;
+  }
+
+  const V3D residual = uwb_output_target_offset_ - uwb_output_pos_offset_;
+  if (residual.norm() < 1e-6) return;
+
+  V3D step = residual * uwb_output_smooth_alpha_;
+  const double step_norm = step.norm();
+  if (uwb_output_smooth_max_step_m_ > 0.0 && step_norm > uwb_output_smooth_max_step_m_)
+  {
+    step *= uwb_output_smooth_max_step_m_ / std::max(step_norm, 1e-9);
+  }
+  uwb_output_pos_offset_ += step;
+}
+
+V3D LIVMapper::outputPosition() const
+{
+  if (!uwb_output_correction_en_) return _state.pos_end;
+  return _state.pos_end + uwb_output_pos_offset_;
 }
 
 void LIVMapper::handleVIO() 
@@ -763,12 +836,14 @@ void LIVMapper::handleVIO()
     }
 
     applyUwbUpdate("VIO-skip");
+    advanceUwbOutputCorrection();
 
     publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
 
     euler_cur = RotMtoEuler(_state.rot_end);
+    const V3D out_pos = outputPosition();
     fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
-             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+             << out_pos.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
              << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 
     if (vio_manager)
@@ -816,6 +891,7 @@ void LIVMapper::handleVIO()
   vio_manager->updateFrameState(_state);
   updateVisualObservationHints();
   applyUwbUpdate("VIO");
+  advanceUwbOutputCorrection();
 
   if (imu_prop_enable) 
   {
@@ -848,8 +924,9 @@ void LIVMapper::handleVIO()
   }
 
   euler_cur = RotMtoEuler(_state.rot_end);
+  const V3D out_pos = outputPosition();
   fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
-            << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+            << out_pos.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 
 }
@@ -1000,6 +1077,7 @@ void LIVMapper::handleLIO()
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
   applyUwbUpdate("LIO");
+  advanceUwbOutputCorrection();
 
   double t2 = omp_get_wtime();
 
@@ -1030,7 +1108,8 @@ void LIVMapper::handleLIO()
     Eigen::Matrix4d outT;
     Eigen::Quaterniond q(_state.rot_end);
     evoFile << std::fixed;
-    evoFile << LidarMeasures.last_lio_update_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
+    const V3D out_pos = outputPosition();
+    evoFile << LidarMeasures.last_lio_update_time << " " << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " "
             << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
   }
   
@@ -1161,8 +1240,9 @@ void LIVMapper::handleLIO()
   }
 
   euler_cur = RotMtoEuler(_state.rot_end);
+  const V3D out_pos = outputPosition();
   fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
-            << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+            << out_pos.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
 }
 
@@ -2272,7 +2352,8 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
   if (save_log_en)
   {
     Eigen::Quaterniond q(_state.rot_end);
-    fout_pcd_pos << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " " << q.w() << " " << q.x() << " " << q.y()
+    const V3D out_pos = outputPosition();
+    fout_pcd_pos << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " " << q.w() << " " << q.x() << " " << q.y()
                   << " " << q.z() << " " << endl;
   }
   
@@ -2315,9 +2396,10 @@ void LIVMapper::publish_effect_world(const ros::Publisher &pubLaserCloudEffect, 
 
 template <typename T> void LIVMapper::set_posestamp(T &out)
 {
-  out.position.x = _state.pos_end(0);
-  out.position.y = _state.pos_end(1);
-  out.position.z = _state.pos_end(2);
+  const V3D out_pos = outputPosition();
+  out.position.x = out_pos(0);
+  out.position.y = out_pos(1);
+  out.position.z = out_pos(2);
   out.orientation.x = geoQuat.x;
   out.orientation.y = geoQuat.y;
   out.orientation.z = geoQuat.z;
@@ -2334,7 +2416,8 @@ void LIVMapper::publish_odometry(const ros::Publisher &pubOdomAftMapped)
   static tf::TransformBroadcaster br;
   tf::Transform transform;
   tf::Quaternion q;
-  transform.setOrigin(tf::Vector3(_state.pos_end(0), _state.pos_end(1), _state.pos_end(2)));
+  const V3D out_pos = outputPosition();
+  transform.setOrigin(tf::Vector3(out_pos(0), out_pos(1), out_pos(2)));
   q.setW(geoQuat.w);
   q.setX(geoQuat.x);
   q.setY(geoQuat.y);
@@ -2342,7 +2425,7 @@ void LIVMapper::publish_odometry(const ros::Publisher &pubOdomAftMapped)
   transform.setRotation(q);
   br.sendTransform( tf::StampedTransform(transform, odomAftMapped.header.stamp, "camera_init", "aft_mapped") );
   pubOdomAftMapped.publish(odomAftMapped);
-  sendUdpPose(_state.pos_end);
+  sendUdpPose(out_pos);
 }
 
 void LIVMapper::publish_mavros(const ros::Publisher &mavros_pose_publisher)

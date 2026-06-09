@@ -47,6 +47,15 @@ struct UwbAnchorDistanceConstraint
   double distance_m = 0.0;
 };
 
+struct UwbRepeatedRangeState
+{
+  bool valid = false;
+  double last_range_m = 0.0;
+  double first_stamp = 0.0;
+  double last_stamp = 0.0;
+  int repeat_count = 0;
+};
+
 class UwbManager
 {
 public:
@@ -69,6 +78,8 @@ private:
   std::vector<UwbRangeMeasurement> takeReplayMeasurements(double now);
   void handleLine(const std::string &line, double stamp);
   std::vector<UwbRangeMeasurement> parseLine(const std::string &line, double stamp) const;
+  std::vector<UwbRangeMeasurement> filterRepeatedRanges(const std::vector<UwbRangeMeasurement> &measurements,
+                                                        const std::string &source);
   std::vector<UwbRangeMeasurement> takeRecentMeasurements(double now);
   void logRawLine(double stamp, const std::string &line, const std::vector<UwbRangeMeasurement> &measurements);
   void logEvent(double stamp, const std::string &level, const std::string &message);
@@ -77,6 +88,11 @@ private:
   void logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
                  const V3D &trans_add, const V3D &tag_offset_add);
   int applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
+  bool tryAlignAnchorFrame(const StatesGroup &state,
+                           const std::vector<UwbRangeMeasurement> &measurements);
+  bool tryInitializeBaselineAnchors(const StatesGroup &state,
+                                    const std::vector<UwbRangeMeasurement> &measurements);
+  double configuredBaselineDistance() const;
   void collectAnchorEstimateSamples(const StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
   bool estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double &rmse, int &rank,
                               std::string *failure_reason = nullptr) const;
@@ -90,6 +106,7 @@ private:
   int baudrate_ = 115200;
   bool dtr_high_ = true;
   bool rts_high_ = false;
+  std::string mode_ = "entry_exit_distance";
   std::string parser_mode_ = "uwb";
   std::string log_filename_ = "uwb_ranges.txt";
   int log_flush_stride_ = 1;
@@ -103,7 +120,12 @@ private:
   int max_queue_size_ = 512;
   int min_update_anchors_ = 1;
   double range_noise_m_ = 0.20;
+  double position_cov_floor_m_ = 0.0;
   double max_residual_m_ = 3.0;
+  bool stale_repeat_filter_en_ = true;
+  double stale_repeat_epsilon_m_ = 0.001;
+  int stale_repeat_max_count_ = 3;
+  double stale_repeat_max_duration_s_ = 2.0;
   double update_max_rot_step_deg_ = 1.0;
   double update_max_trans_step_m_ = 0.10;
   V3D tag_offset_body_ = V3D::Zero();
@@ -124,6 +146,30 @@ private:
   double anchor_estimate_min_motion_m_ = 1.0;
   double anchor_estimate_max_rmse_m_ = 0.50;
   double anchor_estimate_max_step_m_ = 2.0;
+  bool baseline_anchor_init_en_ = false;
+  int baseline_anchor_start_id_ = 0;
+  int baseline_anchor_end_id_ = 1;
+  double baseline_distance_m_ = 0.0;
+  double baseline_init_min_motion_m_ = 20.0;
+  bool baseline_use_start_range_offset_ = true;
+  bool baseline_anchors_initialized_ = false;
+  bool baseline_start_pose_ready_ = false;
+  bool baseline_start_range_ready_ = false;
+  V3D baseline_start_tag_position_w_ = V3D::Zero();
+  double baseline_start_range_m_ = 0.0;
+  bool anchor_frame_align_en_ = false;
+  int anchor_frame_align_start_id_ = 0;
+  int anchor_frame_align_end_id_ = 1;
+  double anchor_frame_align_min_motion_m_ = 20.0;
+  bool anchor_frame_align_use_start_range_offset_ = true;
+  bool anchor_frame_align_yaw_only_ = true;
+  bool anchor_frame_aligned_ = false;
+  bool anchor_frame_align_start_pose_ready_ = false;
+  bool anchor_frame_align_start_range_ready_ = false;
+  V3D anchor_frame_align_start_tag_position_w_ = V3D::Zero();
+  double anchor_frame_align_start_range_m_ = 0.0;
+  M3D anchor_frame_align_R_ext_to_w_ = M3D::Identity();
+  V3D anchor_frame_align_t_ext_to_w_ = V3D::Zero();
 
   int serial_fd_ = -1;
   std::atomic<bool> running_{false};
@@ -140,10 +186,12 @@ private:
   std::vector<int> anchor_order_;
   std::map<int, std::deque<UwbAnchorSample>> anchor_samples_;
   std::vector<UwbAnchorDistanceConstraint> anchor_distance_constraints_;
+  std::map<int, UwbRepeatedRangeState> repeated_range_states_;
   std::vector<UwbRangeMeasurement> replay_measurements_;
   size_t replay_index_ = 0;
   bool replay_started_ = false;
   double replay_file_start_stamp_ = 0.0;
+  bool replay_file_start_stamp_ready_ = false;
   double replay_ros_start_stamp_ = 0.0;
 };
 
