@@ -86,10 +86,16 @@ private:
   void logEventThrottled(double stamp, const std::string &key, double period_s,
                          const std::string &level, const std::string &message);
   void logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
-                 const V3D &trans_add, const V3D &tag_offset_add);
+                 const V3D &trans_add, const V3D &tag_offset_add,
+                 const std::string &range_details);
   int applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
   bool tryAlignAnchorFrame(const StatesGroup &state,
                            const std::vector<UwbRangeMeasurement> &measurements);
+  void collectAnchorFrameAlignSamples(const StatesGroup &state,
+                                      const std::vector<UwbRangeMeasurement> &measurements);
+  bool estimateMultiAnchorFrame(M3D &R_ext_to_w, V3D &t_ext_to_w,
+                                double &rmse, int &used_anchor_count,
+                                int &used_sample_count) const;
   bool tryInitializeBaselineAnchors(const StatesGroup &state,
                                     const std::vector<UwbRangeMeasurement> &measurements);
   double configuredBaselineDistance() const;
@@ -106,7 +112,7 @@ private:
   int baudrate_ = 115200;
   bool dtr_high_ = true;
   bool rts_high_ = false;
-  std::string mode_ = "entry_exit_distance";
+  std::string mode_ = "external_anchors";
   std::string parser_mode_ = "uwb";
   std::string log_filename_ = "uwb_ranges.txt";
   int log_flush_stride_ = 1;
@@ -163,6 +169,16 @@ private:
   double anchor_frame_align_min_motion_m_ = 20.0;
   bool anchor_frame_align_use_start_range_offset_ = true;
   bool anchor_frame_align_yaw_only_ = true;
+  bool anchor_frame_align_multi_en_ = true;
+  int anchor_frame_align_multi_min_anchors_ = 3;
+  int anchor_frame_align_multi_min_samples_per_anchor_ = 5;
+  int anchor_frame_align_multi_min_total_samples_ = 30;
+  int anchor_frame_align_multi_max_samples_per_anchor_ = 200;
+  int anchor_frame_align_multi_max_iterations_ = 15;
+  double anchor_frame_align_multi_huber_delta_m_ = 1.0;
+  double anchor_frame_align_multi_max_rmse_m_ = 3.0;
+  double anchor_frame_align_multi_retry_period_s_ = 1.0;
+  double anchor_frame_align_last_multi_attempt_stamp_ = -1.0;
   bool anchor_frame_aligned_ = false;
   bool anchor_frame_align_start_pose_ready_ = false;
   bool anchor_frame_align_start_range_ready_ = false;
@@ -170,6 +186,7 @@ private:
   double anchor_frame_align_start_range_m_ = 0.0;
   M3D anchor_frame_align_R_ext_to_w_ = M3D::Identity();
   V3D anchor_frame_align_t_ext_to_w_ = V3D::Zero();
+  std::map<int, std::deque<UwbAnchorSample>> anchor_frame_align_samples_;
 
   int serial_fd_ = -1;
   std::atomic<bool> running_{false};

@@ -16,6 +16,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <sys/ioctl.h>
@@ -229,8 +230,16 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
       logEvent(ros::Time::now().toSec(), "WARN", "REPLAY_LOAD_FAILED file=" + replay_file_);
       return false;
     }
-    ROS_INFO("[UWB] Replay source loaded: file=%s measurements=%zu time_mode=%s speed=%.3f",
-             replay_file_.c_str(), replay_measurements_.size(), replay_time_mode_.c_str(), replay_speed_);
+    const bool replay_follows_ros_clock = ros::Time::isSimTime();
+    const double effective_replay_speed = replay_follows_ros_clock ? 1.0 : replay_speed_;
+    ROS_INFO("[UWB] Replay source loaded: file=%s measurements=%zu time_mode=%s requested_speed=%.3f effective_speed=%.3f sim_time=%d",
+             replay_file_.c_str(), replay_measurements_.size(), replay_time_mode_.c_str(),
+             replay_speed_, effective_replay_speed, static_cast<int>(replay_follows_ros_clock));
+    if (replay_follows_ros_clock && std::fabs(replay_speed_ - 1.0) > 1e-6)
+    {
+      ROS_WARN("[UWB] Ignoring uwb/replay_speed=%.3f because /use_sim_time is enabled. rosbag --clock already controls replay timing.",
+               replay_speed_);
+    }
     {
       std::ostringstream oss;
       oss << "REPLAY_LOADED file=" << replay_file_
@@ -238,7 +247,9 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
           << " file_start_stamp=" << replay_file_start_stamp_
           << " first_measurement_stamp=" << (replay_measurements_.empty() ? 0.0 : replay_measurements_.front().stamp)
           << " time_mode=" << replay_time_mode_
-          << " speed=" << replay_speed_;
+          << " requested_speed=" << replay_speed_
+          << " effective_speed=" << effective_replay_speed
+          << " sim_time=" << static_cast<int>(replay_follows_ros_clock);
       logEvent(ros::Time::now().toSec(), "INFO", oss.str());
     }
     if (update_en_ && anchors_.empty())
@@ -344,7 +355,7 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<int>("uwb/baudrate", baudrate_, 115200);
   nh.param<bool>("uwb/dtr", dtr_high_, true);
   nh.param<bool>("uwb/rts", rts_high_, false);
-  nh.param<std::string>("uwb/mode", mode_, "entry_exit_distance");
+  nh.param<std::string>("uwb/mode", mode_, "external_anchors");
   nh.param<std::string>("uwb/parser_mode", parser_mode_, "uwb");
   nh.param<std::string>("uwb/log_filename", log_filename_, "uwb_ranges.txt");
   nh.param<int>("uwb/log_flush_stride", log_flush_stride_, 1);
@@ -384,27 +395,33 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
 
   mode_ = toLower(mode_);
   std::replace(mode_.begin(), mode_.end(), '-', '_');
-  const bool entry_exit_mode = mode_ == "entry_exit_distance" ||
-                               mode_ == "entry_exit" ||
-                               mode_ == "baseline" ||
-                               mode_ == "distance" ||
-                               mode_ == "two_anchor" ||
-                               mode_ == "two_anchors";
+  const bool legacy_entry_exit_mode = mode_ == "entry_exit_distance" ||
+                                      mode_ == "entry_exit" ||
+                                      mode_ == "baseline" ||
+                                      mode_ == "distance" ||
+                                      mode_ == "two_anchor" ||
+                                      mode_ == "two_anchors";
   const bool external_anchors_mode = mode_ == "external_anchors" ||
                                      mode_ == "external_anchor" ||
                                      mode_ == "external" ||
                                      mode_ == "anchors" ||
                                      mode_ == "multi_anchor" ||
                                      mode_ == "multi_anchors";
-  if (!entry_exit_mode && !external_anchors_mode)
+  if (legacy_entry_exit_mode)
   {
-    ROS_WARN("[UWB] Unknown uwb/mode='%s'. Use entry_exit_distance or external_anchors. Falling back to entry_exit_distance.",
+    ROS_WARN("[UWB] uwb/mode='%s' is deprecated. Use external_anchors and set anchors 0/1 to [0,0,0] and [0,distance,0].",
              mode_.c_str());
-    mode_ = "entry_exit_distance";
+    mode_ = "external_anchors";
+  }
+  else if (!external_anchors_mode)
+  {
+    ROS_WARN("[UWB] Unknown uwb/mode='%s'. Falling back to external_anchors.",
+             mode_.c_str());
+    mode_ = "external_anchors";
   }
   else
   {
-    mode_ = external_anchors_mode ? "external_anchors" : "entry_exit_distance";
+    mode_ = "external_anchors";
   }
 
   int entry_anchor_id = 0;
@@ -416,11 +433,11 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   anchor_frame_align_start_id_ = entry_anchor_id;
   anchor_frame_align_end_id_ = exit_anchor_id;
 
-  baseline_anchor_init_en_ = (mode_ != "external_anchors" && !external_anchors_mode);
-  anchor_frame_align_en_ = external_anchors_mode;
+  baseline_anchor_init_en_ = false;
+  anchor_frame_align_en_ = true;
   anchor_position_estimate_en_ = false;
   nh.param<double>("uwb/entry_exit_distance_m", baseline_distance_m_, 0.0);
-  double init_min_motion_m = external_anchors_mode ? anchor_frame_align_min_motion_m_ : baseline_init_min_motion_m_;
+  double init_min_motion_m = anchor_frame_align_min_motion_m_;
   nh.param<double>("uwb/init_min_motion_m", init_min_motion_m, init_min_motion_m);
   baseline_init_min_motion_m_ = init_min_motion_m;
   anchor_frame_align_min_motion_m_ = init_min_motion_m;
@@ -429,7 +446,13 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   baseline_use_start_range_offset_ = use_start_range_offset;
   anchor_frame_align_use_start_range_offset_ = use_start_range_offset;
 
-  nh.param<bool>("uwb/baseline_anchor_init_en", baseline_anchor_init_en_, baseline_anchor_init_en_);
+  bool baseline_anchor_init_requested = false;
+  nh.param<bool>("uwb/baseline_anchor_init_en", baseline_anchor_init_requested, false);
+  if (baseline_anchor_init_requested)
+  {
+    ROS_WARN("[UWB] uwb/baseline_anchor_init_en is deprecated and ignored. Use external_anchors with anchor positions instead.");
+  }
+  baseline_anchor_init_en_ = false;
   nh.param<int>("uwb/baseline_anchor_start_id", baseline_anchor_start_id_, baseline_anchor_start_id_);
   nh.param<int>("uwb/baseline_anchor_end_id", baseline_anchor_end_id_, baseline_anchor_end_id_);
   nh.param<double>("uwb/baseline_distance_m", baseline_distance_m_, baseline_distance_m_);
@@ -441,6 +464,15 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("uwb/anchor_frame_align_min_motion_m", anchor_frame_align_min_motion_m_, anchor_frame_align_min_motion_m_);
   nh.param<bool>("uwb/anchor_frame_align_use_start_range_offset", anchor_frame_align_use_start_range_offset_, anchor_frame_align_use_start_range_offset_);
   nh.param<bool>("uwb/anchor_frame_align_yaw_only", anchor_frame_align_yaw_only_, true);
+  nh.param<bool>("uwb/anchor_frame_align_multi_en", anchor_frame_align_multi_en_, true);
+  nh.param<int>("uwb/anchor_frame_align_multi_min_anchors", anchor_frame_align_multi_min_anchors_, 3);
+  nh.param<int>("uwb/anchor_frame_align_multi_min_samples_per_anchor", anchor_frame_align_multi_min_samples_per_anchor_, 5);
+  nh.param<int>("uwb/anchor_frame_align_multi_min_total_samples", anchor_frame_align_multi_min_total_samples_, 30);
+  nh.param<int>("uwb/anchor_frame_align_multi_max_samples_per_anchor", anchor_frame_align_multi_max_samples_per_anchor_, 200);
+  nh.param<int>("uwb/anchor_frame_align_multi_max_iterations", anchor_frame_align_multi_max_iterations_, 15);
+  nh.param<double>("uwb/anchor_frame_align_multi_huber_delta_m", anchor_frame_align_multi_huber_delta_m_, 1.0);
+  nh.param<double>("uwb/anchor_frame_align_multi_max_rmse_m", anchor_frame_align_multi_max_rmse_m_, 3.0);
+  nh.param<double>("uwb/anchor_frame_align_multi_retry_period_s", anchor_frame_align_multi_retry_period_s_, 1.0);
   nh.param<bool>("uwb/anchor_position_estimate_en", anchor_position_estimate_en_, anchor_position_estimate_en_);
 
   std::vector<double> tag_offset;
@@ -489,6 +521,18 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   baseline_distance_m_ = std::max(0.0, baseline_distance_m_);
   baseline_init_min_motion_m_ = std::max(0.1, baseline_init_min_motion_m_);
   anchor_frame_align_min_motion_m_ = std::max(0.1, anchor_frame_align_min_motion_m_);
+  anchor_frame_align_multi_min_anchors_ = std::max(3, anchor_frame_align_multi_min_anchors_);
+  anchor_frame_align_multi_min_samples_per_anchor_ = std::max(2, anchor_frame_align_multi_min_samples_per_anchor_);
+  anchor_frame_align_multi_min_total_samples_ = std::max(
+      anchor_frame_align_multi_min_anchors_ * anchor_frame_align_multi_min_samples_per_anchor_,
+      anchor_frame_align_multi_min_total_samples_);
+  anchor_frame_align_multi_max_samples_per_anchor_ = std::max(
+      anchor_frame_align_multi_min_samples_per_anchor_,
+      anchor_frame_align_multi_max_samples_per_anchor_);
+  anchor_frame_align_multi_max_iterations_ = std::max(1, anchor_frame_align_multi_max_iterations_);
+  anchor_frame_align_multi_huber_delta_m_ = std::max(0.0, anchor_frame_align_multi_huber_delta_m_);
+  anchor_frame_align_multi_max_rmse_m_ = std::max(0.0, anchor_frame_align_multi_max_rmse_m_);
+  anchor_frame_align_multi_retry_period_s_ = std::max(0.0, anchor_frame_align_multi_retry_period_s_);
 
   XmlRpc::XmlRpcValue anchors_param;
   if (nh.getParam("uwb/anchors", anchors_param) && anchors_param.getType() == XmlRpc::XmlRpcValue::TypeArray)
@@ -526,6 +570,49 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
       anchor_order_.push_back(anchor.id);
       configured_anchors_[anchor.id] = anchor;
       if (anchor.enabled && !anchor_frame_align_en_) anchors_[anchor.id] = anchor;
+    }
+  }
+
+  if (legacy_entry_exit_mode && baseline_distance_m_ > 0.0)
+  {
+    const bool has_start = configured_anchors_.count(anchor_frame_align_start_id_) > 0 &&
+                           configured_anchors_[anchor_frame_align_start_id_].enabled;
+    const bool has_end = configured_anchors_.count(anchor_frame_align_end_id_) > 0 &&
+                         configured_anchors_[anchor_frame_align_end_id_].enabled;
+    if (!has_start || !has_end)
+    {
+      UwbAnchor start_anchor;
+      start_anchor.id = anchor_frame_align_start_id_;
+      start_anchor.enabled = true;
+      start_anchor.estimated = false;
+      start_anchor.position_w = V3D::Zero();
+
+      UwbAnchor end_anchor;
+      end_anchor.id = anchor_frame_align_end_id_;
+      end_anchor.enabled = true;
+      end_anchor.estimated = false;
+      end_anchor.position_w = V3D(0.0, baseline_distance_m_, 0.0);
+
+      configured_anchors_[start_anchor.id] = start_anchor;
+      configured_anchors_[end_anchor.id] = end_anchor;
+      if (std::find(anchor_order_.begin(), anchor_order_.end(), start_anchor.id) == anchor_order_.end())
+      {
+        anchor_order_.push_back(start_anchor.id);
+      }
+      if (std::find(anchor_order_.begin(), anchor_order_.end(), end_anchor.id) == anchor_order_.end())
+      {
+        anchor_order_.push_back(end_anchor.id);
+      }
+      if (!anchor_frame_align_en_)
+      {
+        anchors_[start_anchor.id] = start_anchor;
+        anchors_[end_anchor.id] = end_anchor;
+      }
+      ROS_WARN("[UWB] Converted deprecated entry/exit distance %.3f m to external anchors: id=%d [0,0,0], id=%d [0,%.3f,0].",
+               baseline_distance_m_,
+               start_anchor.id,
+               end_anchor.id,
+               baseline_distance_m_);
     }
   }
 
@@ -585,12 +672,15 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   }
   if (anchor_frame_align_en_)
   {
-    ROS_INFO("[UWB] Anchor frame alignment enabled: start=%d end=%d min_motion=%.3f use_start_range_offset=%d yaw_only=%d",
+    ROS_INFO("[UWB] Anchor frame alignment enabled: start=%d end=%d min_motion=%.3f use_start_range_offset=%d yaw_only=%d multi=%d min_anchors=%d min_total_samples=%d",
              anchor_frame_align_start_id_,
              anchor_frame_align_end_id_,
              anchor_frame_align_min_motion_m_,
              static_cast<int>(anchor_frame_align_use_start_range_offset_),
-             static_cast<int>(anchor_frame_align_yaw_only_));
+             static_cast<int>(anchor_frame_align_yaw_only_),
+             static_cast<int>(anchor_frame_align_multi_en_),
+             anchor_frame_align_multi_min_anchors_,
+             anchor_frame_align_multi_min_total_samples_);
   }
   return true;
 }
@@ -832,7 +922,9 @@ std::vector<UwbRangeMeasurement> UwbManager::takeReplayMeasurements(double now)
     double due_time = measurement.stamp;
     if (replay_time_mode_ != "absolute")
     {
-      due_time = replay_ros_start_stamp_ + (measurement.stamp - replay_file_start_stamp_) / replay_speed_;
+      const double effective_replay_speed = ros::Time::isSimTime() ? 1.0 : replay_speed_;
+      due_time = replay_ros_start_stamp_ +
+                 (measurement.stamp - replay_file_start_stamp_) / effective_replay_speed;
     }
 
     if (due_time > now) break;
@@ -1121,11 +1213,251 @@ void UwbManager::logAnchorEstimate(int anchor_id, const V3D &position_w, double 
   log_file_.flush();
 }
 
+void UwbManager::collectAnchorFrameAlignSamples(
+    const StatesGroup &state,
+    const std::vector<UwbRangeMeasurement> &measurements)
+{
+  if (!anchor_frame_align_en_ || anchor_frame_aligned_) return;
+
+  const V3D tag_offset_used = tag_offset_estimate_en_ ? tag_offset_est_body_ : tag_offset_body_;
+  const V3D tag_position_w = state.pos_end + state.rot_end * tag_offset_used;
+  for (const auto &measurement : measurements)
+  {
+    const auto anchor_it = configured_anchors_.find(measurement.anchor_id);
+    if (anchor_it == configured_anchors_.end() || !anchor_it->second.enabled) continue;
+    if (measurement.range_m <= min_range_m_ || measurement.range_m >= max_range_m_) continue;
+
+    UwbAnchorSample sample;
+    sample.tag_position_w = tag_position_w;
+    sample.range_m = measurement.range_m;
+    sample.stamp = measurement.stamp;
+    auto &samples = anchor_frame_align_samples_[measurement.anchor_id];
+    samples.push_back(sample);
+    while (static_cast<int>(samples.size()) > anchor_frame_align_multi_max_samples_per_anchor_)
+    {
+      samples.pop_front();
+    }
+  }
+}
+
+bool UwbManager::estimateMultiAnchorFrame(M3D &R_ext_to_w, V3D &t_ext_to_w,
+                                          double &rmse, int &used_anchor_count,
+                                          int &used_sample_count) const
+{
+  rmse = std::numeric_limits<double>::infinity();
+  used_anchor_count = 0;
+  used_sample_count = 0;
+  struct AlignSample
+  {
+    V3D anchor_ext = V3D::Zero();
+    V3D tag_w = V3D::Zero();
+    double range_m = 0.0;
+  };
+
+  std::vector<AlignSample> samples;
+  std::map<int, int> samples_per_anchor;
+  for (const auto &item : anchor_frame_align_samples_)
+  {
+    const auto anchor_it = configured_anchors_.find(item.first);
+    if (anchor_it == configured_anchors_.end() || !anchor_it->second.enabled) continue;
+    if (static_cast<int>(item.second.size()) < anchor_frame_align_multi_min_samples_per_anchor_) continue;
+
+    samples_per_anchor[item.first] = static_cast<int>(item.second.size());
+    for (const auto &sample : item.second)
+    {
+      AlignSample align_sample;
+      align_sample.anchor_ext = anchor_it->second.position_w;
+      align_sample.tag_w = sample.tag_position_w;
+      align_sample.range_m = sample.range_m;
+      samples.push_back(align_sample);
+    }
+  }
+
+  used_anchor_count = static_cast<int>(samples_per_anchor.size());
+  used_sample_count = static_cast<int>(samples.size());
+  if (used_anchor_count < anchor_frame_align_multi_min_anchors_ ||
+      used_sample_count < anchor_frame_align_multi_min_total_samples_)
+  {
+    return false;
+  }
+
+  V3D pivot_ext = samples.front().anchor_ext;
+  const auto start_it = configured_anchors_.find(anchor_frame_align_start_id_);
+  if (start_it != configured_anchors_.end() && start_it->second.enabled)
+  {
+    pivot_ext = start_it->second.position_w;
+  }
+  const V3D pivot_w = R_ext_to_w * pivot_ext + t_ext_to_w;
+  const int parameter_dim = anchor_frame_align_yaw_only_ ? 4 : 6;
+  const int yaw_seed_count = 12;
+  const double huber_delta = anchor_frame_align_multi_huber_delta_m_;
+  constexpr double kPi = 3.14159265358979323846;
+
+  double best_score = std::numeric_limits<double>::infinity();
+  double best_rmse = std::numeric_limits<double>::infinity();
+  M3D best_R = R_ext_to_w;
+  V3D best_t = t_ext_to_w;
+  const auto robustScore = [&](const M3D &R, const V3D &t) {
+    double score = 0.0;
+    for (const auto &sample : samples)
+    {
+      const double error = sample.range_m - (sample.tag_w - (R * sample.anchor_ext + t)).norm();
+      const double abs_error = std::fabs(error);
+      if (huber_delta > 0.0 && abs_error > huber_delta)
+      {
+        score += huber_delta * (abs_error - 0.5 * huber_delta);
+      }
+      else
+      {
+        score += 0.5 * error * error;
+      }
+    }
+    return score / static_cast<double>(samples.size());
+  };
+
+  for (int seed_idx = 0; seed_idx < yaw_seed_count; ++seed_idx)
+  {
+    const double yaw_offset = 2.0 * kPi * static_cast<double>(seed_idx) /
+                              static_cast<double>(yaw_seed_count);
+    M3D R = Eigen::AngleAxisd(yaw_offset, V3D::UnitZ()).toRotationMatrix() * R_ext_to_w;
+    V3D t = pivot_w - R * pivot_ext;
+
+    if (samples.size() >= 4)
+    {
+      const V3D ref_center = samples.front().tag_w - R * samples.front().anchor_ext;
+      Eigen::MatrixXd A(samples.size() - 1, 3);
+      Eigen::VectorXd b(samples.size() - 1);
+      for (size_t i = 1; i < samples.size(); ++i)
+      {
+        const V3D center = samples[i].tag_w - R * samples[i].anchor_ext;
+        A.row(static_cast<int>(i - 1)) = 2.0 * (ref_center - center).transpose();
+        b(static_cast<int>(i - 1)) = samples[i].range_m * samples[i].range_m -
+                                     samples.front().range_m * samples.front().range_m -
+                                     center.squaredNorm() + ref_center.squaredNorm();
+      }
+      Eigen::JacobiSVD<Eigen::MatrixXd> translation_svd(
+          A, Eigen::ComputeThinU | Eigen::ComputeThinV);
+      const V3D linear_t = translation_svd.solve(b);
+      if (linear_t.allFinite() && robustScore(R, linear_t) < robustScore(R, t)) t = linear_t;
+    }
+
+    for (int iter = 0; iter < anchor_frame_align_multi_max_iterations_; ++iter)
+    {
+      Eigen::MatrixXd H(samples.size(), parameter_dim);
+      Eigen::VectorXd residual(samples.size());
+      for (size_t i = 0; i < samples.size(); ++i)
+      {
+        const V3D rotated_anchor = R * samples[i].anchor_ext;
+        const V3D diff = samples[i].tag_w - (rotated_anchor + t);
+        const double predicted = diff.norm();
+        if (predicted < 1e-6)
+        {
+          H.row(static_cast<int>(i)).setZero();
+          residual(static_cast<int>(i)) = 0.0;
+          continue;
+        }
+        const V3D direction = diff / predicted;
+        residual(static_cast<int>(i)) = samples[i].range_m - predicted;
+
+        const Eigen::Matrix<double, 1, 3> rot_jacobian =
+            direction.transpose() * skewSymmetric(rotated_anchor);
+        if (anchor_frame_align_yaw_only_)
+        {
+          H(static_cast<int>(i), 0) = rot_jacobian(2);
+          H.block<1, 3>(static_cast<int>(i), 1) = -direction.transpose();
+        }
+        else
+        {
+          H.block<1, 3>(static_cast<int>(i), 0) = rot_jacobian;
+          H.block<1, 3>(static_cast<int>(i), 3) = -direction.transpose();
+        }
+
+        if (huber_delta > 0.0 && std::fabs(residual(static_cast<int>(i))) > huber_delta)
+        {
+          const double sqrt_weight = std::sqrt(huber_delta / std::fabs(residual(static_cast<int>(i))));
+          H.row(static_cast<int>(i)) *= sqrt_weight;
+          residual(static_cast<int>(i)) *= sqrt_weight;
+        }
+      }
+
+      Eigen::MatrixXd normal = H.transpose() * H +
+                               Eigen::MatrixXd::Identity(parameter_dim, parameter_dim) * 1e-6;
+      Eigen::VectorXd delta = normal.ldlt().solve(H.transpose() * residual);
+      if (!delta.allFinite()) break;
+
+      V3D rot_delta = V3D::Zero();
+      V3D trans_delta = V3D::Zero();
+      if (anchor_frame_align_yaw_only_)
+      {
+        rot_delta.z() = delta(0);
+        trans_delta = delta.segment<3>(1);
+      }
+      else
+      {
+        rot_delta = delta.segment<3>(0);
+        trans_delta = delta.segment<3>(3);
+      }
+
+      const double max_rot_step = 10.0 / 57.29577951308232;
+      if (rot_delta.norm() > max_rot_step) rot_delta *= max_rot_step / rot_delta.norm();
+      if (trans_delta.norm() > 5.0) trans_delta *= 5.0 / trans_delta.norm();
+
+      if (anchor_frame_align_yaw_only_)
+      {
+        R = Eigen::AngleAxisd(rot_delta.z(), V3D::UnitZ()).toRotationMatrix() * R;
+      }
+      else if (rot_delta.norm() > 1e-12)
+      {
+        R = Eigen::AngleAxisd(rot_delta.norm(), rot_delta.normalized()).toRotationMatrix() * R;
+      }
+      t += trans_delta;
+      if (rot_delta.norm() < 1e-6 && trans_delta.norm() < 1e-4) break;
+    }
+
+    const double score = robustScore(R, t);
+    std::vector<double> squared_residuals;
+    squared_residuals.reserve(samples.size());
+    for (const auto &sample : samples)
+    {
+      const double error = sample.range_m - (sample.tag_w - (R * sample.anchor_ext + t)).norm();
+      squared_residuals.push_back(error * error);
+    }
+    std::sort(squared_residuals.begin(), squared_residuals.end());
+    const size_t retained = std::max<size_t>(1, squared_residuals.size() * 8 / 10);
+    double trimmed_sum = 0.0;
+    for (size_t i = 0; i < retained; ++i) trimmed_sum += squared_residuals[i];
+    const double candidate_rmse = std::sqrt(trimmed_sum / static_cast<double>(retained));
+
+    if (score < best_score)
+    {
+      best_score = score;
+      best_rmse = candidate_rmse;
+      best_R = R;
+      best_t = t;
+    }
+  }
+
+  if (!std::isfinite(best_rmse)) return false;
+  if (anchor_frame_align_multi_max_rmse_m_ > 0.0 &&
+      best_rmse > anchor_frame_align_multi_max_rmse_m_)
+  {
+    rmse = best_rmse;
+    return false;
+  }
+
+  R_ext_to_w = best_R;
+  t_ext_to_w = best_t;
+  rmse = best_rmse;
+  return true;
+}
+
 bool UwbManager::tryAlignAnchorFrame(const StatesGroup &state,
                                      const std::vector<UwbRangeMeasurement> &measurements)
 {
   if (!anchor_frame_align_en_) return false;
   if (anchor_frame_aligned_) return true;
+
+  collectAnchorFrameAlignSamples(state, measurements);
 
   const auto start_it = configured_anchors_.find(anchor_frame_align_start_id_);
   const auto end_it = configured_anchors_.find(anchor_frame_align_end_id_);
@@ -1213,7 +1545,44 @@ bool UwbManager::tryAlignAnchorFrame(const StatesGroup &state,
     local_start_anchor -= local_dir * anchor_frame_align_start_range_m_;
   }
 
-  const V3D t_ext_to_w = local_start_anchor - R_ext_to_w * ext_start;
+  V3D t_ext_to_w = local_start_anchor - R_ext_to_w * ext_start;
+
+  int enabled_anchor_count = 0;
+  for (const auto &item : configured_anchors_)
+  {
+    if (item.second.enabled) enabled_anchor_count++;
+  }
+
+  bool used_multi_alignment = false;
+  double multi_rmse = 0.0;
+  int multi_anchor_count = 0;
+  int multi_sample_count = 0;
+  if (anchor_frame_align_multi_en_ &&
+      enabled_anchor_count >= anchor_frame_align_multi_min_anchors_)
+  {
+    const double now = ros::Time::now().toSec();
+    if (anchor_frame_align_last_multi_attempt_stamp_ >= 0.0 &&
+        now - anchor_frame_align_last_multi_attempt_stamp_ < anchor_frame_align_multi_retry_period_s_)
+    {
+      return false;
+    }
+    anchor_frame_align_last_multi_attempt_stamp_ = now;
+    if (!estimateMultiAnchorFrame(R_ext_to_w, t_ext_to_w, multi_rmse,
+                                  multi_anchor_count, multi_sample_count))
+    {
+      std::ostringstream wait_oss;
+      wait_oss << "WAIT_MULTI_ANCHOR_FRAME_ALIGN enabled_anchors=" << enabled_anchor_count
+               << " observed_ready_anchors=" << multi_anchor_count
+               << " samples=" << multi_sample_count
+               << " required_anchors=" << anchor_frame_align_multi_min_anchors_
+               << " required_samples=" << anchor_frame_align_multi_min_total_samples_;
+      if (std::isfinite(multi_rmse)) wait_oss << " rmse=" << multi_rmse;
+      logEventThrottled(ros::Time::now().toSec(), "multi_anchor_frame_wait", 3.0,
+                        "WARN", wait_oss.str());
+      return false;
+    }
+    used_multi_alignment = true;
+  }
 
   anchors_.clear();
   anchor_frame_align_R_ext_to_w_ = R_ext_to_w;
@@ -1233,7 +1602,9 @@ bool UwbManager::tryAlignAnchorFrame(const StatesGroup &state,
                       "WAIT_ANCHOR_FRAME_ALIGN no_enabled_anchors_after_transform");
     return false;
   }
+  anchor_frame_align_samples_.clear();
 
+  const V3D aligned_start = R_ext_to_w * ext_start + t_ext_to_w;
   const V3D aligned_end = R_ext_to_w * ext_end + t_ext_to_w;
   std::ostringstream oss;
   oss << "ANCHOR_FRAME_ALIGNED start_id=" << anchor_frame_align_start_id_
@@ -1241,8 +1612,12 @@ bool UwbManager::tryAlignAnchorFrame(const StatesGroup &state,
       << " external_baseline=" << ext_len
       << " motion=" << motion_norm
       << " yaw_only=" << static_cast<int>(anchor_frame_align_yaw_only_)
+      << " method=" << (used_multi_alignment ? "multi_anchor" : "start_end_pair")
+      << " used_anchors=" << (used_multi_alignment ? multi_anchor_count : 2)
+      << " used_samples=" << (used_multi_alignment ? multi_sample_count : 0)
+      << " rmse=" << (used_multi_alignment ? multi_rmse : 0.0)
       << " start_range=" << (anchor_frame_align_start_range_ready_ ? anchor_frame_align_start_range_m_ : 0.0)
-      << " local_start=" << local_start_anchor.transpose()
+      << " local_start=" << aligned_start.transpose()
       << " local_end=" << aligned_end.transpose()
       << " t_ext_to_w=" << t_ext_to_w.transpose();
   logEvent(ros::Time::now().toSec(), "INFO", oss.str());
@@ -1254,13 +1629,17 @@ bool UwbManager::tryAlignAnchorFrame(const StatesGroup &state,
     logEvent(ros::Time::now().toSec(), "INFO", anchor_oss.str());
   }
 
-  ROS_INFO("[UWB] Anchor frame aligned: start id=%d [%.3f %.3f %.3f], end id=%d [%.3f %.3f %.3f], external baseline=%.3f m, motion=%.3f m.",
+  ROS_INFO("[UWB] Anchor frame aligned (%s): start id=%d [%.3f %.3f %.3f], end id=%d [%.3f %.3f %.3f], external baseline=%.3f m, motion=%.3f m, anchors=%d, samples=%d, rmse=%.3f m.",
+           used_multi_alignment ? "multi-anchor" : "start/end pair",
            anchor_frame_align_start_id_,
-           local_start_anchor.x(), local_start_anchor.y(), local_start_anchor.z(),
+           aligned_start.x(), aligned_start.y(), aligned_start.z(),
            anchor_frame_align_end_id_,
            aligned_end.x(), aligned_end.y(), aligned_end.z(),
            ext_len,
-           motion_norm);
+           motion_norm,
+           used_multi_alignment ? multi_anchor_count : 2,
+           used_multi_alignment ? multi_sample_count : 0,
+           used_multi_alignment ? multi_rmse : 0.0);
   return true;
 }
 
@@ -1571,7 +1950,8 @@ void UwbManager::applyAnchorDistanceConstraints()
 }
 
 void UwbManager::logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
-                           const V3D &trans_add, const V3D &tag_offset_add)
+                           const V3D &trans_add, const V3D &tag_offset_add,
+                           const std::string &range_details)
 {
   std::lock_guard<std::mutex> lock(log_mutex_);
   if (!log_file_.is_open()) return;
@@ -1583,6 +1963,7 @@ void UwbManager::logUpdate(double stamp, int used_count, double residual_norm, c
             << " trans_add=" << trans_add.transpose()
             << " tag_offset=" << tag_offset_est_body_.transpose()
             << " tag_offset_add=" << tag_offset_add.transpose()
+            << " ranges_pre_update={" << range_details << "}"
             << '\n';
   log_file_.flush();
 }
@@ -1680,6 +2061,7 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
 
   const V3D tag_offset_used = tag_offset_estimate_en_ ? tag_offset_est_body_ : tag_offset_body_;
   const V3D tag_position_w = state.pos_end + state.rot_end * tag_offset_used;
+  std::ostringstream range_details;
   int row = 0;
   for (const auto &measurement : usable_measurements)
   {
@@ -1702,7 +2084,9 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
             << " residual=" << residual
             << " max_residual=" << max_residual_m_
             << " measured=" << measurement.range_m
-            << " predicted=" << predicted_range;
+            << " predicted=" << predicted_range
+            << " anchor_pos=[" << anchor_it->second.position_w.transpose() << "]"
+            << " tag_pos=[" << tag_position_w.transpose() << "]";
         logEventThrottled(ros::Time::now().toSec(),
                           "reject_range_" + std::to_string(measurement.anchor_id),
                           2.0, "WARN", oss.str());
@@ -1718,6 +2102,13 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
       H_tag.block<1, 3>(row, 0) = direction.transpose() * state.rot_end;
     }
     z(row) = residual;
+    if (row > 0) range_details << ";";
+    range_details << "id=" << measurement.anchor_id
+                  << ",anchor=[" << anchor_it->second.position_w.transpose() << "]"
+                  << ",tag=[" << tag_position_w.transpose() << "]"
+                  << ",measured=" << measurement.range_m
+                  << ",predicted=" << predicted_range
+                  << ",residual=" << residual;
     row++;
   }
 
@@ -1801,7 +2192,8 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     state.cov = 0.5 * (state.cov + state.cov.transpose());
     snapStateForDeterminism(state);
 
-    logUpdate(ros::Time::now().toSec(), row, z.norm(), rot_add, trans_add, V3D::Zero());
+    logUpdate(ros::Time::now().toSec(), row, z.norm(), rot_add, trans_add,
+              V3D::Zero(), range_details.str());
     ROS_INFO_THROTTLE(1.0, "[UWB] EKF update used=%d residual_norm=%.3f trans_add=%.4f m",
                       row, z.norm(), trans_add.norm());
     return row;
@@ -1885,7 +2277,8 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
   tag_offset_cov_ = P_joint_updated.block(DIM_STATE, DIM_STATE, 3, 3);
   snapStateForDeterminism(state);
 
-  logUpdate(ros::Time::now().toSec(), row, z.norm(), rot_add, trans_add, tag_offset_add);
+  logUpdate(ros::Time::now().toSec(), row, z.norm(), rot_add, trans_add,
+            tag_offset_add, range_details.str());
   ROS_INFO_THROTTLE(1.0, "[UWB] EKF update used=%d residual_norm=%.3f trans_add=%.4f m tag_offset=[%.3f %.3f %.3f]",
                     row, z.norm(), trans_add.norm(),
                     tag_offset_est_body_.x(), tag_offset_est_body_.y(), tag_offset_est_body_.z());

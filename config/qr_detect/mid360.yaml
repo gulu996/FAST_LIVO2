@@ -36,12 +36,12 @@ deterministic_debug:
   image_buffer_sort_en: true
 
 extrin_calib:
-  #extrinsic_T: [-0.011, -0.02329, 0.04412]
-  #extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  #Rcl: [ -0.011008,  -0.999940,   0.000187,
-  #        0.539054,  -0.006092,  -0.842250,
-  #        0.842200,  -0.009171,   0.539089]
-  #Pcl: [  0.086367,  -0.365243,  -0.070319]
+  extrinsic_T: [-0.011, -0.02329, 0.04412]
+  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  Rcl: [ -0.011008,  -0.999940,   0.000187,
+          0.539054,  -0.006092,  -0.842250,
+          0.842200,  -0.009171,   0.539089]
+  Pcl: [  0.086367,  -0.365243,  -0.070319]
 
 
   #extrinsic_T: [0.08809, 0.01329, -0.25733]
@@ -52,12 +52,12 @@ extrin_calib:
   #Pcl: [ -0.001139,  -0.161932,   0.001251]
 
   #2600*2160
-  extrinsic_T: [-0.011, -0.02329, 0.04412]
-  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  Rcl: [-0.020181 , -0.999125 ,  0.036652 ,
-         0.396389 , -0.041651 , -0.917137 ,
-         0.917861 , -0.003980 ,  0.396882]
-  Pcl: [ 0.051922 , -0.205230 , -0.018727]
+  #extrinsic_T: [-0.011, -0.02329, 0.04412]
+  #extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  #Rcl: [-0.020181 , -0.999125 ,  0.036652 ,
+  #       0.396389 , -0.041651 , -0.917137 ,
+  #       0.917861 , -0.003980 ,  0.396882]
+  #Pcl: [ 0.051922 , -0.205230 , -0.018727]
  
 time_offset: 
   imu_time_offset: 0.0
@@ -122,8 +122,8 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 uwb:
-  en: true
-  update_en: true
+  en: false 
+  update_en: false
 
   # 数据来源：serial在线读串口；file离线从replay_file回放之前保存的uwb_ranges.txt
   source: "file" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
@@ -282,13 +282,13 @@ udp_report:
   target_port: 9000
 
 aruco_landmarks:
-  aruco_landmarks_en: false
+  aruco_landmarks_en: true
   width: 0.8
   height: 0.6
   marker_size: 0.16
   delta_width_qr_center: 0.28 # Half the distance between the centers of two markers in the horizontal direction 
   delta_height_qr_center: 0.18 # Half the distance between the centers of two markers in the vertical direction
-  process_stride: 4 # 每隔多少个视觉帧执行一次ArUco检测和状态更新；1表示每帧执行
+  process_stride: 1 # 每隔多少个视觉帧执行一次ArUco检测和状态更新；1表示每帧执行
   markers:
     - id: 1
       flag: 0      #0表示该地标的世界坐标无效

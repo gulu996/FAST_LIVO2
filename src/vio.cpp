@@ -219,6 +219,8 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     nh.param<double>("/aruco_landmarks/marker_size", marker_size, 0.16);
     nh.param<double>("/aruco_landmarks/delta_width_qr_center", board_config_.delta_width_qr_center, 0.28);
     nh.param<double>("/aruco_landmarks/delta_height_qr_center", board_config_.delta_height_qr_center, 0.18);
+    nh.param<int>("/aruco_landmarks/process_stride", aruco_process_stride, 4);
+    aruco_process_stride = std::max(1, aruco_process_stride);
     aruco_min_quad_area_px = 300.0;
     aruco_pair_distance_rel_tol = 0.2;
     aruco_max_normal_diff_deg = 15.0;
@@ -229,7 +231,6 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     aruco_max_orientation_residual_deg = 25.0;
     aruco_position_noise_base = 0.01;
     aruco_orientation_noise_base = 0.1;
-    aruco_process_stride = 4;
     aruco_use_orientation_update = false;
     aruco_normal_gate_deg = 35.0;
     aruco_update_max_rot_step_deg = 1.0;
@@ -241,6 +242,7 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     aruco_relative_positions_[4] = Eigen::Vector3d(board_config_.delta_width_qr_center, -board_config_.delta_height_qr_center, 0);   // 右下
 
     ROS_INFO("[Aruco] Marker size: %.3f meters", marker_size);
+    ROS_INFO("[Aruco] Process stride: every %d visual frame(s)", aruco_process_stride);
     ROS_INFO("[Aruco] Same-ID gating: area>=%.1f px^2, pair tol<=%.2f, normal<=%.1f deg",
          aruco_min_quad_area_px, aruco_pair_distance_rel_tol, aruco_max_normal_diff_deg);
     // 清空现有地标
@@ -3158,6 +3160,17 @@ void VIOManager::updateStateWithBoardObservation()
 {
   if (current_board_observations_.empty()) return;
 
+  auto log_self_pose = [this](const char *source, int board_id, const V3D &position, const M3D &rotation)
+  {
+    const V3D rpy_deg = RotMtoEuler(rotation) * (180.0 / M_PI);
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6)
+        << "[Aruco] Self pose (" << source << ", board " << board_id << ", world/IMU): position ["
+        << position.x() << ", " << position.y() << ", " << position.z() << "] m, RPY ["
+        << rpy_deg.x() << ", " << rpy_deg.y() << ", " << rpy_deg.z() << "] deg";
+    appendTimingLogLines({oss.str()});
+  };
+
   for (const auto& board_obs : current_board_observations_)
   {
     if (board_obs.valid_count != 4 || !board_obs.geometry_valid)
@@ -3208,6 +3221,7 @@ void VIOManager::updateStateWithBoardObservation()
             euler_angles.z() * 180.0 / M_PI);
 
       printf("\033[1;33m  Valid markers: %d\033[0m\n", board_obs.valid_count);
+      log_self_pose("fused pose used to initialize landmark", board_id, P_wi, R_wi);
       printf("\033[1;33m===========================================\033[0m\n");
       continue;
     }
@@ -3266,6 +3280,12 @@ void VIOManager::updateStateWithBoardObservation()
              orientation_error_before,
              orientation_error_deg);
     }
+
+    const M3D R_wc_aruco = R_w_board * R_cam_board_used.transpose();
+    const V3D P_wc_aruco = P_w_board - R_wc_aruco * board_obs.center_tvec;
+    const M3D R_wi_aruco = R_wc_aruco * R_ic.transpose();
+    const V3D P_wi_aruco = P_wc_aruco - R_wi_aruco * P_ic;
+    log_self_pose("ArUco measured", board_id, P_wi_aruco, R_wi_aruco);
 
     printf("\033[1;32m  Orientation Error: %.2f degrees\033[0m\n", orientation_error_deg);
 
@@ -3382,6 +3402,7 @@ void VIOManager::updateStateWithBoardObservation()
            use_orientation_update ? "pos+ori" : "pos-only",
            z_aruco.norm(),
            quality_weight);
+    log_self_pose("fused after update", board_id, state->pos_end, state->rot_end);
   }
   snapStateForDeterminism(*state);
   updateFrameState(*state);
