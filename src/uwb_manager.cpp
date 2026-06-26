@@ -220,6 +220,21 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
       ROS_WARN("[UWB] Failed to open log file: %s", log_path.c_str());
     }
   }
+  if (start_anchor_origin_en_)
+  {
+    std::ostringstream oss;
+    oss << "START_ANCHOR_ORIGIN_DIRECT origin_id=" << start_anchor_origin_id_
+        << " anchors_for_update=" << anchors_.size()
+        << " tolerance=" << start_anchor_origin_tolerance_m_;
+    logEvent(ros::Time::now().toSec(), "INFO", oss.str());
+    for (const auto &item : anchors_)
+    {
+      std::ostringstream anchor_oss;
+      anchor_oss << "START_ANCHOR_ORIGIN_ANCHOR id=" << item.first
+                 << " position=" << item.second.position_w.transpose();
+      logEvent(ros::Time::now().toSec(), "INFO", anchor_oss.str());
+    }
+  }
 
   const std::string source = toLower(input_source_);
   if (source == "file" || source == "txt" || source == "replay")
@@ -371,10 +386,6 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("uwb/range_noise_m", range_noise_m_, 0.20);
   nh.param<double>("uwb/position_cov_floor_m", position_cov_floor_m_, 0.0);
   nh.param<double>("uwb/max_residual_m", max_residual_m_, 3.0);
-  nh.param<bool>("uwb/stale_repeat_filter_en", stale_repeat_filter_en_, true);
-  nh.param<double>("uwb/stale_repeat_epsilon_m", stale_repeat_epsilon_m_, 0.001);
-  nh.param<int>("uwb/stale_repeat_max_count", stale_repeat_max_count_, 3);
-  nh.param<double>("uwb/stale_repeat_max_duration_s", stale_repeat_max_duration_s_, 2.0);
   nh.param<double>("uwb/update_max_rot_step_deg", update_max_rot_step_deg_, 1.0);
   nh.param<double>("uwb/update_max_trans_step_m", update_max_trans_step_m_, 0.10);
   nh.param<bool>("uwb/tag_offset_estimate_en", tag_offset_estimate_en_, false);
@@ -474,6 +485,9 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("uwb/anchor_frame_align_multi_max_rmse_m", anchor_frame_align_multi_max_rmse_m_, 3.0);
   nh.param<double>("uwb/anchor_frame_align_multi_retry_period_s", anchor_frame_align_multi_retry_period_s_, 1.0);
   nh.param<bool>("uwb/anchor_position_estimate_en", anchor_position_estimate_en_, anchor_position_estimate_en_);
+  nh.param<bool>("uwb/start_anchor_origin_en", start_anchor_origin_en_, false);
+  nh.param<int>("uwb/start_anchor_origin_id", start_anchor_origin_id_, anchor_frame_align_start_id_);
+  nh.param<double>("uwb/start_anchor_origin_tolerance_m", start_anchor_origin_tolerance_m_, 0.20);
 
   std::vector<double> tag_offset;
   nh.param<std::vector<double>>("uwb/tag_offset_body", tag_offset, std::vector<double>{0.0, 0.0, 0.0});
@@ -501,9 +515,6 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   range_noise_m_ = std::max(1e-3, range_noise_m_);
   position_cov_floor_m_ = std::max(0.0, position_cov_floor_m_);
   max_residual_m_ = std::max(0.0, max_residual_m_);
-  stale_repeat_epsilon_m_ = std::max(0.0, stale_repeat_epsilon_m_);
-  stale_repeat_max_count_ = std::max(1, stale_repeat_max_count_);
-  stale_repeat_max_duration_s_ = std::max(0.0, stale_repeat_max_duration_s_);
   update_max_rot_step_deg_ = std::max(0.0, update_max_rot_step_deg_);
   update_max_trans_step_m_ = std::max(0.0, update_max_trans_step_m_);
   tag_offset_estimate_min_anchors_ = std::max(1, tag_offset_estimate_min_anchors_);
@@ -533,6 +544,7 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   anchor_frame_align_multi_huber_delta_m_ = std::max(0.0, anchor_frame_align_multi_huber_delta_m_);
   anchor_frame_align_multi_max_rmse_m_ = std::max(0.0, anchor_frame_align_multi_max_rmse_m_);
   anchor_frame_align_multi_retry_period_s_ = std::max(0.0, anchor_frame_align_multi_retry_period_s_);
+  start_anchor_origin_tolerance_m_ = std::max(0.0, start_anchor_origin_tolerance_m_);
 
   XmlRpc::XmlRpcValue anchors_param;
   if (nh.getParam("uwb/anchors", anchors_param) && anchors_param.getType() == XmlRpc::XmlRpcValue::TypeArray)
@@ -616,6 +628,44 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
     }
   }
 
+  if (start_anchor_origin_en_)
+  {
+    const auto origin_it = configured_anchors_.find(start_anchor_origin_id_);
+    if (origin_it == configured_anchors_.end() || !origin_it->second.enabled)
+    {
+      ROS_WARN("[UWB] uwb/start_anchor_origin_en is enabled, but origin anchor id=%d is not enabled. Keep normal anchor-frame alignment.",
+               start_anchor_origin_id_);
+      start_anchor_origin_en_ = false;
+    }
+    else if (origin_it->second.position_w.norm() > start_anchor_origin_tolerance_m_)
+    {
+      ROS_WARN("[UWB] uwb/start_anchor_origin_en is enabled, but anchor id=%d position norm %.3f m is larger than tolerance %.3f m. Keep normal anchor-frame alignment.",
+               start_anchor_origin_id_,
+               origin_it->second.position_w.norm(),
+               start_anchor_origin_tolerance_m_);
+      start_anchor_origin_en_ = false;
+    }
+    else
+    {
+      baseline_anchor_init_en_ = false;
+      anchor_frame_align_en_ = false;
+      anchor_position_estimate_en_ = false;
+      anchor_frame_aligned_ = true;
+      anchor_frame_align_R_ext_to_w_.setIdentity();
+      anchor_frame_align_t_ext_to_w_.setZero();
+      anchors_.clear();
+      for (const auto &item : configured_anchors_)
+      {
+        if (!item.second.enabled) continue;
+        UwbAnchor local_anchor = item.second;
+        local_anchor.estimated = false;
+        anchors_[local_anchor.id] = local_anchor;
+      }
+      ROS_INFO("[UWB] Start-anchor origin mode enabled: origin id=%d at [0,0,0]. Using %zu configured anchors directly in FAST-LIVO2 local frame.",
+               start_anchor_origin_id_, anchors_.size());
+    }
+  }
+
   XmlRpc::XmlRpcValue constraints_param;
   if (nh.getParam("uwb/anchor_distance_constraints", constraints_param) &&
       constraints_param.getType() == XmlRpc::XmlRpcValue::TypeArray)
@@ -643,11 +693,6 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   ROS_INFO("[UWB] enable=%d update=%d mode=%s parser=%s anchors_for_update=%zu",
            static_cast<int>(en_), static_cast<int>(update_en_),
            mode_.c_str(), parser_mode_.c_str(), anchors_.size());
-  if (stale_repeat_filter_en_)
-  {
-    ROS_INFO("[UWB] Stale repeat filter enabled: epsilon=%.4f m max_count=%d max_duration=%.3f s",
-             stale_repeat_epsilon_m_, stale_repeat_max_count_, stale_repeat_max_duration_s_);
-  }
   if (position_cov_floor_m_ > 0.0)
   {
     ROS_INFO("[UWB] Position covariance floor enabled for UWB updates: %.3f m",
@@ -830,7 +875,6 @@ bool UwbManager::loadReplayFile()
   replay_started_ = false;
   replay_file_start_stamp_ = 0.0;
   replay_file_start_stamp_ready_ = false;
-  repeated_range_states_.clear();
 
   std::string line;
   while (std::getline(replay_file, line))
@@ -875,7 +919,7 @@ bool UwbManager::loadReplayFile()
       raw_line = after_stamp.empty() ? line : after_stamp;
     }
 
-    auto measurements = filterRepeatedRanges(parseLine(raw_line, stamp), "replay");
+    auto measurements = parseLine(raw_line, stamp);
     for (auto &measurement : measurements)
     {
       measurement.stamp = stamp;
@@ -954,7 +998,7 @@ std::vector<UwbRangeMeasurement> UwbManager::takeReplayMeasurements(double now)
 
 void UwbManager::handleLine(const std::string &line, double stamp)
 {
-  const auto measurements = filterRepeatedRanges(parseLine(line, stamp), "serial");
+  const auto measurements = parseLine(line, stamp);
   logRawLine(stamp, line, measurements);
   if (measurements.empty()) return;
 
@@ -1075,57 +1119,6 @@ std::vector<UwbRangeMeasurement> UwbManager::parseLine(const std::string &line, 
     appendMeasurement(anchor_id, values[i]);
   }
   return measurements;
-}
-
-std::vector<UwbRangeMeasurement> UwbManager::filterRepeatedRanges(const std::vector<UwbRangeMeasurement> &measurements,
-                                                                  const std::string &source)
-{
-  if (!stale_repeat_filter_en_ || measurements.empty()) return measurements;
-
-  std::vector<UwbRangeMeasurement> filtered;
-  filtered.reserve(measurements.size());
-
-  for (const auto &measurement : measurements)
-  {
-    auto &state = repeated_range_states_[measurement.anchor_id];
-    const bool same_range = state.valid &&
-                            std::fabs(measurement.range_m - state.last_range_m) <= stale_repeat_epsilon_m_;
-
-    if (!same_range)
-    {
-      state.valid = true;
-      state.last_range_m = measurement.range_m;
-      state.first_stamp = measurement.stamp;
-      state.last_stamp = measurement.stamp;
-      state.repeat_count = 1;
-      filtered.push_back(measurement);
-      continue;
-    }
-
-    state.repeat_count++;
-    state.last_stamp = measurement.stamp;
-    const double repeated_duration = std::max(0.0, state.last_stamp - state.first_stamp);
-    const bool repeated_too_many = state.repeat_count > stale_repeat_max_count_;
-    const bool repeated_too_long = repeated_duration >= stale_repeat_max_duration_s_;
-    if (repeated_too_many && repeated_too_long)
-    {
-      std::ostringstream oss;
-      oss << "DROP_STALE_REPEAT source=" << source
-          << " anchor=" << measurement.anchor_id
-          << " range=" << measurement.range_m
-          << " repeat_count=" << state.repeat_count
-          << " duration=" << repeated_duration
-          << " epsilon=" << stale_repeat_epsilon_m_;
-      logEventThrottled(measurement.stamp,
-                        "drop_stale_repeat_" + std::to_string(measurement.anchor_id),
-                        3.0, "WARN", oss.str());
-      continue;
-    }
-
-    filtered.push_back(measurement);
-  }
-
-  return filtered;
 }
 
 std::vector<UwbRangeMeasurement> UwbManager::takeRecentMeasurements(double now)

@@ -144,6 +144,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("deterministic_debug/lio_feature_sort_en", deterministic_lio_feature_sort_en_, true);
   nh.param<bool>("deterministic_debug/visual_observed_voxel_sort_en", deterministic_visual_observed_voxel_sort_en_, true);
   nh.param<bool>("deterministic_debug/visual_voxel_key_sort_en", deterministic_visual_voxel_key_sort_en_, true);
+  nh.param<bool>("common/livo_lidar_nearest_image_sync_en", livo_lidar_nearest_image_sync_en_, false);
   setStateSnapForDeterminismEnabled(deterministic_state_snap_en_);
 
   nh.param<bool>("vio/normal_en", normal_en, true);
@@ -1685,7 +1686,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
   msg->header.stamp = ros::Time().fromSec(msg->header.stamp.toSec() - imu_time_offset);
   double timestamp = msg->header.stamp.toSec();
 
-  if (fabs(last_timestamp_lidar - timestamp) > 0.5 && (!ros_driver_fix_en))
+  if (last_timestamp_lidar > 0.0 && fabs(last_timestamp_lidar - timestamp) > 0.5 && (!ros_driver_fix_en))
   {
     ROS_WARN("IMU and LiDAR not synced! delta time: %lf .\n", last_timestamp_lidar - timestamp);
   }
@@ -1847,10 +1848,118 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   sig_buffer.notify_all();
 }
 
+bool LIVMapper::syncLivoByLidarNearestImage(LidarMeasureGroup &meas)
+{
+  if (meas.lio_vio_flg == LIO)
+  {
+    if (!has_pending_vio_img_) return false;
+
+    meas.lio_vio_flg = VIO;
+    meas.measures.clear();
+
+    MeasureGroup m;
+    m.vio_time = pending_vio_time_;
+    m.lio_time = meas.last_lio_update_time;
+    m.img = pending_vio_img_;
+
+    pending_vio_img_.release();
+    pending_vio_time_ = 0.0;
+    has_pending_vio_img_ = false;
+    lidar_pushed = false;
+
+    meas.measures.push_back(m);
+    sig_buffer.notify_all();
+    return true;
+  }
+
+  if (meas.lio_vio_flg != WAIT && meas.lio_vio_flg != VIO) return false;
+
+  std::unique_lock<std::mutex> buffer_lock(mtx_buffer);
+  if (lid_raw_data_buffer.empty() || imu_buffer.empty() || img_buffer.empty()) return false;
+
+  PointCloudXYZI::Ptr lidar = lid_raw_data_buffer.front();
+  if (!lidar || lidar->points.size() <= 1) return false;
+
+  const double lidar_beg_time = lid_header_time_buffer.front();
+  const double lidar_end_time = lidar_beg_time + lidar->points.back().curvature / double(1000);
+  if (imu_en && last_timestamp_imu < lidar_end_time) return false;
+
+  const double target_img_time = lidar_end_time - exposure_time_init;
+  auto after_it = std::lower_bound(img_time_buffer.begin(), img_time_buffer.end(), target_img_time);
+  if (after_it == img_time_buffer.end()) return false;
+
+  size_t img_idx = static_cast<size_t>(std::distance(img_time_buffer.begin(), after_it));
+  if (img_idx > 0)
+  {
+    const double before_time = img_time_buffer[img_idx - 1] + exposure_time_init;
+    const double after_time = img_time_buffer[img_idx] + exposure_time_init;
+    // ponytail: choose one image per LiDAR frame; earlier wins ties to avoid using a future image when equally close.
+    if (std::fabs(lidar_end_time - before_time) <= std::fabs(after_time - lidar_end_time))
+    {
+      img_idx--;
+    }
+  }
+
+  const cv::Mat nearest_img = img_buffer[img_idx];
+  const double nearest_img_time = img_time_buffer[img_idx] + exposure_time_init;
+
+  if (meas.last_lio_update_time < 0.0) meas.last_lio_update_time = lidar_beg_time;
+
+  MeasureGroup m;
+  m.imu.clear();
+  m.lio_time = lidar_end_time;
+
+  if (deterministic_imu_buffer_sort_en_)
+  {
+    std::sort(imu_buffer.begin(), imu_buffer.end(),
+              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                return a->header.stamp.toSec() < b->header.stamp.toSec();
+              });
+  }
+  while (!imu_buffer.empty())
+  {
+    const double imu_time = imu_buffer.front()->header.stamp.toSec();
+    if (imu_time > lidar_end_time) break;
+    if (imu_time > meas.last_lio_update_time) m.imu.push_back(imu_buffer.front());
+    imu_buffer.pop_front();
+  }
+
+  meas.lidar = lidar;
+  meas.lidar_frame_beg_time = lidar_beg_time;
+  meas.lidar_frame_end_time = lidar_end_time;
+  meas.pcl_proc_cur = lidar;
+  PointCloudXYZI().swap(*meas.pcl_proc_next);
+
+  lid_raw_data_buffer.pop_front();
+  lid_header_time_buffer.pop_front();
+
+  pending_vio_img_ = nearest_img;
+  pending_vio_time_ = nearest_img_time;
+  has_pending_vio_img_ = true;
+  img_buffer.erase(img_buffer.begin(), img_buffer.begin() + static_cast<long>(img_idx + 1));
+  img_time_buffer.erase(img_time_buffer.begin(), img_time_buffer.begin() + static_cast<long>(img_idx + 1));
+  buffer_lock.unlock();
+  sig_buffer.notify_all();
+
+  if (deterministic_imu_buffer_sort_en_)
+  {
+    std::sort(m.imu.begin(), m.imu.end(),
+              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
+                return a->header.stamp.toSec() < b->header.stamp.toSec();
+              });
+  }
+
+  meas.measures.push_back(m);
+  meas.lio_vio_flg = LIO;
+  lidar_pushed = true;
+  return true;
+}
+
 bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 {
   const bool pending_livo_vio =
-      deterministic_pending_vio_image_en_ && slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_;
+      slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_ &&
+      (deterministic_pending_vio_image_en_ || livo_lidar_nearest_image_sync_en_);
   if (lid_raw_data_buffer.empty() && lidar_en && !pending_livo_vio) return false;
   if (img_en && img_buffer.empty() && !pending_livo_vio) return false;
   if (imu_buffer.empty() && imu_en && !pending_livo_vio) return false;
@@ -1924,6 +2033,8 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
   case LIVO:
   {
+    if (livo_lidar_nearest_image_sync_en_) return syncLivoByLidarNearestImage(meas);
+
     /*** For LIVO mode, the time of LIO update is set to be the same as VIO, LIO
      * first than VIO imediatly ***/
     EKF_STATE last_lio_vio_flg = meas.lio_vio_flg;

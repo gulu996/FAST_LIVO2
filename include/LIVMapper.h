@@ -48,6 +48,7 @@ public:
   void updateRuntimeGuard(double frame_time_s);
   
   bool sync_packages(LidarMeasureGroup &meas);
+  bool syncLivoByLidarNearestImage(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
   void imu_prop_callback(const ros::TimerEvent &e);
   void transformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud, PointCloudXYZI::Ptr &trans_cloud);
@@ -177,6 +178,7 @@ public:
   bool deterministic_lio_feature_sort_en_ = true;
   bool deterministic_visual_observed_voxel_sort_en_ = true;
   bool deterministic_visual_voxel_key_sort_en_ = true;
+  bool livo_lidar_nearest_image_sync_en_ = false;
   bool vio_visual_update_guard_en_ = true;
   double vio_visual_update_max_trans_m_ = 0.12;
   double vio_visual_update_max_rot_deg_ = 2.0;

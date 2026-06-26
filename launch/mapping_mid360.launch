@@ -3,11 +3,11 @@
 	<arg name="cmd_name" default="" />
 	<arg name="rviz" default="true" />
 
-	<rosparam command="load" file="$(find fast_livo)/config/mid360.yaml" />
+	<rosparam command="load" file="$(find fast_livo)/config/fast_livo/mid360.yaml" />
 
 	<node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
 		<param name="save_path" type="string" value="$(arg cmd_name)" />
-		<rosparam file="$(find fast_livo)/config/camera_pinhole_mid360.yaml" />
+		<rosparam file="$(find fast_livo)/config/fast_livo/camera_pinhole_mid360.yaml" />
 	</node>
 	
 	<group if="$(arg rviz)">

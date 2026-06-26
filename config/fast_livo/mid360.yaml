@@ -137,6 +137,10 @@ uwb:
   # position是外部anchor坐标系，不要求和FAST-LIVO2初始坐标系一致；
   # 程序会自动估计外部anchor坐标系到FAST-LIVO2局部坐标系的刚体变换。
   mode: "external_anchors"
+  start_anchor_origin_en: false # true表示start_anchor_origin_id对应的UWB基站坐标为[0,0,0]且就是FAST-LIVO2起点；程序跳过anchor坐标系对齐，直接用anchors坐标做测距约束
+  start_anchor_origin_id: 0 # start_anchor_origin_en=true时，该anchor必须启用且position接近[0,0,0]
+  start_anchor_origin_tolerance_m: 0.20 # 起点anchor坐标与[0,0,0]允许的误差；超过则回退到普通anchor_frame_align流程
+  # start_anchor_origin_en=true时：如果只信任起点基站，就只把起点anchor的flag设为1；其它anchor只有在坐标也属于FAST-LIVO2局部坐标系时才启用
   anchor_frame_align_start_id: 0 # 多基站时用于提供优化初值，双基站时用于直接对齐；建议选路线起点附近基站
   anchor_frame_align_end_id: 1 # 多基站时仅用于初值/回退；建议与start相距较远且总体方向接近路线方向
   anchors:
@@ -178,10 +182,7 @@ uwb:
   max_age_s: 5.0 # 离线relative倍速回放时允许少量调度滞后，避免误丢UWB replay数据
   max_queue_size: 512
   min_update_anchors: 1
-  stale_repeat_filter_en: true # 同一anchor距离长时间完全不变时视为失联后缓存值，不参与更新
-  stale_repeat_epsilon_m: 0.001 # 距离相差小于该值认为重复；当前UWB输出到毫米，0.001较合适
-  stale_repeat_max_count: 3 # 允许UWBDBG和distance行造成的少量重复
-  stale_repeat_max_duration_s: 2.0 # 重复持续超过该时间后开始丢弃
+  # 0.000或小于min_range_m的测距会在解析阶段直接忽略；正常重复距离不再额外丢弃
   update_max_rot_step_deg: 1.0
   update_max_trans_step_m: 0.20 # output_correction_en=true时可适当增大；只修正输出轨迹，不会直接破坏局部地图
   tag_offset_estimate_en: false # 可选在线估计UWB天线杆臂；需要anchor世界坐标有效且运动/观测充分

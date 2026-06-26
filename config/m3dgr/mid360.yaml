@@ -1,7 +1,8 @@
 common:
-  img_topic: "/left_camera/image"
-  lid_topic: "/livox/lidar"
-  imu_topic: "/livox/imu"
+  # ponytail: FAST-LIVO2 only consumes one image stream; use M3DGR D435i color as the single/left camera.
+  img_topic: "/camera/color/image_raw"
+  lid_topic: "/livox/mid360/lidar"
+  imu_topic: "/livox/mid360/imu"
   img_en: 1
   lidar_en: 1
   ros_driver_bug_fix: false
@@ -14,18 +15,19 @@ common:
   max_prop_imu_buffer_size: 10000
   sync_img_buffer_min_size: 5
   sync_img_lookahead_time: 0.12
+  livo_lidar_nearest_image_sync_en: true
 
 deterministic_debug:
-  force_single_thread: false
-  visual_update_serial_en: false
-  lio_update_serial_en: false
-  contiguous_image_copy_en: false
-  lio_feature_sort_en: false
-  visual_observed_voxel_sort_en: false
+  force_single_thread: true
+  visual_update_serial_en: true
+  lio_update_serial_en: true
+  contiguous_image_copy_en: true
+  lio_feature_sort_en: true
+  visual_observed_voxel_sort_en: true
 
-  state_snap_en: false
-  camera_point_snap_en: false
-  pixel_snap_en: false
+  state_snap_en: true
+  camera_point_snap_en: true
+  pixel_snap_en: true
 
   imu_accept_out_of_order_en: true
   imu_buffer_sort_en: true
@@ -51,23 +53,25 @@ extrin_calib:
   #      0.999633,  -0.023556,  -0.013383]
   #Pcl: [ -0.001139,  -0.161932,   0.001251]
 
-  #2600*2160
+  # M3DGR Outdoor01: mid360 -> mid360_imu (LiDAR to IMU), from calibration.md.
   extrinsic_T: [-0.011, -0.02329, 0.04412]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  Rcl: [-0.020181 , -0.999125 ,  0.036652 ,
-         0.396389 , -0.041651 , -0.917137 ,
-         0.917861 , -0.003980 ,  0.396882]
-  Pcl: [ 0.051922 , -0.205230 , -0.018727]
+
+  # M3DGR Outdoor01: mid360 -> D435i color camera.
+  Rcl: [ 0.0722207, -0.9973870, -0.0020542,
+         0.5210050,  0.0394820, -0.8526402,
+         0.8504930,  0.0605080,  0.5224945]
+  Pcl: [-0.0442358, -0.4117120, 0.1685680]
  
 time_offset: 
   imu_time_offset: 0.0
-  img_time_offset: 0.1
+  img_time_offset: 0.0
   exposure_time_init: 0.0
 
 preprocess:
   point_filter_num: 2
   filter_size_surf: 0.25
-  lidar_type: 1 # Livox Avia LiDAR
+  lidar_type: 1 # Livox CustomMsg handler; M3DGR MID360 uses the same point layout.
   scan_line: 4
   blind: 0.5
 
@@ -122,8 +126,8 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 uwb:
-  en: true
-  update_en: true
+  en: false
+  update_en: false
 
   # 数据来源：serial在线读串口；file离线从replay_file回放之前保存的uwb_ranges.txt
   source: "file" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
@@ -137,6 +141,10 @@ uwb:
   # position是外部anchor坐标系，不要求和FAST-LIVO2初始坐标系一致；
   # 程序会自动估计外部anchor坐标系到FAST-LIVO2局部坐标系的刚体变换。
   mode: "external_anchors"
+  start_anchor_origin_en: false # true表示start_anchor_origin_id对应的UWB基站坐标为[0,0,0]且就是FAST-LIVO2起点；程序跳过anchor坐标系对齐，直接用anchors坐标做测距约束
+  start_anchor_origin_id: 0 # start_anchor_origin_en=true时，该anchor必须启用且position接近[0,0,0]
+  start_anchor_origin_tolerance_m: 0.20 # 起点anchor坐标与[0,0,0]允许的误差；超过则回退到普通anchor_frame_align流程
+  # start_anchor_origin_en=true时：如果只信任起点基站，就只把起点anchor的flag设为1；其它anchor只有在坐标也属于FAST-LIVO2局部坐标系时才启用
   anchor_frame_align_start_id: 0 # 多基站时用于提供优化初值，双基站时用于直接对齐；建议选路线起点附近基站
   anchor_frame_align_end_id: 1 # 多基站时仅用于初值/回退；建议与start相距较远且总体方向接近路线方向
   anchors:
@@ -178,10 +186,7 @@ uwb:
   max_age_s: 5.0 # 离线relative倍速回放时允许少量调度滞后，避免误丢UWB replay数据
   max_queue_size: 512
   min_update_anchors: 1
-  stale_repeat_filter_en: true # 同一anchor距离长时间完全不变时视为失联后缓存值，不参与更新
-  stale_repeat_epsilon_m: 0.001 # 距离相差小于该值认为重复；当前UWB输出到毫米，0.001较合适
-  stale_repeat_max_count: 3 # 允许UWBDBG和distance行造成的少量重复
-  stale_repeat_max_duration_s: 2.0 # 重复持续超过该时间后开始丢弃
+  # 0.000或小于min_range_m的测距会在解析阶段直接忽略；正常重复距离不再额外丢弃
   update_max_rot_step_deg: 1.0
   update_max_trans_step_m: 0.20 # output_correction_en=true时可适当增大；只修正输出轨迹，不会直接破坏局部地图
   tag_offset_estimate_en: false # 可选在线估计UWB天线杆臂；需要anchor世界坐标有效且运动/观测充分

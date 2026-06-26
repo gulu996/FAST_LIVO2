@@ -47,15 +47,6 @@ struct UwbAnchorDistanceConstraint
   double distance_m = 0.0;
 };
 
-struct UwbRepeatedRangeState
-{
-  bool valid = false;
-  double last_range_m = 0.0;
-  double first_stamp = 0.0;
-  double last_stamp = 0.0;
-  int repeat_count = 0;
-};
-
 class UwbManager
 {
 public:
@@ -78,8 +69,6 @@ private:
   std::vector<UwbRangeMeasurement> takeReplayMeasurements(double now);
   void handleLine(const std::string &line, double stamp);
   std::vector<UwbRangeMeasurement> parseLine(const std::string &line, double stamp) const;
-  std::vector<UwbRangeMeasurement> filterRepeatedRanges(const std::vector<UwbRangeMeasurement> &measurements,
-                                                        const std::string &source);
   std::vector<UwbRangeMeasurement> takeRecentMeasurements(double now);
   void logRawLine(double stamp, const std::string &line, const std::vector<UwbRangeMeasurement> &measurements);
   void logEvent(double stamp, const std::string &level, const std::string &message);
@@ -128,10 +117,6 @@ private:
   double range_noise_m_ = 0.20;
   double position_cov_floor_m_ = 0.0;
   double max_residual_m_ = 3.0;
-  bool stale_repeat_filter_en_ = true;
-  double stale_repeat_epsilon_m_ = 0.001;
-  int stale_repeat_max_count_ = 3;
-  double stale_repeat_max_duration_s_ = 2.0;
   double update_max_rot_step_deg_ = 1.0;
   double update_max_trans_step_m_ = 0.10;
   V3D tag_offset_body_ = V3D::Zero();
@@ -163,6 +148,9 @@ private:
   bool baseline_start_range_ready_ = false;
   V3D baseline_start_tag_position_w_ = V3D::Zero();
   double baseline_start_range_m_ = 0.0;
+  bool start_anchor_origin_en_ = false;
+  int start_anchor_origin_id_ = 0;
+  double start_anchor_origin_tolerance_m_ = 0.20;
   bool anchor_frame_align_en_ = false;
   int anchor_frame_align_start_id_ = 0;
   int anchor_frame_align_end_id_ = 1;
@@ -203,7 +191,6 @@ private:
   std::vector<int> anchor_order_;
   std::map<int, std::deque<UwbAnchorSample>> anchor_samples_;
   std::vector<UwbAnchorDistanceConstraint> anchor_distance_constraints_;
-  std::map<int, UwbRepeatedRangeState> repeated_range_states_;
   std::vector<UwbRangeMeasurement> replay_measurements_;
   size_t replay_index_ = 0;
   bool replay_started_ = false;
