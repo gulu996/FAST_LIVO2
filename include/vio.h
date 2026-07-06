@@ -20,6 +20,7 @@ which is included as part of this source code package.
 #include <opencv2/aruco/dictionary.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <pcl/filters/voxel_grid.h>
+#include <algorithm>
 #include <set>
 #include <unordered_set>
 #include <vikit/math_utils.h>
@@ -57,6 +58,16 @@ struct SubSparseMap
     voxel_points.clear();
     inv_expo_list.clear();
     add_from_voxel_map.clear();
+  }
+
+  size_t trackedSize() const
+  {
+    return std::min({voxel_points.size(),
+                     propa_errors.size(),
+                     errors.size(),
+                     warp_patch.size(),
+                     search_levels.size(),
+                     inv_expo_list.size()});
   }
 };
 
@@ -182,15 +193,47 @@ public:
   bool deterministic_visual_voxel_key_sort_en = true;
   bool visual_update_guard_en = true;
   double visual_update_max_trans_m = 0.12;
-  double visual_update_max_rot_deg = 2.0;
+  double visual_update_max_rot_deg = 8.0;
+  double visual_update_max_trans_rate_mps = 3.0;
+  double visual_update_max_rot_rate_degps = 240.0;
+  double visual_update_max_backward_rate_mps = 0.5;
+  double visual_update_max_lateral_rate_mps = 1.0;
   double visual_update_max_backward_m = 0.03;
   double visual_update_max_backward_ratio = 0.08;
   double visual_update_backward_abs_floor_m = 0.003;
   double visual_update_max_lateral_m = 0.08;
   double visual_update_max_lateral_ratio = 0.35;
   double visual_update_max_exposure_delta = 0.30;
+  std::string visual_update_large_update_guard_action = "reject_update";
+  std::string visual_update_large_rotation_action = "downweight_update";
+  bool reject_visual_large_rotation = false;
+  bool use_vio_large_rotation_for_reject = false;
+  double visual_update_large_rotation_noise_scale = 2.0;
+  std::string visual_update_backward_guard_action = "reject_update";
+  std::string visual_update_lateral_guard_action = "reject_update";
+  std::string visual_update_exposure_guard_action = "reject_update";
+  std::string visual_update_nonfinite_guard_action = "reject_update";
 
   double img_point_cov, outlier_threshold, ncc_thre;
+	  bool adaptive_sensor_weighting_en = false;
+	  double adaptive_external_noise_scale = 1.0;
+	  bool disable_visual_map_update_this_frame = false;
+	  std::string visual_map_update_disable_reason = "";
+	  bool force_skip_visual_ekf_this_frame = false;
+	  std::string force_skip_visual_ekf_reason = "";
+	  double adaptive_low_track_noise_scale = 2.0;
+  double adaptive_max_noise_scale = 10.0;
+  int adaptive_min_tracked_points = 15;
+  double last_adaptive_img_point_cov_scale = 1.0;
+  std::string last_adaptive_weight_reason = "off";
+  std::string last_visual_update_status = "accepted";
+  std::string last_visual_update_reject_reason = "";
+  std::string last_visual_update_guard_reason = "";
+  double last_visual_update_dt = 0.0;
+  double last_visual_update_trans_m = 0.0;
+  double last_visual_update_trans_rate_mps = 0.0;
+  double last_visual_update_rot_deg = 0.0;
+  double last_visual_update_rot_rate_degps = 0.0;
   bool image_quality_gate_en = false;
   double image_quality_max_saturated_fraction = 0.20;
   double image_quality_max_tile_saturated_fraction = 0.35;

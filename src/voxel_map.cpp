@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -57,13 +58,14 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<bool>("local_map/long_term_visual_map_en", voxel_config.long_term_visual_map_en, true);
   nh.param<int>("local_map/long_term_visual_max_voxels", voxel_config.long_term_visual_max_voxels, 5000);
 
-  voxel_config.degeneracy_ratio_thresh = 0.10;
-  voxel_config.degeneracy_min_effective_features = 50;
+  nh.param<double>("lio/degeneracy_ratio_thresh", voxel_config.degeneracy_ratio_thresh, 0.10);
+  nh.param<int>("lio/degeneracy_min_effective_features", voxel_config.degeneracy_min_effective_features, 50);
 
   nh.param<int>("lio/icp_min_iterations", voxel_config.icp_min_iterations, 2);
   nh.param<double>("lio/icp_early_stop_residual_ratio", voxel_config.icp_early_stop_residual_ratio, 0.03);
   nh.param<double>("lio/icp_max_rot_step_deg", voxel_config.icp_max_rot_step_deg, 1.2);
   nh.param<double>("lio/icp_max_trans_step_m", voxel_config.icp_max_trans_step_m, 0.20);
+  nh.param<bool>("lio/reject_degenerate_update", voxel_config.reject_degenerate_update, false);
 
   bool legacy_deterministic_lio_update_en = true;
   nh.param<bool>("lio/deterministic_lio_update_en", legacy_deterministic_lio_update_en, true);
@@ -357,6 +359,27 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  last_adaptive_noise_scale_ = 1.0;
+  last_adaptive_weight_reason_ = adaptive_sensor_weighting_en_ ? "base" : "off";
+  last_update_status_ = "accepted";
+  last_reject_reason_ = "";
+  effct_feat_num_ = 0;
+  last_average_residual_ = 0.0;
+
+  if (feats_down_body_ == nullptr || feats_down_body_->empty())
+  {
+    last_update_status_ = "skipped";
+    last_reject_reason_ = "empty_lio_features";
+    pv_list_.clear();
+    ptpl_list_.clear();
+    cross_mat_list_.clear();
+    body_cov_list_.clear();
+    return;
+  }
+  feats_down_size_ = static_cast<int>(std::min(static_cast<size_t>(std::max(0, feats_down_size_)),
+                                               feats_down_body_->points.size()));
+  if (feats_down_size_ <= 0) feats_down_size_ = static_cast<int>(feats_down_body_->points.size());
+
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -366,7 +389,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   // ekf_time = 0.0;
   // double t0 = omp_get_wtime();
 
-  for (size_t i = 0; i < feats_down_body_->size(); i++)
+  for (size_t i = 0; i < static_cast<size_t>(feats_down_size_); i++)
   {
     V3D point_this(feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z);
     if (point_this[2] == 0) { point_this[2] = 0.001; }
@@ -400,9 +423,21 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     double total_residual = 0.0;
     pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
+    const size_t update_count = std::min({static_cast<size_t>(feats_down_size_),
+                                          feats_down_body_->points.size(),
+                                          world_lidar->points.size(),
+                                          pv_list_.size(),
+                                          body_cov_list_.size(),
+                                          cross_mat_list_.size()});
+    if (update_count == 0)
+    {
+      last_update_status_ = "skipped";
+      last_reject_reason_ = "empty_transformed_lio_features";
+      break;
+    }
     M3D rot_var = state_.cov.block<3, 3>(0, 0);
     M3D t_var = state_.cov.block<3, 3>(3, 3);
-    for (size_t i = 0; i < feats_down_body_->size(); i++)
+    for (size_t i = 0; i < update_count; i++)
     {
       pointWithVar &pv = pv_list_[i];
       pv.point_b << feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z;
@@ -414,6 +449,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       pv.var = cov;
       pv.body_var = body_cov_list_[i];
     }
+    if (update_count < pv_list_.size()) pv_list_.resize(update_count);
     ptpl_list_.clear();
 
     // double t1 = omp_get_wtime();
@@ -430,13 +466,89 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     if (effct_feat_num_ == 0)
     {
+      last_average_residual_ = std::numeric_limits<double>::infinity();
+      if (adaptive_sensor_weighting_en_)
+      {
+        last_adaptive_noise_scale_ =
+            std::min(std::max(1.0, adaptive_external_noise_scale_) * std::max(1.0, adaptive_low_feature_noise_scale_),
+                     std::max(1.0, adaptive_max_noise_scale_));
+        last_adaptive_weight_reason_ = "no_lio_features";
+      }
+      last_update_status_ = "skipped";
+      last_reject_reason_ = "no_lio_features";
       std::cout << "[ LIO ] No effective point-to-plane constraints, skip ICP update in this scan." << std::endl;
       break;
     }
 
     const double avg_residual = total_residual / static_cast<double>(effct_feat_num_);
+    bool lidar_degenerated_this_iter = false;
+    if (iterCount == 0)
+    {
+      updateLidarDegeneracyStatus();
+      lidar_degenerated_this_iter = lidar_degenerated_;
+    }
+    last_average_residual_ = avg_residual;
+    double adaptive_noise_scale = 1.0;
+    std::ostringstream adaptive_reason;
+    bool has_adaptive_reason = false;
+    auto add_adaptive_reason = [&](const std::string &reason) {
+      if (has_adaptive_reason) adaptive_reason << ";";
+      adaptive_reason << reason;
+      has_adaptive_reason = true;
+    };
+    if (adaptive_sensor_weighting_en_)
+    {
+      adaptive_noise_scale = std::max(1.0, adaptive_external_noise_scale_);
+      if (adaptive_external_noise_scale_ > 1.0) add_adaptive_reason("external_guard");
+
+      if (lidar_degenerated_this_iter)
+      {
+        adaptive_noise_scale *= std::max(1.0, adaptive_low_feature_noise_scale_);
+        add_adaptive_reason("lidar_degenerated");
+      }
+
+      if (adaptive_min_lidar_features_ > 0 && effct_feat_num_ < adaptive_min_lidar_features_)
+      {
+        adaptive_noise_scale *= std::max(1.0, adaptive_low_feature_noise_scale_);
+        add_adaptive_reason("low_lidar_features");
+      }
+
+      if (adaptive_residual_ref_ > 1e-6 && avg_residual > adaptive_residual_ref_)
+      {
+        const double residual_ratio = avg_residual / adaptive_residual_ref_;
+        const double residual_scale =
+            std::min(std::max(1.0, adaptive_high_residual_noise_scale_),
+                     std::max(1.0, residual_ratio));
+        adaptive_noise_scale *= residual_scale;
+        add_adaptive_reason("high_lio_residual");
+      }
+
+      adaptive_noise_scale = std::min(std::max(1.0, adaptive_noise_scale),
+                                      std::max(1.0, adaptive_max_noise_scale_));
+      if (!has_adaptive_reason) add_adaptive_reason("nominal");
+    }
+    else
+    {
+      add_adaptive_reason("off");
+    }
+    last_adaptive_noise_scale_ = adaptive_noise_scale;
+    last_adaptive_weight_reason_ = adaptive_reason.str();
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
-         << " effective feature num: " << effct_feat_num_ << " average residual: " << avg_residual << endl;
+         << " effective feature num: " << effct_feat_num_ << " average residual: " << avg_residual
+         << " adaptive_noise_scale: " << last_adaptive_noise_scale_
+         << " reason: " << last_adaptive_weight_reason_ << endl;
+    if (iterCount == 0 && lidar_degenerated_this_iter)
+    {
+      cout << "[ LIO ] Degenerated constraints: ratio=" << lidar_constraint_ratio_
+           << ", effective_feature_num=" << effct_feat_num_
+           << ", action=" << (config_setting_.reject_degenerate_update ? "skip" : "downweight") << endl;
+      if (config_setting_.reject_degenerate_update)
+      {
+        last_update_status_ = "skipped";
+        last_reject_reason_ = "lidar_constraint_degenerated";
+        break;
+      }
+    }
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -480,7 +592,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
       double sigma_l = J_nq * ptpl_list_[i].plane_var_ * J_nq.transpose();
 
-      R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
+      const double meas_noise = 0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_;
+      R_inv(i) = 1.0 / (std::max(1.0, last_adaptive_noise_scale_) * meas_noise);
       // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
 
       /*** calculate the Measuremnt Jacobian matrix H ***/
@@ -579,7 +692,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
                                      pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud)
 {
+  if (trans_cloud == nullptr) return;
   pcl::PointCloud<pcl::PointXYZI>().swap(*trans_cloud);
+  if (input_cloud == nullptr || input_cloud->empty()) return;
   trans_cloud->reserve(input_cloud->size());
   for (size_t i = 0; i < input_cloud->size(); i++)
   {
@@ -604,8 +719,17 @@ void VoxelMapManager::BuildVoxelMap()
   std::vector<int> layer_init_num = config_setting_.layer_init_num_;
 
   std::vector<pointWithVar> input_points;
+  if (voxel_size <= 0.0f || layer_init_num.empty() ||
+      feats_down_world_ == nullptr || feats_down_body_ == nullptr ||
+      feats_down_world_->empty() || feats_down_body_->empty())
+  {
+    last_update_status_ = "skipped";
+    last_reject_reason_ = "build_voxel_map_empty_input";
+    return;
+  }
 
-  for (size_t i = 0; i < feats_down_world_->size(); i++)
+  const size_t build_count = std::min(feats_down_world_->points.size(), feats_down_body_->points.size());
+  for (size_t i = 0; i < build_count; i++)
   {
     pointWithVar pv;
     pv.point_w << feats_down_world_->points[i].x, feats_down_world_->points[i].y, feats_down_world_->points[i].z;
@@ -679,10 +803,12 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
   int max_layer = config_setting_.max_layer_;
   int max_points_num = config_setting_.max_points_num_;
   std::vector<int> layer_init_num = config_setting_.layer_init_num_;
+  if (voxel_size <= 0.0f || layer_init_num.empty() || input_points.empty()) return;
   uint plsize = input_points.size();
   for (uint i = 0; i < plsize; i++)
   {
     const pointWithVar p_v = input_points[i];
+    if (!p_v.point_w.allFinite() || !p_v.var.allFinite()) continue;
     float loc_xyz[3];
     for (int j = 0; j < 3; j++)
     {
@@ -713,6 +839,7 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
   double sigma_num = config_setting_.sigma_num_;
   std::mutex mylock;
   ptpl_list.clear();
+  if (voxel_size <= 0.0 || pv_list.empty() || voxel_map_.empty()) return;
   std::vector<PointToPlane> all_ptpl_list(pv_list.size());
   std::vector<bool> useful_ptpl(pv_list.size());
   std::vector<size_t> index(pv_list.size());
@@ -738,6 +865,11 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
     };
 
     pointWithVar &pv = pv_list[i];
+    if (!pv.point_w.allFinite())
+    {
+      useful_ptpl[i] = false;
+      continue;
+    }
     float loc_xyz[3];
     for (int j = 0; j < 3; j++)
     {
@@ -793,14 +925,20 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
 
   double radius_k = 3;
   Eigen::Vector3d p_w = pv.point_w;
+  if (current_octo == nullptr || current_octo->plane_ptr_ == nullptr || !p_w.allFinite()) return;
   if (current_octo->plane_ptr_->is_plane_)
   {
     VoxelPlane &plane = *current_octo->plane_ptr_;
+    if (!plane.center_.allFinite() || !plane.normal_.allFinite() || !plane.plane_var_.allFinite() ||
+        !std::isfinite(plane.d_) || !std::isfinite(plane.radius_) || plane.radius_ <= 0.0)
+    {
+      return;
+    }
     Eigen::Vector3d p_world_to_center = p_w - plane.center_;
     float dis_to_plane = fabs(plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_);
     float dis_to_center = (plane.center_(0) - p_w(0)) * (plane.center_(0) - p_w(0)) + (plane.center_(1) - p_w(1)) * (plane.center_(1) - p_w(1)) +
                           (plane.center_(2) - p_w(2)) * (plane.center_(2) - p_w(2));
-    float range_dis = sqrt(dis_to_center - dis_to_plane * dis_to_plane);
+    float range_dis = sqrt(std::max(0.0f, dis_to_center - dis_to_plane * dis_to_plane));
 
     if (range_dis <= radius_k * plane.radius_)
     {
@@ -809,6 +947,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
       J_nq.block<1, 3>(0, 3) = -plane.normal_;
       double sigma_l = J_nq * plane.plane_var_ * J_nq.transpose();
       sigma_l += plane.normal_.transpose() * pv.var * plane.normal_;
+      if (!std::isfinite(sigma_l) || sigma_l <= 1e-12) return;
       if (dis_to_plane < sigma_num * sqrt(sigma_l))
       {
         is_sucess = true;

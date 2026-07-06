@@ -131,6 +131,7 @@ add_library(laser_mapping src/LIVMapper.cpp)
 
 # Add the main executable
 add_executable(fastlivo_mapping src/main.cpp)
+add_executable(uwb_range_model_check tests/uwb_range_model_check.cpp)
 
 # Link libraries to the executable
 target_link_libraries(fastlivo_mapping
@@ -145,6 +146,13 @@ target_link_libraries(fastlivo_mapping
   ${OpenCV_LIBRARIES}
   ${Sophus_LIBRARIES}
   ${Boost_LIBRARIES}
+)
+
+target_link_libraries(uwb_range_model_check
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
 )
 
 # Link mimalloc if found

@@ -26,6 +26,66 @@ which is included as part of this source code package.
 class LIVMapper
 {
 public:
+  enum class SystemMode
+  {
+    NORMAL,
+    DEGRADED_HOLD,
+    DEGRADED_BOOTSTRAP,
+    LOCAL_REINIT
+  };
+
+  enum class RejectReason
+  {
+    NONE,
+    SAFETY,
+    DEGRADED_HOLD,
+    BACKWARD_SLIP,
+    LOCAL_REINIT,
+    BOOTSTRAP,
+    SMALL_MOTION,
+    NO_POINTS,
+    UNKNOWN
+  };
+
+  struct ObservationQuality
+  {
+    bool lio_valid = true;
+    bool vio_valid = true;
+    bool uwb_valid = true;
+    bool lio_degenerated = false;
+    bool vio_low_tracked = false;
+    bool map_update_weak = false;
+    bool backward_slip = false;
+    bool speed_abnormal = false;
+    bool attitude_abnormal = false;
+    bool uwb_residual_abnormal = false;
+    double backward_distance = 0.0;
+    double speed = 0.0;
+    double roll_deg = 0.0;
+    double pitch_deg = 0.0;
+    std::string reason = "none";
+  };
+
+  struct UpdateDecision
+  {
+    bool allow_lio_update = true;
+    bool allow_vio_update = true;
+    bool allow_uwb_update = true;
+    bool allow_voxel_map_update = true;
+    bool allow_visual_map_update = true;
+    bool allow_publish = true;
+    SystemMode mode = SystemMode::NORMAL;
+    RejectReason reason = RejectReason::NONE;
+    std::string reason_text = "none";
+  };
+
+  struct MapUpdateDecision
+  {
+    bool allow = true;
+    RejectReason reason = RejectReason::NONE;
+    std::string skip_reason = "none";
+  };
+
   LIVMapper(ros::NodeHandle &nh);
   ~LIVMapper();
   void initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it);
@@ -33,6 +93,54 @@ public:
   void initializeFiles();
   void run();
   void gravityAlignment();
+  void applyDegeneracyGuardCorrections(const char *stage = nullptr);
+  void evaluateDegeneracyGuardUpdate(const char *stage,
+                                     const StatesGroup &state_before_update,
+                                     int lio_feature_count = -1,
+                                     int visual_tracked_points = -1);
+  bool applyScalarPseudoMeasurement(StatesGroup &state,
+                                    const Eigen::Matrix<double, 1, DIM_STATE> &H,
+                                    double residual,
+                                    double sigma,
+                                    double gain,
+                                    double *correction_norm = nullptr);
+  void blendDegeneracyGuardUpdate(const StatesGroup &state_before_update,
+                                  const StatesGroup &state_after_update,
+                                  double scale);
+  double updateAdaptiveSensorNoiseScale(const char *sensor);
+  void resetCorridorMotionPrior();
+  void updateCorridorMotionPrior(const char *stage, const StatesGroup &state);
+  void writeDegeneracyGuardLog(const char *stage = nullptr);
+  bool isStateFiniteForSafety(const StatesGroup &state, const char *stage, std::string *reason = nullptr) const;
+  bool validateStateForSafety(const char *stage,
+                              const StatesGroup &state_before,
+                              const StatesGroup &state_after,
+                              bool update_backward_window,
+                              bool allow_recover);
+  void enterFailSafe(const std::string &reason, const StatesGroup *fallback_state = nullptr);
+  void maybeRecoverFailSafe();
+  void recordReliableStateForSafety(const char *stage);
+  void clearSafetyLocalCaches();
+  void clearLocalMapsForReinit(const std::string &reason);
+  void enterLocalReinitMode(const std::string &mode, const std::string &reason);
+  void updateLocalModeAtFrameStart();
+  void updateLocalTrackingLostDetectors(const char *sensor);
+  ObservationQuality evaluateObservationQuality() const;
+  void updateSystemModeFromQuality(const ObservationQuality &quality);
+  UpdateDecision makeUpdateDecision(const ObservationQuality &quality) const;
+  MapUpdateDecision decideMapUpdate(bool lio_degenerated,
+                                    bool stride_ready,
+                                    bool force_ready,
+                                    bool has_points) const;
+  void printDiagnostics(const char *stage);
+  static const char *systemModeName(SystemMode mode);
+  static const char *rejectReasonName(RejectReason reason);
+  bool isDegradedHoldMode() const;
+  bool isBootstrapMode() const;
+  void applyDegradedHoldConstraint(const char *stage, bool check_reject);
+  bool localModeBlocksMapUpdate() const;
+  bool localModeBlocksVisualMapUpdate() const;
+  bool localModeSkipsVisualEkf() const;
   void handleFirstFrame();
   void stateEstimationAndMapping();
   void handleVIO();
@@ -48,7 +156,6 @@ public:
   void updateRuntimeGuard(double frame_time_s);
   
   bool sync_packages(LidarMeasureGroup &meas);
-  bool syncLivoByLidarNearestImage(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
   void imu_prop_callback(const ros::TimerEvent &e);
   void transformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud, PointCloudXYZI::Ptr &trans_cloud);
@@ -123,6 +230,207 @@ public:
   double lidar_time_offset = 0.0;
 
   bool gravity_align_en = false, gravity_align_finished = false;
+  bool legacy_lock_z_after_gravity_align_en_ = false;
+
+  bool deg_guard_enable_ = false;
+  bool deg_guard_enable_z_soft_constraint_ = false;
+  double deg_guard_z_ref_ = 0.0;
+  double deg_guard_sigma_z_ = 0.20;
+  double deg_guard_sigma_vz_ = 0.30;
+  double deg_guard_z_gain_ = 1.0;
+  bool deg_guard_enable_nhc_ = false;
+  double deg_guard_sigma_body_vy_ = 0.05;
+  double deg_guard_sigma_body_vz_ = 0.05;
+  double deg_guard_nhc_min_speed_ = 0.05;
+  bool deg_guard_nhc_only_in_degenerate_ = true;
+  double deg_guard_nhc_gain_ = 1.0;
+  bool deg_guard_enable_backward_guard_ = false;
+  double deg_guard_backward_step_threshold_ = 0.05;
+  double deg_guard_backward_speed_threshold_ = 0.20;
+  int deg_guard_backward_consecutive_frames_ = 10;
+  std::string deg_guard_backward_action_ = "log_only";
+  bool deg_guard_enable_corridor_detection_ = false;
+  int deg_guard_min_lidar_features_ = 30;
+  int deg_guard_min_visual_tracked_points_ = 2;
+  int deg_guard_vio_low_feature_tracked_points_ = 5;
+  bool deg_guard_use_vio_skip_for_degenerate_ = false;
+  bool deg_guard_use_vio_large_rotation_for_reject_ = false;
+  double deg_guard_camera_dt_ = 1.0 / 30.0;
+  double deg_guard_lidar_dt_ = 0.1;
+  double deg_guard_max_update_translation_norm_ = 0.5;
+  double deg_guard_max_update_yaw_deg_ = 5.0;
+  double deg_guard_max_update_translation_rate_mps_ = 3.0;
+  double deg_guard_max_update_yaw_rate_degps_ = 180.0;
+  double deg_guard_hessian_condition_threshold_ = 1000.0;
+  int deg_guard_min_degenerate_frames_ = 3;
+  int deg_guard_recover_frames_ = 3;
+  double deg_guard_degenerate_lio_noise_scale_ = 1.2;
+  double deg_guard_degenerate_vio_noise_scale_ = 2.0;
+  bool deg_guard_enable_adaptive_sensor_weighting_ = false;
+  double deg_guard_adaptive_lio_base_noise_scale_ = 1.0;
+  double deg_guard_adaptive_vio_base_noise_scale_ = 1.0;
+  double deg_guard_adaptive_lio_low_feature_noise_scale_ = 2.0;
+  double deg_guard_adaptive_vio_low_track_noise_scale_ = 20.0;
+  double deg_guard_adaptive_lio_high_residual_noise_scale_ = 2.0;
+  double deg_guard_adaptive_lio_residual_ref_ = 0.05;
+  double deg_guard_adaptive_max_noise_scale_ = 10.0;
+  int deg_guard_vio_skip_min_tracked_points_ = 2;
+  int deg_guard_vio_skip_tracked_points_ = 1;
+  int deg_guard_vio_min_update_meas_ = 32;
+  bool deg_guard_reject_large_update_in_degenerate_ = false;
+  bool deg_guard_reject_nonfinite_update_ = true;
+  double deg_guard_max_degenerate_update_translation_ = 0.3;
+  double deg_guard_max_degenerate_update_yaw_deg_ = 3.0;
+  std::string deg_guard_log_file_ = "";
+  bool deg_guard_corridor_degenerate_ = false;
+  int deg_guard_degenerate_count_ = 0;
+  int deg_guard_recover_count_ = 0;
+  int deg_guard_backward_count_ = 0;
+  bool deg_guard_last_pos_ready_ = false;
+  V3D deg_guard_last_pos_ = V3D::Zero();
+  V3D deg_guard_last_velocity_body_ = V3D::Zero();
+  double deg_guard_last_z_residual_ = 0.0;
+  double deg_guard_last_z_correction_norm_ = 0.0;
+  double deg_guard_last_nhc_correction_norm_ = 0.0;
+  double deg_guard_last_forward_progress_ = 0.0;
+  double deg_guard_last_forward_progress_rate_mps_ = 0.0;
+  bool deg_guard_last_backward_slip_ = false;
+  int deg_guard_last_lio_feature_count_ = -1;
+  int deg_guard_last_visual_tracked_points_ = -1;
+  double deg_guard_last_update_translation_norm_ = 0.0;
+  double deg_guard_last_update_yaw_deg_ = 0.0;
+  double deg_guard_last_dt_ = 0.0;
+  double deg_guard_last_lio_time_ = -1.0;
+  double deg_guard_last_vio_time_ = -1.0;
+  double deg_guard_last_update_translation_rate_mps_ = 0.0;
+  double deg_guard_last_update_yaw_rate_degps_ = 0.0;
+  double deg_guard_last_visual_update_rot_deg_ = 0.0;
+  double deg_guard_last_visual_update_rot_rate_degps_ = 0.0;
+  double deg_guard_last_final_pose_delta_ = 0.0;
+  double deg_guard_last_lio_noise_scale_ = 1.0;
+  double deg_guard_last_vio_noise_scale_ = 1.0;
+  bool deg_guard_last_lio_downweighted_ = false;
+  bool deg_guard_last_lio_update_executed_ = false;
+  bool deg_guard_last_lio_voxel_map_updated_ = false;
+  bool deg_guard_last_vio_skip_affects_degenerate_ = false;
+  std::string deg_guard_last_lio_voxel_map_skip_reason_ = "not_lio";
+  std::string deg_guard_last_sensor_type_ = "UNKNOWN";
+  std::string deg_guard_last_weight_reason_ = "off";
+  std::string deg_guard_last_update_status_ = "accepted";
+  std::string deg_guard_last_reject_reason_ = "";
+  std::string deg_guard_last_action_ = "none";
+  std::string deg_guard_last_reason_ = "init";
+
+  bool safety_guard_enable_ = false;
+  bool safety_fail_safe_mode_ = false;
+  int safety_fail_safe_stable_frames_ = 0;
+  int safety_fail_safe_recover_frames_ = 10;
+  double safety_max_speed_ = 3.0;
+  double safety_max_frame_translation_ = 0.5;
+  double safety_max_frame_rotation_deg_ = 15.0;
+  double safety_backward_time_window_ = 5.0;
+  double safety_backward_distance_threshold_ = 1.0;
+  std::string safety_backward_action_ = "fail_safe_or_downweight";
+  std::string safety_last_reason_ = "normal";
+  double safety_last_speed_ = 0.0;
+  double safety_last_quat_norm_ = 1.0;
+  double safety_last_frame_translation_ = 0.0;
+  double safety_last_frame_rotation_deg_ = 0.0;
+  double safety_backward_distance_in_window_ = 0.0;
+  std::deque<std::pair<double, double>> safety_backward_window_;
+  bool safety_reliable_state_ready_ = false;
+  StatesGroup safety_reliable_state_;
+  bool skip_mapping_this_frame_ = false;
+  bool deterministic_mode_ = true;
+  int deterministic_frame_id_ = 0;
+  bool deterministic_last_lio_update_ = false;
+  bool deterministic_last_vio_update_ = false;
+  bool deterministic_last_uwb_update_ = false;
+  std::string deterministic_last_uwb_anchor_ids_ = "";
+  double uwb_update_window_sec_ = 0.05;
+  double uwb_relocalize_xy_threshold_ = 1.0;
+  bool uwb_relocalize_en_ = false;
+  bool uwb_update_only_on_lio_ = true;
+
+  bool local_reinit_enable_ = true;
+  bool debug_fixed_degraded_intervals_enable_ = false;
+  bool degraded_bootstrap_enable_ = true;
+  bool disable_visual_map_in_degraded_hold_ = true;
+  bool disable_voxel_map_in_degraded_hold_ = true;
+  std::string fixed_degraded_trigger_mode_ = "manual_time";
+  double degraded_hold_attitude_reject_deg_ = 5.0;
+  double degraded_hold_speed_reject_mps_ = 1.0;
+  double bag_start_offset_ = 0.0;
+  double fixed_degraded_first_start_sec_ = 150.0;
+  double fixed_degraded_first_end_sec_ = 190.0;
+  double fixed_degraded_second_start_sec_ = 520.0;
+  double fixed_degraded_second_end_sec_ = 550.0;
+  double local_elapsed_sec_ = 0.0;
+  double bag_elapsed_sec_ = 0.0;
+  bool in_fixed_degraded_window_ = false;
+  std::string fixed_degraded_reason_ = "disabled";
+  double local_fixed_degraded_start_sec_ = -1.0;
+  double local_fixed_degraded_end_sec_ = -1.0;
+  std::string local_mode_ = "NORMAL";
+  std::string local_reinit_reason_ = "none";
+  double local_mode_start_time_ = -1.0;
+  V3D degraded_hold_entry_pos_ = V3D::Zero();
+  StatesGroup degraded_hold_entry_state_;
+  bool degraded_hold_entry_state_ready_ = false;
+  V3D degraded_hold_entry_rpy_ = V3D::Zero();
+  std::string degraded_hold_last_reject_reason_ = "none";
+  bool local_map_cleared_last_ = false;
+  bool visual_map_cleared_last_ = false;
+  bool tracker_reset_last_ = false;
+  int lio_bootstrap_frames_ = 0;
+  int vio_bootstrap_frames_ = 0;
+  int local_post_reinit_lio_frames_ = 30;
+  int local_post_reinit_vio_frames_ = 90;
+  double local_post_reinit_duration_sec_ = 5.0;
+  double local_tracking_lost_window_sec_ = 1.0;
+  int local_vio_unavailable_tracked_points_ = 2;
+  double local_lio_weak_residual_threshold_ = 0.20;
+  double local_vio_low_start_time_ = -1.0;
+  double local_lio_weak_start_time_ = -1.0;
+  bool local_vio_unavailable_ = false;
+  bool local_lio_weak_ = false;
+
+  bool corridor_prior_enable_ = false;
+  bool corridor_prior_only_in_degenerate_ = true;
+  double corridor_prior_axis_estimation_sec_ = 5.0;
+  double corridor_prior_axis_estimation_max_sec_ = 10.0;
+  double corridor_prior_min_axis_motion_ = 1.0;
+  double corridor_prior_backward_window_sec_ = 5.0;
+  double corridor_prior_backward_distance_threshold_ = 1.0;
+  double corridor_prior_fail_safe_window_sec_ = 8.0;
+  double corridor_prior_fail_safe_backward_distance_threshold_ = 2.0;
+  std::string corridor_prior_backward_action_ = "downweight";
+  double corridor_prior_lio_downweight_scale_ = 5.0;
+  double corridor_prior_vio_downweight_scale_ = 10.0;
+  bool corridor_prior_disable_map_update_on_downweight_ = true;
+  bool corridor_prior_disable_visual_map_update_on_downweight_ = true;
+  bool corridor_prior_started_ = false;
+  bool corridor_prior_axis_ready_ = false;
+  bool corridor_prior_axis_failed_ = false;
+  double corridor_prior_entry_time_ = -1.0;
+  V3D corridor_prior_entry_pos_ = V3D::Zero();
+  V3D corridor_prior_axis_ = V3D::UnitX();
+  std::deque<std::pair<double, double>> corridor_prior_progress_buffer_;
+  double corridor_prior_progress_ = 0.0;
+  double corridor_prior_progress_delta_1s_ = 0.0;
+  double corridor_prior_progress_delta_window_ = 0.0;
+  double corridor_prior_backward_distance_window_ = 0.0;
+  double corridor_prior_backward_distance_fail_window_ = 0.0;
+  std::string corridor_prior_action_ = "none";
+  bool corridor_prior_update_voxel_map_enabled_ = true;
+  bool corridor_prior_visual_map_update_enabled_ = true;
+
+  ObservationQuality current_quality_;
+  UpdateDecision current_decision_;
+  bool update_decision_ready_ = false;
+  std::string diagnostics_level_ = "summary";
+  double diagnostics_summary_interval_sec_ = 1.0;
+  double diagnostics_last_summary_time_ = -1.0;
 
   bool sync_jump_flag = false;
 
@@ -136,6 +444,11 @@ public:
   int publish_img_counter_ = 0;
   int lio_map_update_stride_ = 1;
   int lio_map_update_counter_ = 0;
+  bool lio_force_voxel_map_update_ = true;
+  double lio_force_map_update_interval_ = 0.3;
+  int lio_force_map_update_lidar_frames_ = 3;
+  int lio_frames_since_voxel_map_update_ = 0;
+  double lio_last_voxel_map_update_time_ = -1.0;
   bool print_console_timing_en_ = true;
   int print_console_timing_stride_ = 1;
   bool suppress_image_pub_ = false;
@@ -178,16 +491,38 @@ public:
   bool deterministic_lio_feature_sort_en_ = true;
   bool deterministic_visual_observed_voxel_sort_en_ = true;
   bool deterministic_visual_voxel_key_sort_en_ = true;
-  bool livo_lidar_nearest_image_sync_en_ = false;
+  bool lio_freeze_state_when_degenerate_ = false;
+  int lio_freeze_degenerate_min_frames_ = 1;
+  int lio_degenerate_frame_count_ = 0;
+  bool lio_state_jump_guard_en_ = true;
+  double lio_state_jump_max_trans_m_ = 0.30;
+  double lio_state_jump_max_rot_deg_ = 5.0;
+  bool lio_freeze_state_ready_ = false;
+  bool last_lio_stable_state_ready_ = false;
+  StatesGroup lio_freeze_state_;
+  StatesGroup last_lio_stable_state_;
+  bool uwb_skip_when_lio_frozen_ = true;
   bool vio_visual_update_guard_en_ = true;
   double vio_visual_update_max_trans_m_ = 0.12;
-  double vio_visual_update_max_rot_deg_ = 2.0;
+  double vio_visual_update_max_rot_deg_ = 8.0;
+  double vio_visual_update_max_trans_rate_mps_ = 3.0;
+  double vio_visual_update_max_rot_rate_degps_ = 240.0;
+  double vio_visual_update_max_backward_rate_mps_ = 0.5;
+  double vio_visual_update_max_lateral_rate_mps_ = 1.0;
   double vio_visual_update_max_backward_m_ = 0.03;
   double vio_visual_update_max_backward_ratio_ = 0.08;
   double vio_visual_update_backward_abs_floor_m_ = 0.003;
   double vio_visual_update_max_lateral_m_ = 0.08;
   double vio_visual_update_max_lateral_ratio_ = 0.35;
   double vio_visual_update_max_exposure_delta_ = 0.30;
+  std::string vio_visual_update_large_update_guard_action_ = "reject_update";
+  std::string vio_visual_update_large_rotation_action_ = "downweight_update";
+  bool vio_reject_visual_large_rotation_ = false;
+  double vio_visual_update_large_rotation_noise_scale_ = 2.0;
+  std::string vio_visual_update_backward_guard_action_ = "log_only";
+  std::string vio_visual_update_lateral_guard_action_ = "log_only";
+  std::string vio_visual_update_exposure_guard_action_ = "reject_update";
+  std::string vio_visual_update_nonfinite_guard_action_ = "reject_update";
   bool vio_image_quality_gate_en_ = false;
   double vio_image_quality_max_saturated_fraction_ = 0.20;
   double vio_image_quality_max_tile_saturated_fraction_ = 0.35;
@@ -230,7 +565,7 @@ public:
   PointCloudXYZRGB::Ptr pcl_wait_save;
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
-  ofstream fout_pre, fout_out, fout_pcd_pos, fout_points;
+  ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, degeneracy_guard_log_;
 
   pcl::VoxelGrid<PointType> downSizeFilterSurf;
 

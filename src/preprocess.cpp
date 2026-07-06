@@ -518,6 +518,7 @@ void Preprocess::Pandar128_handler(const sensor_msgs::PointCloud2::ConstPtr &msg
   pcl::PointCloud<Pandar128_ros::Point> pl_orig;
   pcl::fromROSMsg(*msg, pl_orig);
   int plsize = pl_orig.points.size();
+  if (plsize == 0) return;
   pl_surf.reserve(plsize);
 
   double time_head = pl_orig.points[0].timestamp;
@@ -572,6 +573,7 @@ void Preprocess::xt32_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   pcl::PointCloud<xt32_ros::Point> pl_orig;
   pcl::fromROSMsg(*msg, pl_orig);
   int plsize = pl_orig.points.size();
+  if (plsize == 0) return;
   pl_surf.reserve(plsize);
 
   bool is_first[MAX_LINE_NUM];
@@ -714,6 +716,7 @@ void Preprocess::robosense_handler(const sensor_msgs::PointCloud2::ConstPtr &msg
   pcl::PointCloud<robosense_ros::Point> pl_orig;
   pcl::fromROSMsg(*msg, pl_orig);
   int plsize = pl_orig.size();
+  if (plsize == 0) return;
   pl_surf.reserve(plsize);
 
   double time_head = pl_orig.points[0].timestamp;

@@ -13,13 +13,16 @@ which is included as part of this source code package.
 #include "LIVMapper.h"
 #include <algorithm>
 #include <arpa/inet.h>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <netinet/in.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <system_error>
+#include <unordered_set>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -144,7 +147,6 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("deterministic_debug/lio_feature_sort_en", deterministic_lio_feature_sort_en_, true);
   nh.param<bool>("deterministic_debug/visual_observed_voxel_sort_en", deterministic_visual_observed_voxel_sort_en_, true);
   nh.param<bool>("deterministic_debug/visual_voxel_key_sort_en", deterministic_visual_voxel_key_sort_en_, true);
-  nh.param<bool>("common/livo_lidar_nearest_image_sync_en", livo_lidar_nearest_image_sync_en_, false);
   setStateSnapForDeterminismEnabled(deterministic_state_snap_en_);
 
   nh.param<bool>("vio/normal_en", normal_en, true);
@@ -177,13 +179,25 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("vio/low_track_force_min_points", vio_low_track_force_min_points_, 8);
   nh.param<bool>("vio/visual_update_guard_en", vio_visual_update_guard_en_, true);
   nh.param<double>("vio/visual_update_max_trans_m", vio_visual_update_max_trans_m_, 0.12);
-  nh.param<double>("vio/visual_update_max_rot_deg", vio_visual_update_max_rot_deg_, 2.0);
+  nh.param<double>("vio/visual_update_max_rot_deg", vio_visual_update_max_rot_deg_, 8.0);
+  nh.param<double>("vio/visual_update_max_trans_rate_mps", vio_visual_update_max_trans_rate_mps_, 3.0);
+  nh.param<double>("vio/visual_update_max_rot_rate_degps", vio_visual_update_max_rot_rate_degps_, 240.0);
+  nh.param<double>("vio/visual_update_max_backward_rate_mps", vio_visual_update_max_backward_rate_mps_, 0.5);
+  nh.param<double>("vio/visual_update_max_lateral_rate_mps", vio_visual_update_max_lateral_rate_mps_, 1.0);
   nh.param<double>("vio/visual_update_max_backward_m", vio_visual_update_max_backward_m_, 0.03);
   nh.param<double>("vio/visual_update_max_backward_ratio", vio_visual_update_max_backward_ratio_, 0.08);
   nh.param<double>("vio/visual_update_backward_abs_floor_m", vio_visual_update_backward_abs_floor_m_, 0.003);
   nh.param<double>("vio/visual_update_max_lateral_m", vio_visual_update_max_lateral_m_, 0.08);
   nh.param<double>("vio/visual_update_max_lateral_ratio", vio_visual_update_max_lateral_ratio_, 0.35);
   nh.param<double>("vio/visual_update_max_exposure_delta", vio_visual_update_max_exposure_delta_, 0.30);
+  nh.param<std::string>("vio/visual_update_large_update_guard_action", vio_visual_update_large_update_guard_action_, "reject_update");
+  nh.param<std::string>("vio/visual_update_large_rotation_action", vio_visual_update_large_rotation_action_, "downweight_update");
+  nh.param<bool>("vio/reject_visual_large_rotation", vio_reject_visual_large_rotation_, false);
+  nh.param<double>("vio/visual_update_large_rotation_noise_scale", vio_visual_update_large_rotation_noise_scale_, 2.0);
+  nh.param<std::string>("vio/visual_update_backward_guard_action", vio_visual_update_backward_guard_action_, "log_only");
+  nh.param<std::string>("vio/visual_update_lateral_guard_action", vio_visual_update_lateral_guard_action_, "log_only");
+  nh.param<std::string>("vio/visual_update_exposure_guard_action", vio_visual_update_exposure_guard_action_, "reject_update");
+  nh.param<std::string>("vio/visual_update_nonfinite_guard_action", vio_visual_update_nonfinite_guard_action_, "reject_update");
   nh.param<bool>("vio/image_quality_gate_en", vio_image_quality_gate_en_, false);
   nh.param<double>("vio/image_quality_max_saturated_fraction", vio_image_quality_max_saturated_fraction_, 0.20);
   nh.param<double>("vio/image_quality_max_tile_saturated_fraction", vio_image_quality_max_tile_saturated_fraction_, 0.35);
@@ -203,12 +217,258 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("time_offset/lidar_time_offset", lidar_time_offset, 0.0);
   nh.param<bool>("uav/imu_rate_odom", imu_prop_enable, false);
   nh.param<bool>("uav/gravity_align_en", gravity_align_en, false);
-  nh.param<bool>("uwb/output_correction_en", uwb_output_correction_en_, true);
+  nh.param<bool>("uav/lock_z_after_gravity_align_en", legacy_lock_z_after_gravity_align_en_, false);
+  if (legacy_lock_z_after_gravity_align_en_)
+  {
+    ROS_WARN("[DEGEN_GUARD] uav/lock_z_after_gravity_align_en is deprecated and ignored; use degeneracy_guard/enable_z_soft_constraint.");
+  }
+  nh.param<bool>("degeneracy_guard/enable", deg_guard_enable_, false);
+  nh.param<bool>("degeneracy_guard/enable_z_soft_constraint", deg_guard_enable_z_soft_constraint_, true);
+  nh.param<double>("degeneracy_guard/z_ref", deg_guard_z_ref_, 0.0);
+  nh.param<double>("degeneracy_guard/sigma_z", deg_guard_sigma_z_, 0.20);
+  nh.param<double>("degeneracy_guard/sigma_vz", deg_guard_sigma_vz_, 0.30);
+  nh.param<double>("degeneracy_guard/z_soft_gain", deg_guard_z_gain_, 1.0);
+  nh.param<bool>("degeneracy_guard/enable_nhc", deg_guard_enable_nhc_, true);
+  nh.param<double>("degeneracy_guard/sigma_body_vy", deg_guard_sigma_body_vy_, 0.05);
+  nh.param<double>("degeneracy_guard/sigma_body_vz", deg_guard_sigma_body_vz_, 0.05);
+  nh.param<double>("degeneracy_guard/nhc_min_speed", deg_guard_nhc_min_speed_, 0.05);
+  nh.param<bool>("degeneracy_guard/nhc_only_in_degenerate", deg_guard_nhc_only_in_degenerate_, true);
+  nh.param<double>("degeneracy_guard/nhc_gain", deg_guard_nhc_gain_, 1.0);
+  nh.param<bool>("degeneracy_guard/enable_backward_guard", deg_guard_enable_backward_guard_, true);
+  nh.param<double>("degeneracy_guard/backward_step_threshold", deg_guard_backward_step_threshold_, 0.05);
+  nh.param<double>("degeneracy_guard/backward_speed_threshold", deg_guard_backward_speed_threshold_, 0.20);
+  nh.param<int>("degeneracy_guard/backward_consecutive_frames", deg_guard_backward_consecutive_frames_, 10);
+  nh.param<std::string>("degeneracy_guard/backward_guard_action", deg_guard_backward_action_, "log_only");
+  nh.param<bool>("degeneracy_guard/enable_corridor_detection", deg_guard_enable_corridor_detection_, true);
+  nh.param<int>("degeneracy_guard/min_lidar_features", deg_guard_min_lidar_features_, 30);
+  nh.param<int>("degeneracy_guard/min_visual_tracked_points", deg_guard_min_visual_tracked_points_, 2);
+  nh.param<int>("degeneracy_guard/vio_low_feature_tracked_points", deg_guard_vio_low_feature_tracked_points_, 5);
+  nh.param<bool>("degeneracy_guard/use_vio_skip_for_degenerate", deg_guard_use_vio_skip_for_degenerate_, false);
+  nh.param<bool>("degeneracy_guard/use_vio_large_rotation_for_reject", deg_guard_use_vio_large_rotation_for_reject_, false);
+  nh.param<bool>("degeneracy_guard/reject_visual_large_rotation", vio_reject_visual_large_rotation_, vio_reject_visual_large_rotation_);
+  nh.param<double>("degeneracy_guard/camera_dt", deg_guard_camera_dt_, 1.0 / 30.0);
+  nh.param<double>("degeneracy_guard/lidar_dt", deg_guard_lidar_dt_, 0.1);
+  nh.param<double>("degeneracy_guard/max_update_translation_norm", deg_guard_max_update_translation_norm_, 0.5);
+  nh.param<double>("degeneracy_guard/max_update_yaw_deg", deg_guard_max_update_yaw_deg_, 5.0);
+  nh.param<double>("degeneracy_guard/max_update_translation_rate_mps", deg_guard_max_update_translation_rate_mps_, 3.0);
+  nh.param<double>("degeneracy_guard/max_update_yaw_rate_degps", deg_guard_max_update_yaw_rate_degps_, 180.0);
+  nh.param<double>("degeneracy_guard/hessian_condition_threshold", deg_guard_hessian_condition_threshold_, 1000.0);
+  nh.param<int>("degeneracy_guard/min_degenerate_frames", deg_guard_min_degenerate_frames_, 3);
+  nh.param<int>("degeneracy_guard/recover_frames", deg_guard_recover_frames_, 3);
+  nh.param<double>("degeneracy_guard/degenerate_lio_noise_scale", deg_guard_degenerate_lio_noise_scale_, 1.2);
+  nh.param<double>("degeneracy_guard/degenerate_vio_noise_scale", deg_guard_degenerate_vio_noise_scale_, 2.0);
+  nh.param<bool>("degeneracy_guard/enable_adaptive_sensor_weighting", deg_guard_enable_adaptive_sensor_weighting_, true);
+  nh.param<double>("degeneracy_guard/adaptive_lio_base_noise_scale", deg_guard_adaptive_lio_base_noise_scale_, 1.0);
+  nh.param<double>("degeneracy_guard/adaptive_vio_base_noise_scale", deg_guard_adaptive_vio_base_noise_scale_, 1.0);
+  nh.param<double>("degeneracy_guard/adaptive_lio_low_feature_noise_scale", deg_guard_adaptive_lio_low_feature_noise_scale_, 2.0);
+  nh.param<double>("degeneracy_guard/adaptive_vio_low_track_noise_scale", deg_guard_adaptive_vio_low_track_noise_scale_, 20.0);
+  nh.param<double>("degeneracy_guard/vio_low_feature_noise_scale", deg_guard_adaptive_vio_low_track_noise_scale_, deg_guard_adaptive_vio_low_track_noise_scale_);
+  nh.param<double>("degeneracy_guard/adaptive_lio_high_residual_noise_scale", deg_guard_adaptive_lio_high_residual_noise_scale_, 2.0);
+  nh.param<double>("degeneracy_guard/adaptive_lio_residual_ref", deg_guard_adaptive_lio_residual_ref_, 0.05);
+  nh.param<double>("degeneracy_guard/adaptive_max_noise_scale", deg_guard_adaptive_max_noise_scale_, 10.0);
+  nh.param<int>("degeneracy_guard/vio_skip_tracked_points", deg_guard_vio_skip_tracked_points_, 1);
+  nh.param<int>("degeneracy_guard/vio_skip_min_tracked_points", deg_guard_vio_skip_min_tracked_points_, deg_guard_vio_skip_tracked_points_ + 1);
+  nh.param<int>("degeneracy_guard/vio_min_update_meas", deg_guard_vio_min_update_meas_, 32);
+  nh.param<bool>("degeneracy_guard/reject_large_update_in_degenerate", deg_guard_reject_large_update_in_degenerate_, false);
+  nh.param<bool>("degeneracy_guard/reject_nonfinite_update", deg_guard_reject_nonfinite_update_, true);
+	  nh.param<double>("degeneracy_guard/max_degenerate_update_translation", deg_guard_max_degenerate_update_translation_, 0.3);
+	  nh.param<double>("degeneracy_guard/max_degenerate_update_yaw_deg", deg_guard_max_degenerate_update_yaw_deg_, 3.0);
+	  nh.param<std::string>("degeneracy_guard/log_file", deg_guard_log_file_, "/tmp/degeneracy_guard_log.txt");
+	  nh.param<bool>("deterministic_mode", deterministic_mode_, true);
+	  nh.param<bool>("deterministic/mode", deterministic_mode_, deterministic_mode_);
+	  nh.param<double>("uwb/update_window_sec", uwb_update_window_sec_, 0.05);
+	  nh.param<bool>("uwb/relocalize_en", uwb_relocalize_en_, false);
+	  nh.param<double>("uwb/relocalize_xy_threshold", uwb_relocalize_xy_threshold_, 1.0);
+	  nh.param<bool>("uwb/update_only_on_lio", uwb_update_only_on_lio_, true);
+	  nh.param<bool>("safety_guard/enable_safety_guard", safety_guard_enable_, false);
+  nh.param<bool>("safety_guard/enable", safety_guard_enable_, safety_guard_enable_);
+  nh.param<double>("safety_guard/max_speed", safety_max_speed_, 3.0);
+  nh.param<double>("safety_guard/max_frame_translation", safety_max_frame_translation_, 0.5);
+  nh.param<double>("safety_guard/max_frame_rotation_deg", safety_max_frame_rotation_deg_, 15.0);
+  nh.param<int>("safety_guard/fail_safe_recover_frames", safety_fail_safe_recover_frames_, 10);
+  nh.param<double>("safety_guard/backward_time_window", safety_backward_time_window_, 5.0);
+  nh.param<double>("safety_guard/backward_distance_threshold", safety_backward_distance_threshold_, 1.0);
+  nh.param<std::string>("safety_guard/backward_action", safety_backward_action_, "log_only");
+  nh.param<bool>("corridor_motion_prior/enable", corridor_prior_enable_, false);
+  nh.param<bool>("corridor_motion_prior/only_in_degenerate", corridor_prior_only_in_degenerate_, true);
+  nh.param<double>("corridor_motion_prior/axis_estimation_sec", corridor_prior_axis_estimation_sec_, 5.0);
+  nh.param<double>("corridor_motion_prior/axis_estimation_max_sec", corridor_prior_axis_estimation_max_sec_, 10.0);
+  nh.param<double>("corridor_motion_prior/min_axis_motion", corridor_prior_min_axis_motion_, 1.0);
+  nh.param<double>("corridor_motion_prior/backward_window_sec", corridor_prior_backward_window_sec_, 5.0);
+  nh.param<double>("corridor_motion_prior/backward_distance_threshold", corridor_prior_backward_distance_threshold_, 1.0);
+  nh.param<double>("corridor_motion_prior/fail_safe_window_sec", corridor_prior_fail_safe_window_sec_, 8.0);
+  nh.param<double>("corridor_motion_prior/fail_safe_backward_distance_threshold", corridor_prior_fail_safe_backward_distance_threshold_, 2.0);
+  nh.param<std::string>("corridor_motion_prior/backward_action", corridor_prior_backward_action_, "downweight");
+  nh.param<double>("corridor_motion_prior/lio_downweight_scale", corridor_prior_lio_downweight_scale_, 5.0);
+  nh.param<double>("corridor_motion_prior/vio_downweight_scale", corridor_prior_vio_downweight_scale_, 10.0);
+  nh.param<bool>("corridor_motion_prior/disable_map_update_on_downweight", corridor_prior_disable_map_update_on_downweight_, true);
+  nh.param<bool>("corridor_motion_prior/disable_visual_map_update_on_downweight", corridor_prior_disable_visual_map_update_on_downweight_, true);
+  deg_guard_sigma_z_ = std::max(1e-6, deg_guard_sigma_z_);
+  deg_guard_sigma_vz_ = std::max(1e-6, deg_guard_sigma_vz_);
+  deg_guard_sigma_body_vy_ = std::max(1e-6, deg_guard_sigma_body_vy_);
+  deg_guard_sigma_body_vz_ = std::max(1e-6, deg_guard_sigma_body_vz_);
+  deg_guard_z_gain_ = std::max(0.0, std::min(1.0, deg_guard_z_gain_));
+  deg_guard_nhc_gain_ = std::max(0.0, std::min(1.0, deg_guard_nhc_gain_));
+  deg_guard_nhc_min_speed_ = std::max(0.0, deg_guard_nhc_min_speed_);
+  deg_guard_backward_step_threshold_ = std::max(0.0, deg_guard_backward_step_threshold_);
+  deg_guard_backward_speed_threshold_ = std::max(0.0, deg_guard_backward_speed_threshold_);
+  deg_guard_backward_consecutive_frames_ = std::max(1, deg_guard_backward_consecutive_frames_);
+  deg_guard_min_lidar_features_ = std::max(0, deg_guard_min_lidar_features_);
+  deg_guard_min_visual_tracked_points_ = std::max(0, deg_guard_min_visual_tracked_points_);
+  deg_guard_vio_low_feature_tracked_points_ = std::max(0, deg_guard_vio_low_feature_tracked_points_);
+  deg_guard_camera_dt_ = std::max(1e-4, deg_guard_camera_dt_);
+  deg_guard_lidar_dt_ = std::max(1e-4, deg_guard_lidar_dt_);
+  deg_guard_max_update_translation_norm_ = std::max(0.0, deg_guard_max_update_translation_norm_);
+  deg_guard_max_update_yaw_deg_ = std::max(0.0, deg_guard_max_update_yaw_deg_);
+  deg_guard_max_update_translation_rate_mps_ = std::max(0.0, deg_guard_max_update_translation_rate_mps_);
+  deg_guard_max_update_yaw_rate_degps_ = std::max(0.0, deg_guard_max_update_yaw_rate_degps_);
+  deg_guard_hessian_condition_threshold_ = std::max(1.0, deg_guard_hessian_condition_threshold_);
+  deg_guard_min_degenerate_frames_ = std::max(1, deg_guard_min_degenerate_frames_);
+  deg_guard_recover_frames_ = std::max(1, deg_guard_recover_frames_);
+  deg_guard_degenerate_lio_noise_scale_ = std::max(1.0, deg_guard_degenerate_lio_noise_scale_);
+  deg_guard_degenerate_vio_noise_scale_ = std::max(1.0, deg_guard_degenerate_vio_noise_scale_);
+  deg_guard_adaptive_lio_base_noise_scale_ = std::max(1.0, deg_guard_adaptive_lio_base_noise_scale_);
+  deg_guard_adaptive_vio_base_noise_scale_ = std::max(1.0, deg_guard_adaptive_vio_base_noise_scale_);
+  deg_guard_adaptive_lio_low_feature_noise_scale_ = std::max(1.0, deg_guard_adaptive_lio_low_feature_noise_scale_);
+  deg_guard_adaptive_vio_low_track_noise_scale_ = std::max(1.0, deg_guard_adaptive_vio_low_track_noise_scale_);
+  deg_guard_adaptive_lio_high_residual_noise_scale_ = std::max(1.0, deg_guard_adaptive_lio_high_residual_noise_scale_);
+  deg_guard_adaptive_lio_residual_ref_ = std::max(1e-6, deg_guard_adaptive_lio_residual_ref_);
+  deg_guard_adaptive_max_noise_scale_ = std::max(1.0, deg_guard_adaptive_max_noise_scale_);
+  deg_guard_max_degenerate_update_translation_ = std::max(0.0, deg_guard_max_degenerate_update_translation_);
+  deg_guard_max_degenerate_update_yaw_deg_ = std::max(0.0, deg_guard_max_degenerate_update_yaw_deg_);
+  safety_max_speed_ = std::max(0.0, safety_max_speed_);
+  safety_max_frame_translation_ = std::max(0.0, safety_max_frame_translation_);
+  safety_max_frame_rotation_deg_ = std::max(0.0, safety_max_frame_rotation_deg_);
+  safety_fail_safe_recover_frames_ = std::max(1, safety_fail_safe_recover_frames_);
+  safety_backward_time_window_ = std::max(0.1, safety_backward_time_window_);
+  safety_backward_distance_threshold_ = std::max(0.0, safety_backward_distance_threshold_);
+  corridor_prior_axis_estimation_sec_ = std::max(0.1, corridor_prior_axis_estimation_sec_);
+  corridor_prior_axis_estimation_max_sec_ =
+      std::max(corridor_prior_axis_estimation_sec_, corridor_prior_axis_estimation_max_sec_);
+  corridor_prior_min_axis_motion_ = std::max(0.0, corridor_prior_min_axis_motion_);
+  corridor_prior_backward_window_sec_ = std::max(0.1, corridor_prior_backward_window_sec_);
+  corridor_prior_backward_distance_threshold_ = std::max(0.0, corridor_prior_backward_distance_threshold_);
+  corridor_prior_fail_safe_window_sec_ =
+      std::max(corridor_prior_backward_window_sec_, corridor_prior_fail_safe_window_sec_);
+  corridor_prior_fail_safe_backward_distance_threshold_ =
+      std::max(corridor_prior_backward_distance_threshold_, corridor_prior_fail_safe_backward_distance_threshold_);
+	  corridor_prior_lio_downweight_scale_ = std::max(1.0, corridor_prior_lio_downweight_scale_);
+	  corridor_prior_vio_downweight_scale_ = std::max(1.0, corridor_prior_vio_downweight_scale_);
+	  uwb_update_window_sec_ = std::max(0.0, uwb_update_window_sec_);
+	  uwb_relocalize_xy_threshold_ = std::max(0.0, uwb_relocalize_xy_threshold_);
+	  auto normalizeGuardAction = [](std::string &action, const std::string &fallback) {
+    if (action == "downweight") action = "downweight_update";
+    if (action == "none" || action == "log_only" || action == "downweight_update" ||
+        action == "reject_update" || action == "fail_safe_or_downweight") return;
+    ROS_WARN("[DEGEN_GUARD] Unknown guard action=%s, fallback to %s.", action.c_str(), fallback.c_str());
+    action = fallback;
+  };
+  normalizeGuardAction(deg_guard_backward_action_, "log_only");
+  if (deg_guard_backward_action_ == "reject_update")
+  {
+    ROS_WARN("[DEGEN_GUARD] backward_guard_action=reject_update is deprecated; use corridor_motion_prior window decision instead.");
+    deg_guard_backward_action_ = "log_only";
+  }
+  normalizeGuardAction(vio_visual_update_large_update_guard_action_, "reject_update");
+  normalizeGuardAction(vio_visual_update_large_rotation_action_, "downweight_update");
+  normalizeGuardAction(vio_visual_update_backward_guard_action_, "log_only");
+  normalizeGuardAction(vio_visual_update_lateral_guard_action_, "log_only");
+  normalizeGuardAction(vio_visual_update_exposure_guard_action_, "reject_update");
+  normalizeGuardAction(vio_visual_update_nonfinite_guard_action_, "reject_update");
+  normalizeGuardAction(safety_backward_action_, "log_only");
+  if (corridor_prior_backward_action_ == "downweight_update") corridor_prior_backward_action_ = "downweight";
+  if (corridor_prior_backward_action_ != "none" &&
+      corridor_prior_backward_action_ != "log_only" &&
+      corridor_prior_backward_action_ != "downweight" &&
+      corridor_prior_backward_action_ != "fail_safe")
+  {
+    ROS_WARN("[CORRIDOR_PRIOR] Unknown backward_action=%s, fallback to downweight.",
+             corridor_prior_backward_action_.c_str());
+    corridor_prior_backward_action_ = "downweight";
+  }
+  deg_guard_vio_skip_tracked_points_ = std::max(0, deg_guard_vio_skip_tracked_points_);
+  deg_guard_vio_skip_min_tracked_points_ = std::max(std::max(0, deg_guard_vio_skip_min_tracked_points_),
+                                                     deg_guard_vio_skip_tracked_points_ + 1);
+  deg_guard_vio_min_update_meas_ = std::max(1, deg_guard_vio_min_update_meas_);
+  vio_visual_update_max_trans_rate_mps_ = std::max(0.0, vio_visual_update_max_trans_rate_mps_);
+  vio_visual_update_max_rot_rate_degps_ = std::max(0.0, vio_visual_update_max_rot_rate_degps_);
+  vio_visual_update_max_backward_rate_mps_ = std::max(0.0, vio_visual_update_max_backward_rate_mps_);
+  vio_visual_update_max_lateral_rate_mps_ = std::max(0.0, vio_visual_update_max_lateral_rate_mps_);
+  vio_visual_update_large_rotation_noise_scale_ = std::max(1.0, vio_visual_update_large_rotation_noise_scale_);
+  nh.param<bool>("uwb/debug_output_correction_en", uwb_output_correction_en_, false);
+  nh.param<bool>("uwb/output_correction_en", uwb_output_correction_en_, uwb_output_correction_en_);
   nh.param<bool>("uwb/output_smooth_en", uwb_output_smooth_en_, true);
   nh.param<double>("uwb/output_smooth_alpha", uwb_output_smooth_alpha_, 0.15);
   nh.param<double>("uwb/output_smooth_max_step_m", uwb_output_smooth_max_step_m_, 0.05);
-  uwb_output_smooth_alpha_ = std::max(0.0, std::min(1.0, uwb_output_smooth_alpha_));
-  uwb_output_smooth_max_step_m_ = std::max(0.0, uwb_output_smooth_max_step_m_);
+	  nh.param<bool>("uwb/skip_when_lio_frozen", uwb_skip_when_lio_frozen_, true);
+	  uwb_output_smooth_alpha_ = std::max(0.0, std::min(1.0, uwb_output_smooth_alpha_));
+	  uwb_output_smooth_max_step_m_ = std::max(0.0, uwb_output_smooth_max_step_m_);
+			  nh.param<bool>("local_reinit/enable", local_reinit_enable_, true);
+		  nh.param<bool>("debug_fixed_degraded_intervals/enable", debug_fixed_degraded_intervals_enable_, false);
+		  // Compatibility only: old elevator_mode is now debug-only and must be explicitly enabled.
+		  nh.param<bool>("elevator_mode/enable", debug_fixed_degraded_intervals_enable_, debug_fixed_degraded_intervals_enable_);
+			  nh.param<std::string>("debug_fixed_degraded_intervals/trigger_mode", fixed_degraded_trigger_mode_, "manual_time");
+			  nh.param<std::string>("elevator_mode/trigger_mode", fixed_degraded_trigger_mode_, fixed_degraded_trigger_mode_);
+			  nh.param<bool>("degraded_bootstrap/enable", degraded_bootstrap_enable_, true);
+			  nh.param<bool>("post_elevator_reinit/enable", degraded_bootstrap_enable_, degraded_bootstrap_enable_);
+		  nh.param<bool>("degraded_hold/disable_visual_map", disable_visual_map_in_degraded_hold_, true);
+		  nh.param<bool>("degraded_hold/disable_voxel_map", disable_voxel_map_in_degraded_hold_, true);
+		  nh.param<bool>("elevator_mode/disable_visual_map", disable_visual_map_in_degraded_hold_, disable_visual_map_in_degraded_hold_);
+		  nh.param<bool>("elevator_mode/disable_voxel_map", disable_voxel_map_in_degraded_hold_, disable_voxel_map_in_degraded_hold_);
+			  nh.param<double>("degraded_hold/attitude_reject_deg", degraded_hold_attitude_reject_deg_, 5.0);
+			  nh.param<double>("degraded_hold/speed_reject_mps", degraded_hold_speed_reject_mps_, 1.0);
+			  nh.param<double>("elevator_mode/attitude_reject_deg", degraded_hold_attitude_reject_deg_, degraded_hold_attitude_reject_deg_);
+			  nh.param<double>("elevator_mode/speed_reject_mps", degraded_hold_speed_reject_mps_, degraded_hold_speed_reject_mps_);
+		  nh.param<double>("debug_fixed_degraded_intervals/bag_start_offset", bag_start_offset_, 0.0);
+		  nh.param<double>("elevator_mode/bag_start_offset", bag_start_offset_, bag_start_offset_);
+		  nh.param<double>("bag_start_offset", bag_start_offset_, bag_start_offset_);
+		  nh.param<double>("debug_fixed_degraded_intervals/first_start_sec", fixed_degraded_first_start_sec_, 150.0);
+		  nh.param<double>("debug_fixed_degraded_intervals/first_end_sec", fixed_degraded_first_end_sec_, 205.0);
+		  nh.param<double>("debug_fixed_degraded_intervals/second_start_sec", fixed_degraded_second_start_sec_, 525.0);
+		  nh.param<double>("debug_fixed_degraded_intervals/second_end_sec", fixed_degraded_second_end_sec_, 565.0);
+		  nh.param<double>("elevator_mode/first_start_sec", fixed_degraded_first_start_sec_, fixed_degraded_first_start_sec_);
+		  nh.param<double>("elevator_mode/first_end_sec", fixed_degraded_first_end_sec_, fixed_degraded_first_end_sec_);
+		  nh.param<double>("elevator_mode/second_start_sec", fixed_degraded_second_start_sec_, fixed_degraded_second_start_sec_);
+		  nh.param<double>("elevator_mode/second_end_sec", fixed_degraded_second_end_sec_, fixed_degraded_second_end_sec_);
+		  nh.param<double>("debug_fixed_degraded_intervals/first_start_sec", local_fixed_degraded_start_sec_, fixed_degraded_first_start_sec_);
+		  nh.param<double>("debug_fixed_degraded_intervals/first_end_sec", local_fixed_degraded_end_sec_, fixed_degraded_first_end_sec_);
+		  fixed_degraded_first_start_sec_ = local_fixed_degraded_start_sec_;
+		  fixed_degraded_first_end_sec_ = local_fixed_degraded_end_sec_;
+		  nh.param<std::string>("diagnostics/level", diagnostics_level_, "summary");
+		  nh.param<double>("diagnostics/summary_interval_sec", diagnostics_summary_interval_sec_, 1.0);
+		  nh.param<int>("local_reinit/post_lio_bootstrap_frames", local_post_reinit_lio_frames_, 30);
+	  nh.param<int>("local_reinit/post_vio_bootstrap_frames", local_post_reinit_vio_frames_, 90);
+	  nh.param<double>("local_reinit/post_duration_sec", local_post_reinit_duration_sec_, 5.0);
+	  nh.param<double>("local_reinit/tracking_lost_window_sec", local_tracking_lost_window_sec_, 1.0);
+	  nh.param<int>("local_reinit/vio_unavailable_tracked_points", local_vio_unavailable_tracked_points_, 2);
+	  nh.param<double>("local_reinit/lio_weak_residual_threshold", local_lio_weak_residual_threshold_, 0.20);
+	  local_post_reinit_lio_frames_ = std::max(1, local_post_reinit_lio_frames_);
+	  local_post_reinit_vio_frames_ = std::max(1, local_post_reinit_vio_frames_);
+	  local_post_reinit_duration_sec_ = std::max(0.0, local_post_reinit_duration_sec_);
+		  local_tracking_lost_window_sec_ = std::max(0.1, local_tracking_lost_window_sec_);
+		  local_vio_unavailable_tracked_points_ = std::max(0, local_vio_unavailable_tracked_points_);
+			  local_lio_weak_residual_threshold_ = std::max(0.0, local_lio_weak_residual_threshold_);
+			  degraded_hold_attitude_reject_deg_ = std::max(0.0, degraded_hold_attitude_reject_deg_);
+			  degraded_hold_speed_reject_mps_ = std::max(0.0, degraded_hold_speed_reject_mps_);
+			  bag_start_offset_ = std::max(0.0, bag_start_offset_);
+		  fixed_degraded_first_start_sec_ = std::max(0.0, fixed_degraded_first_start_sec_);
+		  fixed_degraded_first_end_sec_ = std::max(fixed_degraded_first_start_sec_, fixed_degraded_first_end_sec_);
+		  fixed_degraded_second_start_sec_ = std::max(0.0, fixed_degraded_second_start_sec_);
+		  fixed_degraded_second_end_sec_ = std::max(fixed_degraded_second_start_sec_, fixed_degraded_second_end_sec_);
+		  if (diagnostics_level_ != "off" && diagnostics_level_ != "summary" && diagnostics_level_ != "verbose")
+		  {
+		    ROS_WARN("[Diagnostics] Unknown diagnostics.level=%s, fallback to summary.", diagnostics_level_.c_str());
+		    diagnostics_level_ = "summary";
+		  }
+		  diagnostics_summary_interval_sec_ = std::max(0.1, diagnostics_summary_interval_sec_);
+	  nh.param<bool>("lio/freeze_state_when_degenerate", lio_freeze_state_when_degenerate_, false);
+  nh.param<int>("lio/freeze_degenerate_min_frames", lio_freeze_degenerate_min_frames_, 1);
+  nh.param<bool>("lio/state_jump_guard_en", lio_state_jump_guard_en_, true);
+  nh.param<double>("lio/state_jump_max_trans_m", lio_state_jump_max_trans_m_, 0.30);
+  nh.param<double>("lio/state_jump_max_rot_deg", lio_state_jump_max_rot_deg_, 5.0);
+  lio_freeze_degenerate_min_frames_ = std::max(1, lio_freeze_degenerate_min_frames_);
+  lio_state_jump_max_trans_m_ = std::max(0.0, lio_state_jump_max_trans_m_);
+  lio_state_jump_max_rot_deg_ = std::max(0.0, lio_state_jump_max_rot_deg_);
 
   nh.param<string>("evo/seq_name", seq_name, "01");
   nh.param<bool>("evo/pose_output_en", pose_output_en, false);
@@ -256,6 +516,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("publish/publish_img_stride", publish_img_stride_, 1);
 
   nh.param<int>("lio/map_update_stride", lio_map_update_stride_, 1);
+  nh.param<bool>("lio/force_voxel_map_update", lio_force_voxel_map_update_, true);
+  nh.param<double>("lio/force_map_update_interval", lio_force_map_update_interval_, 0.3);
+  nh.param<int>("lio/force_map_update_lidar_frames", lio_force_map_update_lidar_frames_, 3);
 
   nh.param<bool>("debug/print_console_timing_en", print_console_timing_en_, true);
   nh.param<int>("debug/print_console_timing_stride", print_console_timing_stride_, 1);
@@ -292,6 +555,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   pub_scan_num = std::max(1, pub_scan_num);
   publish_img_stride_ = std::max(1, publish_img_stride_);
   lio_map_update_stride_ = std::max(1, lio_map_update_stride_);
+  lio_force_map_update_interval_ = std::max(0.0, lio_force_map_update_interval_);
+  lio_force_map_update_lidar_frames_ = std::max(1, lio_force_map_update_lidar_frames_);
   print_console_timing_stride_ = std::max(1, print_console_timing_stride_);
 
   pub_scan_num_nominal_ = pub_scan_num;
@@ -307,6 +572,15 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     frame_time_budget_s_ = 0.1;
   }
   ROS_INFO("[RuntimeGuard] enable=%d, frame_time_budget_s=%.6f s", static_cast<int>(runtime_guard_en_), frame_time_budget_s_);
+  ROS_INFO("[DEGEN_GUARD] enable=%d adaptive_weight=%d z_soft=%d nhc=%d backward=%d corridor=%d action=%s log_file=%s",
+           static_cast<int>(deg_guard_enable_),
+           static_cast<int>(deg_guard_enable_adaptive_sensor_weighting_),
+           static_cast<int>(deg_guard_enable_z_soft_constraint_),
+           static_cast<int>(deg_guard_enable_nhc_),
+           static_cast<int>(deg_guard_enable_backward_guard_),
+           static_cast<int>(deg_guard_enable_corridor_detection_),
+           deg_guard_backward_action_.c_str(),
+           deg_guard_log_file_.c_str());
   ROS_INFO("[AdaptiveSelector] enable=%d, trans=[%.3f %.3f] m, rot=[%.3f %.3f] deg, ratio_full=%.3f, max_skip=%d",
            static_cast<int>(adaptive_visual_selector_en),
            keyframe_trans_thresh_min_,
@@ -326,6 +600,14 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
 void LIVMapper::updateRuntimeGuard(double frame_time_s)
 {
   if (!runtime_guard_en_) return;
+  if (deterministic_mode_)
+  {
+    ROS_WARN_THROTTLE(2.0,
+                      "[RuntimeGuard] deterministic_mode=true: frame_time=%.4f s budget=%.4f s, log-only no algorithm branch change.",
+                      frame_time_s,
+                      frame_time_budget_s_);
+    return;
+  }
 
   if (frame_time_s > frame_time_budget_s_)
   {
@@ -421,6 +703,12 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
 
   voxelmap_manager->extT_ << VEC_FROM_ARRAY(extrinT);
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
+  voxelmap_manager->adaptive_sensor_weighting_en_ = deg_guard_enable_ && deg_guard_enable_adaptive_sensor_weighting_;
+  voxelmap_manager->adaptive_low_feature_noise_scale_ = deg_guard_adaptive_lio_low_feature_noise_scale_;
+  voxelmap_manager->adaptive_high_residual_noise_scale_ = deg_guard_adaptive_lio_high_residual_noise_scale_;
+  voxelmap_manager->adaptive_residual_ref_ = deg_guard_adaptive_lio_residual_ref_;
+  voxelmap_manager->adaptive_max_noise_scale_ = deg_guard_adaptive_max_noise_scale_;
+  voxelmap_manager->adaptive_min_lidar_features_ = deg_guard_min_lidar_features_;
 
   if (!vk::camera_loader::loadFromRosNs("laserMapping", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
 
@@ -433,14 +721,20 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->state_propagat = &state_propagat;
   vio_manager->max_iterations = max_iterations;
   vio_manager->img_point_cov = IMG_POINT_COV;
+  vio_manager->adaptive_sensor_weighting_en = deg_guard_enable_ && deg_guard_enable_adaptive_sensor_weighting_;
+  vio_manager->adaptive_low_track_noise_scale = deg_guard_adaptive_vio_low_track_noise_scale_;
+  vio_manager->adaptive_max_noise_scale = std::max(deg_guard_adaptive_max_noise_scale_,
+                                                   deg_guard_adaptive_vio_low_track_noise_scale_);
+  vio_manager->adaptive_min_tracked_points = std::max(deg_guard_min_visual_tracked_points_,
+                                                      deg_guard_vio_low_feature_tracked_points_ + 1);
   vio_manager->normal_en = normal_en;
   vio_manager->inverse_composition_en = inverse_composition_en;
   vio_manager->raycast_en = raycast_en;
   vio_manager->grid_n_width = grid_n_width;
   vio_manager->grid_n_height = grid_n_height;
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
-  vio_manager->min_retrieve_points = vio_min_retrieve_points_;
-  vio_manager->min_update_meas = vio_min_update_meas_;
+  vio_manager->min_retrieve_points = deg_guard_enable_ ? deg_guard_vio_skip_min_tracked_points_ : vio_min_retrieve_points_;
+  vio_manager->min_update_meas = deg_guard_enable_ ? deg_guard_vio_min_update_meas_ : vio_min_update_meas_;
   vio_manager->low_track_force_update_stride = vio_low_track_force_update_stride_;
   vio_manager->low_track_force_min_points = vio_low_track_force_min_points_;
   vio_manager->deterministic_visual_update_en = vio_deterministic_visual_update_en_;
@@ -451,12 +745,25 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->visual_update_guard_en = vio_visual_update_guard_en_;
   vio_manager->visual_update_max_trans_m = vio_visual_update_max_trans_m_;
   vio_manager->visual_update_max_rot_deg = vio_visual_update_max_rot_deg_;
+  vio_manager->visual_update_max_trans_rate_mps = vio_visual_update_max_trans_rate_mps_;
+  vio_manager->visual_update_max_rot_rate_degps = vio_visual_update_max_rot_rate_degps_;
+  vio_manager->visual_update_max_backward_rate_mps = vio_visual_update_max_backward_rate_mps_;
+  vio_manager->visual_update_max_lateral_rate_mps = vio_visual_update_max_lateral_rate_mps_;
   vio_manager->visual_update_max_backward_m = vio_visual_update_max_backward_m_;
   vio_manager->visual_update_max_backward_ratio = vio_visual_update_max_backward_ratio_;
   vio_manager->visual_update_backward_abs_floor_m = vio_visual_update_backward_abs_floor_m_;
   vio_manager->visual_update_max_lateral_m = vio_visual_update_max_lateral_m_;
   vio_manager->visual_update_max_lateral_ratio = vio_visual_update_max_lateral_ratio_;
   vio_manager->visual_update_max_exposure_delta = vio_visual_update_max_exposure_delta_;
+  vio_manager->visual_update_large_update_guard_action = deg_guard_enable_ ? vio_visual_update_large_update_guard_action_ : "reject_update";
+  vio_manager->visual_update_large_rotation_action = deg_guard_enable_ ? vio_visual_update_large_rotation_action_ : "reject_update";
+  vio_manager->reject_visual_large_rotation = deg_guard_enable_ && (vio_reject_visual_large_rotation_ || deg_guard_use_vio_large_rotation_for_reject_);
+  vio_manager->use_vio_large_rotation_for_reject = deg_guard_enable_ && deg_guard_use_vio_large_rotation_for_reject_;
+  vio_manager->visual_update_large_rotation_noise_scale = vio_visual_update_large_rotation_noise_scale_;
+  vio_manager->visual_update_backward_guard_action = deg_guard_enable_ ? vio_visual_update_backward_guard_action_ : "reject_update";
+  vio_manager->visual_update_lateral_guard_action = deg_guard_enable_ ? vio_visual_update_lateral_guard_action_ : "reject_update";
+  vio_manager->visual_update_exposure_guard_action = deg_guard_enable_ ? vio_visual_update_exposure_guard_action_ : "reject_update";
+  vio_manager->visual_update_nonfinite_guard_action = deg_guard_enable_ ? vio_visual_update_nonfinite_guard_action_ : "reject_update";
   vio_manager->image_quality_gate_en = vio_image_quality_gate_en_;
   vio_manager->image_quality_max_saturated_fraction = vio_image_quality_max_saturated_fraction_;
   vio_manager->image_quality_max_tile_saturated_fraction = vio_image_quality_max_tile_saturated_fraction_;
@@ -524,6 +831,44 @@ void LIVMapper::initializeFiles()
   }
   if(colmap_output_en) fout_points.open(save_path + "points3D.txt", std::ios::out);
   if(save_log_en) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
+	  if (diagnostics_level_ == "verbose" &&
+	      (deg_guard_enable_ || safety_guard_enable_ || corridor_prior_enable_) &&
+	      !deg_guard_log_file_.empty())
+  {
+    degeneracy_guard_log_.open(deg_guard_log_file_, std::ios::out);
+    if (degeneracy_guard_log_.is_open())
+    {
+		      degeneracy_guard_log_ << "timestamp,frame_id,stage,sensor_type,mode,local_mode,deterministic_mode,dt,"
+		                            << "local_elapsed,bag_start_offset,bag_elapsed,in_fixed_degraded_window,fixed_degraded_reason,"
+		                            << "det_lio_update,det_vio_update,det_uwb_update,uwb_anchor_ids,"
+	                            << "uwb_xy_correction,uwb_z_before_clamp,uwb_z_after_clamp,"
+	                            << "local_map_cleared,visual_map_cleared,tracker_reset,"
+	                            << "lio_bootstrap_frames,vio_bootstrap_frames,vio_unavailable,lio_weak,"
+	                            << "position_x,position_y,position_z,"
+	                            << "velocity_world_x,velocity_world_y,velocity_world_z,"
+	                            << "velocity_body_x,velocity_body_y,velocity_body_z,"
+	                            << "speed,quaternion_norm,frame_translation,frame_rotation_deg,backward_distance_in_window,"
+	                            << "corridor_axis_x,corridor_axis_y,corridor_axis_z,"
+	                            << "corridor_progress,corridor_progress_delta_1s,corridor_progress_delta_window,"
+	                            << "corridor_backward_distance_window,corridor_backward_distance_fail_window,"
+	                            << "corridor_action,corridor_update_voxel_map_enabled,corridor_visual_map_update_enabled,"
+	                            << "z,z_residual,forward_progress,is_backward_slip,"
+                            << "lio_feature_count,visual_tracked_points,"
+                            << "update_translation_norm,update_translation_rate_mps,"
+                            << "update_yaw_deg,update_yaw_rate_degps,"
+                            << "visual_rotation_update_deg,visual_rotation_rate_degps,"
+                            << "z_correction_norm,nhc_correction_norm,"
+                            << "lio_noise_scale,vio_noise_scale,weight_reason,"
+                            << "lio_update_executed,lio_downweighted,lio_update_voxel_map,lio_voxel_map_skip_reason,"
+                            << "vio_skip_affects_global_degenerate,"
+                            << "update_status,reject_reason,action,reason,final_pose_delta\n";
+      ROS_INFO("[DEGEN_GUARD] log_file=%s", deg_guard_log_file_.c_str());
+    }
+    else
+    {
+      ROS_WARN("[DEGEN_GUARD] Failed to open log_file=%s", deg_guard_log_file_.c_str());
+    }
+  }
 }
 
 void LIVMapper::initializeUdpReporter()
@@ -620,9 +965,9 @@ void LIVMapper::handleFirstFrame()
   }
 }
 
-void LIVMapper::gravityAlignment() 
+void LIVMapper::gravityAlignment()
 {
-  if (!p_imu->imu_need_init && !gravity_align_finished) 
+  if (!p_imu->imu_need_init && !gravity_align_finished)
   {
     std::cout << "Gravity Alignment Starts" << std::endl;
     V3D ez(0, 0, -1), gz(_state.gravity);
@@ -638,18 +983,1631 @@ void LIVMapper::gravityAlignment()
   }
 }
 
+void LIVMapper::blendDegeneracyGuardUpdate(const StatesGroup &state_before_update,
+                                           const StatesGroup &state_after_update,
+                                           double scale)
+{
+  scale = std::max(0.0, std::min(1.0, scale));
+  StatesGroup state_after_copy = state_after_update;
+  VD(DIM_STATE) dx = state_after_copy - state_before_update;
+  dx *= scale;
+  _state = state_before_update;
+  _state += dx;
+  _state.cov = state_before_update.cov + scale * (state_after_update.cov - state_before_update.cov);
+  _state.cov = 0.5 * (_state.cov + _state.cov.transpose());
+}
+
+void LIVMapper::resetCorridorMotionPrior()
+{
+  corridor_prior_started_ = false;
+  corridor_prior_axis_ready_ = false;
+  corridor_prior_axis_failed_ = false;
+  corridor_prior_entry_time_ = -1.0;
+  corridor_prior_entry_pos_ = V3D::Zero();
+  corridor_prior_axis_ = V3D::UnitX();
+  corridor_prior_progress_buffer_.clear();
+  corridor_prior_progress_ = 0.0;
+  corridor_prior_progress_delta_1s_ = 0.0;
+  corridor_prior_progress_delta_window_ = 0.0;
+  corridor_prior_backward_distance_window_ = 0.0;
+  corridor_prior_backward_distance_fail_window_ = 0.0;
+  corridor_prior_action_ = "none";
+  corridor_prior_update_voxel_map_enabled_ = true;
+  corridor_prior_visual_map_update_enabled_ = true;
+}
+
+void LIVMapper::updateCorridorMotionPrior(const char *stage, const StatesGroup &state)
+{
+  corridor_prior_action_ = "none";
+  corridor_prior_update_voxel_map_enabled_ = true;
+  corridor_prior_visual_map_update_enabled_ = true;
+  corridor_prior_progress_delta_1s_ = 0.0;
+  corridor_prior_progress_delta_window_ = 0.0;
+  corridor_prior_backward_distance_window_ = 0.0;
+  corridor_prior_backward_distance_fail_window_ = 0.0;
+
+  if (!corridor_prior_enable_ || isDegradedHoldMode() || isBootstrapMode() ||
+      (p_imu && p_imu->imu_need_init) ||
+      (gravity_align_en && !gravity_align_finished) || !state.pos_end.allFinite())
+  {
+    return;
+  }
+
+  if (corridor_prior_only_in_degenerate_ && !deg_guard_corridor_degenerate_ && !corridor_prior_started_)
+  {
+    return;
+  }
+
+  const double now = LidarMeasures.last_lio_update_time;
+  if (!std::isfinite(now)) return;
+
+  if (!corridor_prior_started_)
+  {
+    corridor_prior_started_ = true;
+    corridor_prior_axis_ready_ = false;
+    corridor_prior_axis_failed_ = false;
+    corridor_prior_entry_time_ = now;
+    corridor_prior_entry_pos_ = state.pos_end;
+    corridor_prior_axis_ = V3D::UnitX();
+    corridor_prior_progress_buffer_.clear();
+    ROS_WARN("[CORRIDOR_PRIOR] start axis estimation stage=%s t=%.6f pos=[%.3f %.3f %.3f]",
+             stage ? stage : "state",
+             now,
+             state.pos_end[0], state.pos_end[1], state.pos_end[2]);
+  }
+
+  if (!corridor_prior_axis_ready_ && !corridor_prior_axis_failed_)
+  {
+    const V3D net_motion = state.pos_end - corridor_prior_entry_pos_;
+    const double net_motion_norm = net_motion.norm();
+    const double elapsed = now - corridor_prior_entry_time_;
+    if (elapsed >= corridor_prior_axis_estimation_sec_ &&
+        net_motion_norm >= corridor_prior_min_axis_motion_)
+    {
+      corridor_prior_axis_ = net_motion / std::max(1e-9, net_motion_norm);
+      corridor_prior_axis_ready_ = true;
+      corridor_prior_progress_buffer_.clear();
+      ROS_WARN("[CORRIDOR_PRIOR] corridor_axis ready axis=[%.6f %.6f %.6f] elapsed=%.3f net_motion=%.3f",
+               corridor_prior_axis_[0], corridor_prior_axis_[1], corridor_prior_axis_[2],
+               elapsed,
+               net_motion_norm);
+    }
+    else if (elapsed >= corridor_prior_axis_estimation_max_sec_)
+    {
+      corridor_prior_axis_failed_ = true;
+      ROS_WARN("[CORRIDOR_PRIOR] corridor_axis disabled: net_motion=%.3f < min_axis_motion=%.3f elapsed=%.3f",
+               net_motion_norm,
+               corridor_prior_min_axis_motion_,
+               elapsed);
+    }
+  }
+
+  if (!corridor_prior_axis_ready_) return;
+
+  corridor_prior_progress_ = (state.pos_end - corridor_prior_entry_pos_).dot(corridor_prior_axis_);
+  corridor_prior_progress_buffer_.push_back({now, corridor_prior_progress_});
+  const double max_keep_sec = std::max(corridor_prior_fail_safe_window_sec_,
+                                       std::max(corridor_prior_backward_window_sec_, 1.0));
+  while (!corridor_prior_progress_buffer_.empty() &&
+         now - corridor_prior_progress_buffer_.front().first > max_keep_sec)
+  {
+    corridor_prior_progress_buffer_.pop_front();
+  }
+
+  auto computeWindow = [&](double window_sec,
+                           double *delta_from_oldest,
+                           double *backward_from_max) {
+    bool has_sample = false;
+    double oldest_progress = corridor_prior_progress_;
+    double max_progress = corridor_prior_progress_;
+    for (const auto &sample : corridor_prior_progress_buffer_)
+    {
+      if (now - sample.first <= window_sec)
+      {
+        if (!has_sample)
+        {
+          oldest_progress = sample.second;
+          max_progress = sample.second;
+          has_sample = true;
+        }
+        max_progress = std::max(max_progress, sample.second);
+      }
+    }
+    if (!has_sample)
+    {
+      oldest_progress = corridor_prior_progress_;
+      max_progress = corridor_prior_progress_;
+    }
+    if (delta_from_oldest) *delta_from_oldest = corridor_prior_progress_ - oldest_progress;
+    if (backward_from_max) *backward_from_max = std::max(0.0, max_progress - corridor_prior_progress_);
+  };
+
+  computeWindow(1.0, &corridor_prior_progress_delta_1s_, nullptr);
+  computeWindow(corridor_prior_backward_window_sec_,
+                &corridor_prior_progress_delta_window_,
+                &corridor_prior_backward_distance_window_);
+  computeWindow(corridor_prior_fail_safe_window_sec_,
+                nullptr,
+                &corridor_prior_backward_distance_fail_window_);
+
+  if (corridor_prior_backward_action_ == "log_only")
+  {
+    corridor_prior_action_ = (corridor_prior_backward_distance_window_ > corridor_prior_backward_distance_threshold_) ?
+                             "log_only" : "none";
+  }
+  else if (corridor_prior_backward_action_ == "downweight")
+  {
+    if (corridor_prior_backward_distance_fail_window_ > corridor_prior_fail_safe_backward_distance_threshold_)
+    {
+      corridor_prior_action_ = "local_reinit";
+    }
+    else if (corridor_prior_backward_distance_window_ > corridor_prior_backward_distance_threshold_)
+    {
+      corridor_prior_action_ = "block_map_update";
+    }
+  }
+  else if (corridor_prior_backward_action_ == "fail_safe")
+  {
+    if (corridor_prior_backward_distance_window_ > corridor_prior_backward_distance_threshold_ ||
+        corridor_prior_backward_distance_fail_window_ > corridor_prior_fail_safe_backward_distance_threshold_)
+    {
+      corridor_prior_action_ = "local_reinit";
+    }
+  }
+
+  if (corridor_prior_action_ == "downweight" || corridor_prior_action_ == "block_map_update")
+  {
+    corridor_prior_update_voxel_map_enabled_ = !corridor_prior_disable_map_update_on_downweight_;
+    corridor_prior_visual_map_update_enabled_ = !corridor_prior_disable_visual_map_update_on_downweight_;
+    ROS_WARN_THROTTLE(0.5,
+	                      "[CORRIDOR_PRIOR] BACKWARD_DOWNWEIGHT stage=%s action=%s progress=%.3f d1s=%.3f dwin=%.3f back_win=%.3f/%.3f axis=[%.3f %.3f %.3f]",
+	                      stage ? stage : "state",
+	                      corridor_prior_action_.c_str(),
+	                      corridor_prior_progress_,
+                      corridor_prior_progress_delta_1s_,
+                      corridor_prior_progress_delta_window_,
+                      corridor_prior_backward_distance_window_,
+                      corridor_prior_backward_distance_threshold_,
+                      corridor_prior_axis_[0], corridor_prior_axis_[1], corridor_prior_axis_[2]);
+  }
+  else if (corridor_prior_action_ == "local_reinit")
+  {
+    const double progress_keep = corridor_prior_progress_;
+    const double progress_delta_1s_keep = corridor_prior_progress_delta_1s_;
+    const double progress_delta_window_keep = corridor_prior_progress_delta_window_;
+    const double backward_window_keep = corridor_prior_backward_distance_window_;
+    const double backward_fail_keep = corridor_prior_backward_distance_fail_window_;
+    const V3D axis_keep = corridor_prior_axis_;
+    corridor_prior_update_voxel_map_enabled_ = false;
+    corridor_prior_visual_map_update_enabled_ = false;
+    ROS_ERROR("[CORRIDOR_PRIOR] BACKWARD_LOCAL_REINIT stage=%s progress=%.3f back_fail=%.3f/%.3f axis=[%.3f %.3f %.3f]",
+              stage ? stage : "state",
+              corridor_prior_progress_,
+              corridor_prior_backward_distance_fail_window_,
+              corridor_prior_fail_safe_backward_distance_threshold_,
+              corridor_prior_axis_[0], corridor_prior_axis_[1], corridor_prior_axis_[2]);
+    if (local_reinit_enable_) enterLocalReinitMode("LOCAL_REINIT", "BACKWARD_LOCAL_REINIT");
+    else enterFailSafe("BACKWARD_LOCAL_REINIT", &state);
+    corridor_prior_action_ = "local_reinit";
+    corridor_prior_update_voxel_map_enabled_ = false;
+    corridor_prior_visual_map_update_enabled_ = false;
+    corridor_prior_progress_ = progress_keep;
+    corridor_prior_progress_delta_1s_ = progress_delta_1s_keep;
+    corridor_prior_progress_delta_window_ = progress_delta_window_keep;
+    corridor_prior_backward_distance_window_ = backward_window_keep;
+    corridor_prior_backward_distance_fail_window_ = backward_fail_keep;
+    corridor_prior_axis_ = axis_keep;
+  }
+  else if (corridor_prior_action_ == "log_only")
+  {
+    ROS_WARN_THROTTLE(0.5,
+                      "[CORRIDOR_PRIOR] BACKWARD_LOG_ONLY stage=%s progress=%.3f back_win=%.3f/%.3f",
+                      stage ? stage : "state",
+                      corridor_prior_progress_,
+                      corridor_prior_backward_distance_window_,
+                      corridor_prior_backward_distance_threshold_);
+  }
+}
+
+double LIVMapper::updateAdaptiveSensorNoiseScale(const char *sensor)
+{
+  const std::string sensor_name = sensor ? sensor : "state";
+  const bool is_lio = sensor_name.find("LIO") != std::string::npos || sensor_name.find("LO") != std::string::npos;
+  const bool is_vio = sensor_name.find("VIO") != std::string::npos;
+
+  double scale = 1.0;
+  std::ostringstream reason;
+  bool has_reason = false;
+  auto add_reason = [&](const std::string &item) {
+    if (has_reason) reason << ";";
+    reason << item;
+    has_reason = true;
+  };
+
+  if (deg_guard_enable_ && deg_guard_enable_adaptive_sensor_weighting_)
+  {
+    scale = is_lio ? deg_guard_adaptive_lio_base_noise_scale_ :
+            is_vio ? deg_guard_adaptive_vio_base_noise_scale_ : 1.0;
+    if (scale > 1.0) add_reason("base");
+
+    if (deg_guard_corridor_degenerate_)
+    {
+      scale *= is_lio ? deg_guard_degenerate_lio_noise_scale_ :
+               is_vio ? deg_guard_degenerate_vio_noise_scale_ : 1.0;
+      add_reason("corridor_degenerate");
+    }
+	    if (deg_guard_last_backward_slip_)
+	    {
+	      scale *= is_lio ? deg_guard_degenerate_lio_noise_scale_ :
+	               is_vio ? deg_guard_degenerate_vio_noise_scale_ : 1.0;
+	      add_reason("backward_slip");
+	    }
+	    if (!has_reason) add_reason("nominal");
+	  }
+	  else
+	  {
+	    add_reason("off");
+	  }
+		  if (corridor_prior_enable_ &&
+		      (corridor_prior_action_ == "downweight" || corridor_prior_action_ == "block_map_update"))
+	  {
+	    scale *= is_lio ? corridor_prior_lio_downweight_scale_ :
+	             is_vio ? corridor_prior_vio_downweight_scale_ : 1.0;
+	    add_reason("corridor_backward_prior");
+	  }
+	  scale = std::min(std::max(1.0, scale), deg_guard_adaptive_max_noise_scale_);
+
+  deg_guard_last_weight_reason_ = reason.str();
+  if (is_lio) deg_guard_last_lio_noise_scale_ = scale;
+  if (is_vio) deg_guard_last_vio_noise_scale_ = scale;
+
+  if (deg_guard_enable_)
+  {
+    ROS_INFO_THROTTLE(1.0,
+                      "[DEGEN_GUARD][AdaptiveWeight] sensor=%s external_noise_scale=%.3f reason=%s degenerate=%d backward=%d",
+                      sensor_name.c_str(),
+                      scale,
+                      deg_guard_last_weight_reason_.c_str(),
+                      static_cast<int>(deg_guard_corridor_degenerate_),
+                      static_cast<int>(deg_guard_last_backward_slip_));
+  }
+  return scale;
+}
+
+bool LIVMapper::applyScalarPseudoMeasurement(StatesGroup &state,
+                                             const Eigen::Matrix<double, 1, DIM_STATE> &H,
+                                             double residual,
+                                             double sigma,
+                                             double gain,
+                                             double *correction_norm)
+{
+  if (correction_norm) *correction_norm = 0.0;
+  if (!std::isfinite(residual) || !std::isfinite(sigma) || sigma <= 0.0 || gain <= 0.0) return false;
+  if (!state.cov.allFinite()) return false;
+
+  const double R = sigma * sigma;
+  const double H_norm2 = H.squaredNorm();
+  if (H_norm2 < 1e-12) return false;
+
+  const MD(DIM_STATE, DIM_STATE) P_before = state.cov;
+  const double S = (H * P_before * H.transpose())(0, 0) + R;
+  VD(DIM_STATE) dx = VD(DIM_STATE)::Zero();
+  if (std::isfinite(S) && S > 1e-12)
+  {
+    const VD(DIM_STATE) K = P_before * H.transpose() / S;
+    const VD(DIM_STATE) K_eff = gain * K;
+    dx = -K_eff * residual;
+    if (!dx.allFinite()) return false;
+    state += dx;
+
+    const MD(DIM_STATE, DIM_STATE) I_STATE = MD(DIM_STATE, DIM_STATE)::Identity();
+    const MD(DIM_STATE, DIM_STATE) I_KH = I_STATE - K_eff * H;
+    state.cov = I_KH * P_before * I_KH.transpose() + (K_eff * K_eff.transpose()) * R;
+    state.cov = 0.5 * (state.cov + state.cov.transpose());
+    if (correction_norm) *correction_norm = dx.norm();
+    return dx.allFinite() && state.cov.allFinite();
+  }
+
+  // ponytail: fallback only when covariance math is ill-conditioned; upgrade path is a full batch pseudo update.
+  dx = -gain * residual * H.transpose() / H_norm2;
+  if (!dx.allFinite()) return false;
+  state += dx;
+  for (int i = 0; i < DIM_STATE; ++i)
+  {
+    if (std::fabs(H(0, i)) > 1e-9) state.cov(i, i) = std::min(state.cov(i, i), R);
+  }
+  state.cov = 0.5 * (state.cov + state.cov.transpose());
+  if (correction_norm) *correction_norm = dx.norm();
+  ROS_WARN_THROTTLE(1.0, "[DEGEN_GUARD] scalar pseudo measurement used temporary/simple correction fallback.");
+  return dx.allFinite() && state.cov.allFinite();
+}
+
+void LIVMapper::applyDegeneracyGuardCorrections(const char *stage)
+{
+  if (!deg_guard_enable_) return;
+  if (p_imu && p_imu->imu_need_init) return;
+  if (gravity_align_en && !gravity_align_finished) return;
+
+  deg_guard_last_z_correction_norm_ = 0.0;
+  deg_guard_last_nhc_correction_norm_ = 0.0;
+  deg_guard_last_velocity_body_ = _state.rot_end.transpose() * _state.vel_end;
+
+  if (deg_guard_enable_z_soft_constraint_)
+  {
+    const double z_before = _state.pos_end[2];
+    const double vz_before = _state.vel_end[2];
+    deg_guard_last_z_residual_ = z_before - deg_guard_z_ref_;
+
+    Eigen::Matrix<double, 1, DIM_STATE> H = Eigen::Matrix<double, 1, DIM_STATE>::Zero();
+    double correction_norm = 0.0;
+    H(0, 5) = 1.0;
+    applyScalarPseudoMeasurement(_state, H, deg_guard_last_z_residual_, deg_guard_sigma_z_, deg_guard_z_gain_, &correction_norm);
+    deg_guard_last_z_correction_norm_ += correction_norm;
+
+    H.setZero();
+    H(0, 9) = 1.0;
+    applyScalarPseudoMeasurement(_state, H, _state.vel_end[2], deg_guard_sigma_vz_, deg_guard_z_gain_, &correction_norm);
+    deg_guard_last_z_correction_norm_ += correction_norm;
+
+    ROS_INFO_THROTTLE(1.0,
+                      "[DEGEN_GUARD] z soft constraint stage=%s enabled=1 z=%.6f z_ref=%.6f r_z=%.6f v_z=%.6f corr_norm=%.6f scalar_EKF=1",
+                      stage ? stage : "state",
+                      z_before,
+                      deg_guard_z_ref_,
+                      deg_guard_last_z_residual_,
+                      vz_before,
+                      deg_guard_last_z_correction_norm_);
+  }
+
+  const bool nhc_mode_ok = !deg_guard_nhc_only_in_degenerate_ || deg_guard_corridor_degenerate_;
+  const bool nhc_speed_ok = (_state.vel_end.norm() >= deg_guard_nhc_min_speed_) || deg_guard_corridor_degenerate_;
+  if (deg_guard_enable_nhc_ && nhc_mode_ok && nhc_speed_ok)
+  {
+    const M3D R_world_to_body = _state.rot_end.transpose();
+    V3D v_body = R_world_to_body * _state.vel_end;
+    const double r_vy = v_body[1];
+    const double r_vz = v_body[2];
+    double correction_norm = 0.0;
+
+    Eigen::Matrix<double, 1, DIM_STATE> H = Eigen::Matrix<double, 1, DIM_STATE>::Zero();
+    for (int i = 0; i < 3; ++i) H(0, 7 + i) = R_world_to_body(1, i);
+    applyScalarPseudoMeasurement(_state, H, r_vy, deg_guard_sigma_body_vy_, deg_guard_nhc_gain_, &correction_norm);
+    deg_guard_last_nhc_correction_norm_ += correction_norm;
+
+    const M3D R_world_to_body_after = _state.rot_end.transpose();
+    v_body = R_world_to_body_after * _state.vel_end;
+    H.setZero();
+    for (int i = 0; i < 3; ++i) H(0, 7 + i) = R_world_to_body_after(2, i);
+    applyScalarPseudoMeasurement(_state, H, v_body[2], deg_guard_sigma_body_vz_, deg_guard_nhc_gain_, &correction_norm);
+    deg_guard_last_nhc_correction_norm_ += correction_norm;
+
+    deg_guard_last_velocity_body_ = _state.rot_end.transpose() * _state.vel_end;
+    ROS_INFO_THROTTLE(1.0,
+                      "[DEGEN_GUARD] NHC stage=%s degenerate=%d v_world=[%.4f %.4f %.4f] v_body=[%.4f %.4f %.4f] r_vy=%.6f r_vz=%.6f corr_norm=%.6f",
+                      stage ? stage : "state",
+                      static_cast<int>(deg_guard_corridor_degenerate_),
+                      _state.vel_end[0], _state.vel_end[1], _state.vel_end[2],
+                      deg_guard_last_velocity_body_[0], deg_guard_last_velocity_body_[1], deg_guard_last_velocity_body_[2],
+                      r_vy,
+                      r_vz,
+                      deg_guard_last_nhc_correction_norm_);
+  }
+  else
+  {
+    deg_guard_last_velocity_body_ = _state.rot_end.transpose() * _state.vel_end;
+  }
+}
+
+void LIVMapper::evaluateDegeneracyGuardUpdate(const char *stage,
+                                              const StatesGroup &state_before_update,
+                                              int lio_feature_count,
+                                              int visual_tracked_points)
+{
+  if (!deg_guard_enable_) return;
+
+  deg_guard_last_update_status_ = "accepted";
+  deg_guard_last_reject_reason_.clear();
+  const std::string stage_name = stage ? stage : "state";
+  const StatesGroup state_after_update = _state;
+  const bool is_lio_update = stage_name.find("LIO") != std::string::npos || stage_name.find("LO") != std::string::npos;
+  const bool is_vio_update = stage_name.find("VIO") != std::string::npos;
+  deg_guard_last_sensor_type_ = is_lio_update ? "LIO" : is_vio_update ? "VIO" : stage_name;
+  deg_guard_last_vio_skip_affects_degenerate_ = is_vio_update && deg_guard_use_vio_skip_for_degenerate_;
+
+  const V3D update_translation = state_after_update.pos_end - state_before_update.pos_end;
+  const Eigen::Matrix3d delta_rot = state_before_update.rot_end.transpose() * state_after_update.rot_end;
+  const double yaw_rad = std::atan2(delta_rot(1, 0), delta_rot(0, 0));
+  deg_guard_last_update_translation_norm_ = update_translation.norm();
+  deg_guard_last_update_yaw_deg_ = std::fabs(yaw_rad) * 57.29577951308232;
+  const double current_time = LidarMeasures.last_lio_update_time;
+  double *last_sensor_time = is_vio_update ? &deg_guard_last_vio_time_ : &deg_guard_last_lio_time_;
+  const double fallback_dt = is_vio_update ? deg_guard_camera_dt_ : deg_guard_lidar_dt_;
+  if (last_sensor_time && *last_sensor_time >= 0.0 && current_time > *last_sensor_time)
+  {
+    deg_guard_last_dt_ = current_time - *last_sensor_time;
+  }
+  else
+  {
+    deg_guard_last_dt_ = fallback_dt;
+  }
+  if (last_sensor_time) *last_sensor_time = current_time;
+  deg_guard_last_dt_ = std::max(1e-4, deg_guard_last_dt_);
+  deg_guard_last_update_translation_rate_mps_ = deg_guard_last_update_translation_norm_ / deg_guard_last_dt_;
+  deg_guard_last_update_yaw_rate_degps_ = deg_guard_last_update_yaw_deg_ / deg_guard_last_dt_;
+  deg_guard_last_final_pose_delta_ = deg_guard_last_update_translation_norm_;
+  if (is_vio_update && vio_manager)
+  {
+    deg_guard_last_visual_update_rot_deg_ = vio_manager->last_visual_update_rot_deg;
+    deg_guard_last_visual_update_rot_rate_degps_ = vio_manager->last_visual_update_rot_rate_degps;
+  }
+  else
+  {
+    deg_guard_last_visual_update_rot_deg_ = 0.0;
+    deg_guard_last_visual_update_rot_rate_degps_ = 0.0;
+  }
+  deg_guard_last_lio_feature_count_ = lio_feature_count;
+  deg_guard_last_visual_tracked_points_ = visual_tracked_points;
+  deg_guard_last_velocity_body_ = state_after_update.rot_end.transpose() * state_after_update.vel_end;
+
+  V3D forward_axis = state_after_update.rot_end.col(0);
+  if (!forward_axis.allFinite() || forward_axis.norm() < 1e-9) forward_axis = V3D::UnitX();
+  else forward_axis.normalize();
+  deg_guard_last_forward_progress_ = 0.0;
+  if (deg_guard_last_pos_ready_)
+  {
+    deg_guard_last_forward_progress_ = (state_after_update.pos_end - deg_guard_last_pos_).dot(forward_axis);
+  }
+  deg_guard_last_forward_progress_rate_mps_ = deg_guard_last_forward_progress_ / deg_guard_last_dt_;
+
+  const bool backward_by_step = deg_guard_last_pos_ready_ &&
+                                deg_guard_last_forward_progress_rate_mps_ < -deg_guard_backward_speed_threshold_;
+  // ponytail: v_body_x is diagnostic only here; do not reject/downweight an update only because forward velocity is negative.
+  const bool backward_candidate = deg_guard_enable_backward_guard_ && backward_by_step;
+  deg_guard_backward_count_ = backward_candidate ? (deg_guard_backward_count_ + 1) : 0;
+  deg_guard_last_backward_slip_ = deg_guard_backward_count_ >= deg_guard_backward_consecutive_frames_;
+
+  bool suspicious = false;
+  std::ostringstream reason;
+  bool has_reason = false;
+  auto add_reason = [&](const std::string &item) {
+    if (has_reason) reason << ";";
+    reason << item;
+    has_reason = true;
+  };
+
+  const bool update_finite = state_after_update.pos_end.allFinite() &&
+                             state_after_update.vel_end.allFinite() &&
+                             state_after_update.rot_end.allFinite();
+  if (!update_finite)
+  {
+    suspicious = true;
+    add_reason("nonfinite_update");
+  }
+  if (deg_guard_enable_corridor_detection_)
+  {
+    if (is_lio_update && lio_feature_count >= 0 && lio_feature_count < deg_guard_min_lidar_features_)
+    {
+      suspicious = true;
+      add_reason("low_lidar_features");
+    }
+    if (is_lio_update && voxelmap_manager && voxelmap_manager->isLidarDegenerated())
+    {
+      suspicious = true;
+      add_reason("lidar_constraint_degenerated");
+    }
+    if (is_vio_update && deg_guard_use_vio_skip_for_degenerate_ &&
+        visual_tracked_points >= 0 && visual_tracked_points < deg_guard_min_visual_tracked_points_)
+    {
+      suspicious = true;
+      add_reason("low_visual_points");
+    }
+    if (deg_guard_max_update_translation_rate_mps_ > 0.0 &&
+        deg_guard_last_update_translation_rate_mps_ > deg_guard_max_update_translation_rate_mps_)
+    {
+      suspicious = true;
+      add_reason("large_update_translation_rate");
+    }
+    if (deg_guard_max_update_yaw_rate_degps_ > 0.0 &&
+        deg_guard_last_update_yaw_rate_degps_ > deg_guard_max_update_yaw_rate_degps_)
+    {
+      if (!is_vio_update || deg_guard_use_vio_large_rotation_for_reject_)
+      {
+        suspicious = true;
+        add_reason("large_update_yaw_rate");
+      }
+    }
+  }
+
+  if (suspicious)
+  {
+    deg_guard_degenerate_count_++;
+    deg_guard_recover_count_ = 0;
+  }
+  else
+  {
+    deg_guard_recover_count_++;
+    deg_guard_degenerate_count_ = 0;
+  }
+
+  const std::string reason_text = has_reason ? reason.str() : "normal";
+  if (!deg_guard_corridor_degenerate_ && deg_guard_degenerate_count_ >= deg_guard_min_degenerate_frames_)
+  {
+    deg_guard_corridor_degenerate_ = true;
+    ROS_WARN("[DEGEN_GUARD] enter corridor degeneracy mode reason=%s", reason_text.c_str());
+  }
+  else if (deg_guard_corridor_degenerate_ && deg_guard_recover_count_ >= deg_guard_recover_frames_)
+  {
+    deg_guard_corridor_degenerate_ = false;
+    ROS_WARN("[DEGEN_GUARD] exit corridor degeneracy mode reason=%s", reason_text.c_str());
+  }
+
+  std::string action = "none";
+  if (deg_guard_last_backward_slip_)
+  {
+    action = deg_guard_backward_action_;
+  }
+
+  const bool large_degenerate_update =
+      deg_guard_corridor_degenerate_ &&
+      ((deg_guard_max_degenerate_update_translation_ > 0.0 &&
+        deg_guard_last_update_translation_norm_ > deg_guard_max_degenerate_update_translation_) ||
+       (deg_guard_max_degenerate_update_yaw_deg_ > 0.0 &&
+        deg_guard_last_update_yaw_deg_ > deg_guard_max_degenerate_update_yaw_deg_));
+  if (deg_guard_reject_large_update_in_degenerate_ && large_degenerate_update)
+  {
+    action = "reject_update";
+  }
+  if (!update_finite && deg_guard_reject_nonfinite_update_)
+  {
+    action = "reject_update";
+  }
+  else if (deg_guard_corridor_degenerate_ && action == "none")
+  {
+    action = "downweight_update";
+  }
+
+  deg_guard_last_action_ = action;
+  deg_guard_last_reason_ = reason_text;
+  if (action == "log_only")
+  {
+    deg_guard_last_update_status_ = "accepted";
+  }
+
+  if (deg_guard_last_backward_slip_)
+  {
+    ROS_WARN_THROTTLE(0.5,
+                      "[DEGEN_GUARD] backward slip t=%.6f forward_progress=%.6f v_body_x=%.6f count=%d action=%s degenerate=%d",
+                      LidarMeasures.last_lio_update_time,
+                      deg_guard_last_forward_progress_,
+                      deg_guard_last_velocity_body_[0],
+                      deg_guard_backward_count_,
+                      action.c_str(),
+                      static_cast<int>(deg_guard_corridor_degenerate_));
+  }
+
+  if (action == "reject_update")
+  {
+    deg_guard_last_update_status_ = "rejected";
+    deg_guard_last_reject_reason_ = reason_text;
+    _state = state_before_update;
+    ROS_WARN_THROTTLE(0.5,
+                      "[DEGEN_GUARD] reject %s update: dtrans=%.4f m dyaw=%.4f deg reason=%s",
+                      stage_name.c_str(),
+                      deg_guard_last_update_translation_norm_,
+                      deg_guard_last_update_yaw_deg_,
+                      reason_text.c_str());
+  }
+  else if (action == "downweight_update")
+  {
+    deg_guard_last_update_status_ = "downweighted";
+    const double noise_scale = is_lio_update ? deg_guard_degenerate_lio_noise_scale_ : deg_guard_degenerate_vio_noise_scale_;
+    const double update_scale = 1.0 / std::max(1.0, noise_scale);
+    blendDegeneracyGuardUpdate(state_before_update, state_after_update, update_scale);
+    ROS_WARN_THROTTLE(0.5,
+                      "[DEGEN_GUARD] downweight %s update: scale=%.3f dtrans=%.4f m dyaw=%.4f deg reason=%s",
+                      stage_name.c_str(),
+                      update_scale,
+                      deg_guard_last_update_translation_norm_,
+                      deg_guard_last_update_yaw_deg_,
+                      reason_text.c_str());
+  }
+  else if (action == "log_only")
+  {
+    ROS_WARN_THROTTLE(0.5,
+                      "[DEGEN_GUARD] log-only %s update: dtrans=%.4f m dyaw=%.4f deg reason=%s",
+                      stage_name.c_str(),
+                      deg_guard_last_update_translation_norm_,
+                      deg_guard_last_update_yaw_deg_,
+                      reason_text.c_str());
+  }
+
+  deg_guard_last_pos_ = _state.pos_end;
+  deg_guard_last_pos_ready_ = _state.pos_end.allFinite();
+  deg_guard_last_velocity_body_ = _state.rot_end.transpose() * _state.vel_end;
+}
+
+void LIVMapper::writeDegeneracyGuardLog(const char *stage)
+{
+		  if (diagnostics_level_ != "verbose" ||
+		      !(deg_guard_enable_ || safety_guard_enable_ || corridor_prior_enable_) ||
+		      !degeneracy_guard_log_.is_open()) return;
+  const double now = LidarMeasures.last_lio_update_time;
+  local_elapsed_sec_ = (_first_lidar_time > 0.0 && now >= _first_lidar_time) ? now - _first_lidar_time : 0.0;
+  bag_elapsed_sec_ = bag_start_offset_ + local_elapsed_sec_;
+  if (debug_fixed_degraded_intervals_enable_ && fixed_degraded_trigger_mode_ == "manual_time")
+  {
+    const bool in_first =
+        bag_elapsed_sec_ >= fixed_degraded_first_start_sec_ &&
+        bag_elapsed_sec_ <= fixed_degraded_first_end_sec_;
+    const bool in_second =
+        bag_elapsed_sec_ >= fixed_degraded_second_start_sec_ &&
+        bag_elapsed_sec_ <= fixed_degraded_second_end_sec_;
+    in_fixed_degraded_window_ = in_first || in_second;
+    fixed_degraded_reason_ = in_first ? "debug_fixed_degraded_window_1" :
+                       in_second ? "debug_fixed_degraded_window_2" : "not_in_window";
+  }
+  else
+  {
+    in_fixed_degraded_window_ = false;
+    fixed_degraded_reason_ = "disabled";
+  }
+	  const V3D v_body = _state.rot_end.transpose() * _state.vel_end;
+	  const std::string mode = update_decision_ready_ ?
+	                           systemModeName(current_decision_.mode) :
+	                           (safety_fail_safe_mode_ ? "DEGRADED_HOLD" :
+	                            (deg_guard_corridor_degenerate_ ? "DEGRADED_BOOTSTRAP" : "NORMAL"));
+	  const UwbUpdateSummary empty_uwb_summary;
+	  const UwbUpdateSummary &uwb_summary = uwb_manager ? uwb_manager->lastUpdateSummary() : empty_uwb_summary;
+	  degeneracy_guard_log_ << std::fixed << std::setprecision(9)
+	                        << LidarMeasures.last_lio_update_time << ","
+	                        << deterministic_frame_id_ << ","
+	                        << (stage ? stage : "state") << ","
+	                        << deg_guard_last_sensor_type_ << ","
+		                        << mode << ","
+		                        << local_mode_ << ","
+		                        << static_cast<int>(deterministic_mode_) << ","
+		                        << deg_guard_last_dt_ << ","
+		                        << local_elapsed_sec_ << ","
+		                        << bag_start_offset_ << ","
+		                        << bag_elapsed_sec_ << ","
+		                        << static_cast<int>(in_fixed_degraded_window_) << ","
+		                        << fixed_degraded_reason_ << ","
+		                        << static_cast<int>(deterministic_last_lio_update_) << ","
+	                        << static_cast<int>(deterministic_last_vio_update_) << ","
+	                        << static_cast<int>(deterministic_last_uwb_update_) << ","
+	                        << deterministic_last_uwb_anchor_ids_ << ","
+	                        << uwb_summary.xy_correction_before_step << ","
+	                        << uwb_summary.z_correction_before_clamp << ","
+	                        << uwb_summary.z_correction_after_clamp << ","
+	                        << static_cast<int>(local_map_cleared_last_) << ","
+	                        << static_cast<int>(visual_map_cleared_last_) << ","
+	                        << static_cast<int>(tracker_reset_last_) << ","
+	                        << lio_bootstrap_frames_ << ","
+	                        << vio_bootstrap_frames_ << ","
+	                        << static_cast<int>(local_vio_unavailable_) << ","
+	                        << static_cast<int>(local_lio_weak_) << ","
+	                        << _state.pos_end[0] << "," << _state.pos_end[1] << "," << _state.pos_end[2] << ","
+                        << _state.vel_end[0] << "," << _state.vel_end[1] << "," << _state.vel_end[2] << ","
+                        << v_body[0] << "," << v_body[1] << "," << v_body[2] << ","
+                        << safety_last_speed_ << ","
+                        << safety_last_quat_norm_ << ","
+	                        << safety_last_frame_translation_ << ","
+	                        << safety_last_frame_rotation_deg_ << ","
+	                        << safety_backward_distance_in_window_ << ","
+	                        << corridor_prior_axis_[0] << "," << corridor_prior_axis_[1] << "," << corridor_prior_axis_[2] << ","
+	                        << corridor_prior_progress_ << ","
+	                        << corridor_prior_progress_delta_1s_ << ","
+	                        << corridor_prior_progress_delta_window_ << ","
+	                        << corridor_prior_backward_distance_window_ << ","
+	                        << corridor_prior_backward_distance_fail_window_ << ","
+	                        << corridor_prior_action_ << ","
+	                        << static_cast<int>(corridor_prior_update_voxel_map_enabled_) << ","
+	                        << static_cast<int>(corridor_prior_visual_map_update_enabled_) << ","
+	                        << _state.pos_end[2] << ","
+                        << deg_guard_last_z_residual_ << ","
+                        << deg_guard_last_forward_progress_ << ","
+                        << static_cast<int>(deg_guard_last_backward_slip_) << ","
+                        << deg_guard_last_lio_feature_count_ << ","
+                        << deg_guard_last_visual_tracked_points_ << ","
+                        << deg_guard_last_update_translation_norm_ << ","
+                        << deg_guard_last_update_translation_rate_mps_ << ","
+                        << deg_guard_last_update_yaw_deg_ << ","
+                        << deg_guard_last_update_yaw_rate_degps_ << ","
+                        << deg_guard_last_visual_update_rot_deg_ << ","
+                        << deg_guard_last_visual_update_rot_rate_degps_ << ","
+                        << deg_guard_last_z_correction_norm_ << ","
+                        << deg_guard_last_nhc_correction_norm_ << ","
+                        << deg_guard_last_lio_noise_scale_ << ","
+                        << deg_guard_last_vio_noise_scale_ << ","
+                        << deg_guard_last_weight_reason_ << ","
+                        << static_cast<int>(deg_guard_last_lio_update_executed_) << ","
+                        << static_cast<int>(deg_guard_last_lio_downweighted_) << ","
+                        << static_cast<int>(deg_guard_last_lio_voxel_map_updated_) << ","
+                        << deg_guard_last_lio_voxel_map_skip_reason_ << ","
+                        << static_cast<int>(deg_guard_last_vio_skip_affects_degenerate_) << ","
+                        << deg_guard_last_update_status_ << ","
+                        << deg_guard_last_reject_reason_ << ","
+                        << deg_guard_last_action_ << ","
+                        << (safety_fail_safe_mode_ ? safety_last_reason_ : deg_guard_last_reason_) << ","
+                        << deg_guard_last_final_pose_delta_ << "\n";
+  degeneracy_guard_log_.flush();
+}
+
+bool LIVMapper::isStateFiniteForSafety(const StatesGroup &state, const char *stage, std::string *reason) const
+{
+  if (!safety_guard_enable_) return true;
+  auto setReason = [&](const std::string &why) {
+    if (reason != nullptr) *reason = std::string(stage ? stage : "state") + ":" + why;
+  };
+
+  if (!state.pos_end.allFinite())
+  {
+    setReason("nonfinite_position");
+    return false;
+  }
+  if (!state.vel_end.allFinite())
+  {
+    setReason("nonfinite_velocity");
+    return false;
+  }
+  if (!state.rot_end.allFinite())
+  {
+    setReason("nonfinite_rotation");
+    return false;
+  }
+  if (!state.bias_g.allFinite() || !state.bias_a.allFinite())
+  {
+    setReason("nonfinite_imu_bias");
+    return false;
+  }
+  if (!state.gravity.allFinite())
+  {
+    setReason("nonfinite_gravity");
+    return false;
+  }
+  if (!std::isfinite(state.inv_expo_time))
+  {
+    setReason("nonfinite_inv_exposure");
+    return false;
+  }
+  if (state.cov.rows() != DIM_STATE || state.cov.cols() != DIM_STATE || !state.cov.allFinite())
+  {
+    setReason("nonfinite_covariance");
+    return false;
+  }
+  const Eigen::Quaterniond q(state.rot_end);
+  const double q_norm = q.norm();
+  if (!std::isfinite(q_norm) || q_norm < 1e-6)
+  {
+    setReason("invalid_quaternion_norm");
+    return false;
+  }
+  return true;
+}
+
+bool LIVMapper::validateStateForSafety(const char *stage,
+                                       const StatesGroup &state_before,
+                                       const StatesGroup &state_after,
+                                       bool update_backward_window,
+                                       bool allow_recover)
+{
+  if (!safety_guard_enable_) return true;
+
+  std::string reason;
+  if (!isStateFiniteForSafety(state_after, stage, &reason))
+  {
+    enterFailSafe(reason, &state_before);
+    return false;
+  }
+
+  safety_last_speed_ = state_after.vel_end.norm();
+  safety_last_quat_norm_ = Eigen::Quaterniond(state_after.rot_end).norm();
+  safety_last_frame_translation_ = (state_after.pos_end - state_before.pos_end).norm();
+  safety_last_frame_rotation_deg_ = 0.0;
+  if (state_before.rot_end.allFinite())
+  {
+    const Eigen::Matrix3d delta_rot = state_before.rot_end.transpose() * state_after.rot_end;
+    safety_last_frame_rotation_deg_ = Eigen::AngleAxisd(delta_rot).angle() * 57.29577951308232;
+  }
+
+  // ponytail: startup gravity alignment is a legitimate one-shot pose jump; arm motion sanity after one reliable state.
+  if (!safety_reliable_state_ready_)
+  {
+    safety_last_reason_ = "arming";
+    return true;
+  }
+
+  // ponytail: local/bootstrap rebuilds intentionally change map support; keep the crash guard, skip motion sanity.
+  if (isBootstrapMode())
+  {
+    safety_backward_window_.clear();
+    safety_backward_distance_in_window_ = 0.0;
+    if (allow_recover) maybeRecoverFailSafe();
+    safety_last_reason_ = safety_fail_safe_mode_ ? safety_last_reason_ : "bootstrap_relaxed";
+    return true;
+  }
+
+  const double now = LidarMeasures.last_lio_update_time;
+  if (update_backward_window && std::isfinite(now))
+  {
+    Eigen::Vector3d forward_axis = state_after.rot_end.col(0);
+    if (forward_axis.allFinite() && forward_axis.norm() > 1e-6)
+    {
+      forward_axis.normalize();
+      const double forward_progress = (state_after.pos_end - state_before.pos_end).dot(forward_axis);
+      const double backward_step = std::max(0.0, -forward_progress);
+      if (backward_step > 0.0) safety_backward_window_.push_back({now, backward_step});
+    }
+    while (!safety_backward_window_.empty() &&
+           now - safety_backward_window_.front().first > safety_backward_time_window_)
+    {
+      safety_backward_window_.pop_front();
+    }
+    safety_backward_distance_in_window_ = 0.0;
+    for (const auto &sample : safety_backward_window_)
+    {
+      safety_backward_distance_in_window_ += sample.second;
+    }
+  }
+
+  if (safety_max_speed_ > 0.0 && safety_last_speed_ > safety_max_speed_)
+  {
+    enterFailSafe("speed_over_limit", &state_before);
+    return false;
+  }
+  if (safety_max_frame_translation_ > 0.0 &&
+      safety_last_frame_translation_ > safety_max_frame_translation_)
+  {
+    enterFailSafe("frame_translation_over_limit", &state_before);
+    return false;
+  }
+  if (safety_max_frame_rotation_deg_ > 0.0 &&
+      safety_last_frame_rotation_deg_ > safety_max_frame_rotation_deg_)
+  {
+    enterFailSafe("frame_rotation_over_limit", &state_before);
+    return false;
+  }
+  if (safety_backward_distance_threshold_ > 0.0 &&
+      safety_backward_distance_in_window_ > safety_backward_distance_threshold_)
+  {
+    const std::string backward_reason = "backward_window_over_limit";
+    if (safety_backward_action_ == "reject_update" ||
+        safety_backward_action_ == "fail_safe_or_downweight")
+    {
+      enterFailSafe(backward_reason, &state_before);
+      return false;
+    }
+    if (safety_backward_action_ == "downweight_update")
+    {
+      deg_guard_last_update_status_ = "downweighted";
+      deg_guard_last_reject_reason_ = backward_reason;
+      deg_guard_last_action_ = safety_backward_action_;
+      deg_guard_last_reason_ = backward_reason;
+    }
+  }
+
+  if (allow_recover) maybeRecoverFailSafe();
+  safety_last_reason_ = safety_fail_safe_mode_ ? safety_last_reason_ : "normal";
+  return true;
+}
+
+void LIVMapper::enterFailSafe(const std::string &reason, const StatesGroup *fallback_state)
+{
+  if (!safety_guard_enable_) return;
+
+  const bool was_fail_safe = safety_fail_safe_mode_;
+  safety_fail_safe_mode_ = true;
+  safety_fail_safe_stable_frames_ = 0;
+  safety_last_reason_ = reason;
+  deg_guard_last_update_status_ = "rejected";
+  deg_guard_last_reject_reason_ = reason;
+  deg_guard_last_action_ = "fail_safe";
+  deg_guard_last_reason_ = reason;
+  deg_guard_last_lio_update_executed_ = false;
+  deg_guard_last_lio_voxel_map_updated_ = false;
+  deg_guard_last_lio_voxel_map_skip_reason_ = "DEGRADED_HOLD";
+
+  if (safety_reliable_state_ready_)
+  {
+    _state = safety_reliable_state_;
+  }
+  else if (fallback_state != nullptr && isStateFiniteForSafety(*fallback_state, "fail_safe_fallback", nullptr))
+  {
+    _state = *fallback_state;
+  }
+  else
+  {
+    _state = StatesGroup();
+  }
+  _state.vel_end.setZero();
+  state_propagat = _state;
+  if (voxelmap_manager) voxelmap_manager->state_ = _state;
+  if (vio_manager) vio_manager->updateFrameState(_state);
+
+  clearSafetyLocalCaches();
+
+  if (!was_fail_safe)
+  {
+    ROS_ERROR("[FATAL_STATE] Enter FAIL_SAFE: reason=%s, hold_pos=(%.3f %.3f %.3f), "
+              "speed=%.3f, frame_trans=%.3f, frame_rot=%.3f, backward_window=%.3f.",
+              reason.c_str(),
+              _state.pos_end[0], _state.pos_end[1], _state.pos_end[2],
+              safety_last_speed_,
+              safety_last_frame_translation_,
+              safety_last_frame_rotation_deg_,
+              safety_backward_distance_in_window_);
+  }
+}
+
+void LIVMapper::maybeRecoverFailSafe()
+{
+  if (!safety_guard_enable_ || !safety_fail_safe_mode_) return;
+  std::string reason;
+  const bool stable = isStateFiniteForSafety(_state, "fail_safe_recover", &reason) &&
+                      (safety_max_speed_ <= 0.0 || _state.vel_end.norm() <= 0.5 * safety_max_speed_);
+  safety_fail_safe_stable_frames_ = stable ? (safety_fail_safe_stable_frames_ + 1) : 0;
+	  if (safety_fail_safe_stable_frames_ >= safety_fail_safe_recover_frames_)
+	  {
+	    safety_fail_safe_mode_ = false;
+	    safety_last_reason_ = "recover_local_reinit";
+	    safety_backward_window_.clear();
+	    safety_backward_distance_in_window_ = 0.0;
+	    const StatesGroup recovered_state = _state;
+	    if (safety_reliable_state_ready_) _state = safety_reliable_state_;
+	    else safety_reliable_state_ = recovered_state;
+	    safety_reliable_state_ready_ = true;
+	    ROS_WARN("[FATAL_STATE] Exit FAIL_SAFE after %d stable frames: last_good_pose=[%.3f %.3f %.3f] rejected_pose=[%.3f %.3f %.3f] recovered_pose=[%.3f %.3f %.3f] mode_after_recovery=LOCAL_REINIT",
+	             safety_fail_safe_stable_frames_,
+	             safety_reliable_state_.pos_end.x(), safety_reliable_state_.pos_end.y(), safety_reliable_state_.pos_end.z(),
+	             recovered_state.pos_end.x(), recovered_state.pos_end.y(), recovered_state.pos_end.z(),
+	             _state.pos_end.x(), _state.pos_end.y(), _state.pos_end.z());
+	    safety_fail_safe_stable_frames_ = 0;
+	    if (local_reinit_enable_) enterLocalReinitMode("LOCAL_REINIT", "safety_recover_local_reinit");
+	  }
+	}
+
+void LIVMapper::recordReliableStateForSafety(const char *stage)
+{
+  if (!safety_guard_enable_ || safety_fail_safe_mode_) return;
+  std::string reason;
+  if (!isStateFiniteForSafety(_state, stage, &reason)) return;
+  const double speed = _state.vel_end.norm();
+  if (safety_max_speed_ > 0.0 && speed > safety_max_speed_) return;
+  safety_reliable_state_ = _state;
+  safety_reliable_state_ready_ = true;
+  safety_last_speed_ = speed;
+  safety_last_quat_norm_ = Eigen::Quaterniond(_state.rot_end).norm();
+}
+
+void LIVMapper::clearSafetyLocalCaches()
+{
+  _pv_list.clear();
+  if (voxelmap_manager)
+  {
+    voxelmap_manager->pv_list_.clear();
+    voxelmap_manager->ptpl_list_.clear();
+    voxelmap_manager->cross_mat_list_.clear();
+    voxelmap_manager->body_cov_list_.clear();
+  }
+  if (vio_manager && vio_manager->visual_submap != nullptr)
+  {
+    vio_manager->visual_submap->reset();
+  }
+}
+
+void LIVMapper::clearLocalMapsForReinit(const std::string &reason)
+{
+  local_map_cleared_last_ = false;
+  visual_map_cleared_last_ = false;
+  tracker_reset_last_ = false;
+
+  std::unordered_set<VoxelOctoTree *> deleted_voxels;
+  auto deleteVoxelMap = [&](std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &map) {
+    for (auto &kv : map)
+    {
+      if (kv.second != nullptr && deleted_voxels.insert(kv.second).second) delete kv.second;
+    }
+    map.clear();
+  };
+
+  deleteVoxelMap(voxel_map);
+  if (voxelmap_manager)
+  {
+    deleteVoxelMap(voxelmap_manager->voxel_map_);
+    deleteVoxelMap(voxelmap_manager->long_term_visual_map_);
+    voxelmap_manager->visual_observed_voxels_.clear();
+    voxelmap_manager->pv_list_.clear();
+    voxelmap_manager->ptpl_list_.clear();
+    voxelmap_manager->cross_mat_list_.clear();
+    voxelmap_manager->body_cov_list_.clear();
+    voxelmap_manager->lidar_degenerated_ = false;
+    voxelmap_manager->lidar_constraint_ratio_ = 0.0;
+  }
+  _pv_list.clear();
+  lidar_map_inited = false;
+  lio_frames_since_voxel_map_update_ = 0;
+  lio_last_voxel_map_update_time_ = -1.0;
+  local_map_cleared_last_ = true;
+
+  if (vio_manager)
+  {
+    if (vio_manager->visual_submap != nullptr) vio_manager->visual_submap->reset();
+    for (auto &kv : vio_manager->feat_map) delete kv.second;
+    vio_manager->feat_map.clear();
+    vio_manager->sub_feat_map.clear();
+    vio_manager->resetGrid();
+    vio_manager->total_points = 0;
+    visual_map_cleared_last_ = true;
+    tracker_reset_last_ = true;
+  }
+
+  _state.cov.block<3, 3>(3, 3) += M3D::Identity() * 0.25;
+  _state.cov.block<3, 3>(6, 6) += M3D::Identity() * 0.25;
+  _state.cov = 0.5 * (_state.cov + _state.cov.transpose());
+  state_propagat = _state;
+  if (voxelmap_manager) voxelmap_manager->state_ = _state;
+  if (vio_manager) vio_manager->updateFrameState(_state);
+
+  ROS_WARN("[LOCAL_REINIT] Cleared local maps: reason=%s mode=%s keep_pose=[%.3f %.3f %.3f]",
+           reason.c_str(), local_mode_.c_str(),
+           _state.pos_end.x(), _state.pos_end.y(), _state.pos_end.z());
+}
+
+void LIVMapper::enterLocalReinitMode(const std::string &mode, const std::string &reason)
+{
+  if (!local_reinit_enable_) return;
+  if (local_mode_ == mode && local_reinit_reason_ == reason) return;
+  local_mode_ = mode;
+  local_reinit_reason_ = reason;
+  local_mode_start_time_ = LidarMeasures.last_lio_update_time;
+  lio_bootstrap_frames_ = 0;
+  vio_bootstrap_frames_ = 0;
+  local_map_cleared_last_ = false;
+  visual_map_cleared_last_ = false;
+  tracker_reset_last_ = false;
+  if (mode == "DEGRADED_HOLD")
+  {
+    degraded_hold_entry_pos_ = _state.pos_end;
+    degraded_hold_entry_state_ = _state;
+    degraded_hold_entry_state_.vel_end.setZero();
+    degraded_hold_entry_state_ready_ = true;
+    degraded_hold_entry_rpy_ = RotMtoEuler(_state.rot_end);
+    degraded_hold_last_reject_reason_ = "none";
+    _state = degraded_hold_entry_state_;
+    state_propagat = _state;
+    if (voxelmap_manager) voxelmap_manager->state_ = _state;
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    if (safety_guard_enable_)
+    {
+      safety_reliable_state_ = _state;
+      safety_reliable_state_ready_ = true;
+      safety_backward_window_.clear();
+      safety_backward_distance_in_window_ = 0.0;
+      safety_last_speed_ = 0.0;
+      safety_last_frame_translation_ = 0.0;
+      safety_last_frame_rotation_deg_ = 0.0;
+    }
+    resetCorridorMotionPrior();
+    ROS_WARN("[LOCAL_REINIT] Enter DEGRADED_HOLD: reason=%s entry_pose=[%.3f %.3f %.3f] entry_rpy_deg=[%.3f %.3f %.3f]",
+             reason.c_str(),
+             degraded_hold_entry_pos_.x(), degraded_hold_entry_pos_.y(), degraded_hold_entry_pos_.z(),
+             degraded_hold_entry_rpy_.x() * 57.29577951308232,
+             degraded_hold_entry_rpy_.y() * 57.29577951308232,
+             degraded_hold_entry_rpy_.z() * 57.29577951308232);
+    return;
+  }
+
+  if (mode == "DEGRADED_BOOTSTRAP" || mode == "LOCAL_REINIT" || mode == "RELOCALIZE")
+  {
+    if (mode == "LOCAL_REINIT" &&
+        reason.find("BACKWARD") != std::string::npos &&
+        safety_reliable_state_ready_)
+    {
+      _state = safety_reliable_state_;
+    }
+    _state.vel_end.setZero();
+    resetCorridorMotionPrior();
+    clearLocalMapsForReinit(reason);
+    _state.vel_end.setZero();
+    state_propagat = _state;
+    if (voxelmap_manager) voxelmap_manager->state_ = _state;
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    if (safety_guard_enable_)
+    {
+      safety_reliable_state_ = _state;
+      safety_reliable_state_ready_ = true;
+      safety_backward_window_.clear();
+      safety_backward_distance_in_window_ = 0.0;
+      safety_last_speed_ = 0.0;
+      safety_last_frame_translation_ = 0.0;
+      safety_last_frame_rotation_deg_ = 0.0;
+      safety_last_reason_ = "local_reinit";
+    }
+  }
+  ROS_WARN("[LOCAL_REINIT] Enter %s: reason=%s", mode.c_str(), reason.c_str());
+}
+
+bool LIVMapper::isDegradedHoldMode() const
+{
+  return local_reinit_enable_ && local_mode_ == "DEGRADED_HOLD";
+}
+
+bool LIVMapper::isBootstrapMode() const
+{
+  return local_reinit_enable_ &&
+         (local_mode_ == "DEGRADED_BOOTSTRAP" ||
+          local_mode_ == "LOCAL_REINIT" ||
+          local_mode_ == "RELOCALIZE");
+}
+
+void LIVMapper::applyDegradedHoldConstraint(const char *stage, bool check_reject)
+{
+  if (!isDegradedHoldMode() || !degraded_hold_entry_state_ready_) return;
+
+  const V3D rpy = RotMtoEuler(_state.rot_end);
+  const double roll_err_deg = std::fabs(rpy.x() - degraded_hold_entry_rpy_.x()) * 57.29577951308232;
+  const double pitch_err_deg = std::fabs(rpy.y() - degraded_hold_entry_rpy_.y()) * 57.29577951308232;
+  const double speed = _state.vel_end.norm();
+  degraded_hold_last_reject_reason_ = "none";
+  bool reject = false;
+  std::string reject_reason;
+  if (check_reject && degraded_hold_attitude_reject_deg_ > 0.0 &&
+      (roll_err_deg > degraded_hold_attitude_reject_deg_ || pitch_err_deg > degraded_hold_attitude_reject_deg_))
+  {
+    reject = true;
+    reject_reason = "DEGRADED_ATTITUDE_REJECT";
+  }
+  if (check_reject && degraded_hold_speed_reject_mps_ > 0.0 && speed > degraded_hold_speed_reject_mps_)
+  {
+    reject = true;
+    reject_reason = reject_reason.empty() ? "DEGRADED_SPEED_REJECT" : reject_reason + ";DEGRADED_SPEED_REJECT";
+  }
+
+  if (reject)
+  {
+    degraded_hold_last_reject_reason_ = reject_reason;
+    ROS_WARN_THROTTLE(0.5,
+                      "[LOCAL_REINIT] %s stage=%s roll_err=%.3f pitch_err=%.3f speed=%.3f entry_pose=[%.3f %.3f %.3f]",
+                      reject_reason.c_str(),
+                      stage ? stage : "state",
+                      roll_err_deg,
+                      pitch_err_deg,
+                      speed,
+                      degraded_hold_entry_state_.pos_end.x(),
+                      degraded_hold_entry_state_.pos_end.y(),
+                      degraded_hold_entry_state_.pos_end.z());
+  }
+
+  _state.pos_end = degraded_hold_entry_state_.pos_end;
+  _state.rot_end = degraded_hold_entry_state_.rot_end;
+  _state.vel_end.setZero();
+  _state.cov.block<3, 3>(3, 3) =
+      0.5 * (_state.cov.block<3, 3>(3, 3) + degraded_hold_entry_state_.cov.block<3, 3>(3, 3));
+  for (int i = 7; i < 10; ++i) _state.cov(i, i) = std::min(_state.cov(i, i), 0.01);
+  _state.cov = 0.5 * (_state.cov + _state.cov.transpose());
+  state_propagat = _state;
+  if (voxelmap_manager) voxelmap_manager->state_ = _state;
+  if (vio_manager) vio_manager->updateFrameState(_state);
+}
+
+bool LIVMapper::localModeBlocksMapUpdate() const
+{
+  if (!local_reinit_enable_) return false;
+  if (local_mode_ == "DEGRADED_HOLD") return disable_voxel_map_in_degraded_hold_;
+  return local_mode_ == "RELOCALIZE";
+}
+
+bool LIVMapper::localModeBlocksVisualMapUpdate() const
+{
+  if (!local_reinit_enable_) return false;
+  if (local_mode_ == "DEGRADED_HOLD") return disable_visual_map_in_degraded_hold_;
+  return local_mode_ == "RELOCALIZE";
+}
+
+bool LIVMapper::localModeSkipsVisualEkf() const
+{
+  if (!local_reinit_enable_) return false;
+  if (local_mode_ == "DEGRADED_HOLD") return true;
+  if (local_mode_ == "DEGRADED_BOOTSTRAP") return degraded_bootstrap_enable_;
+  return local_mode_ == "LOCAL_REINIT" || local_mode_ == "RELOCALIZE";
+}
+
+void LIVMapper::updateLocalModeAtFrameStart()
+{
+  local_map_cleared_last_ = false;
+  visual_map_cleared_last_ = false;
+  tracker_reset_last_ = false;
+  deterministic_last_lio_update_ = false;
+  deterministic_last_vio_update_ = false;
+  deterministic_last_uwb_update_ = false;
+  deterministic_last_uwb_anchor_ids_.clear();
+
+  const double now = LidarMeasures.last_lio_update_time;
+  local_elapsed_sec_ = (_first_lidar_time > 0.0 && now >= _first_lidar_time) ? now - _first_lidar_time : 0.0;
+  bag_elapsed_sec_ = bag_start_offset_ + local_elapsed_sec_;
+  in_fixed_degraded_window_ = false;
+  fixed_degraded_reason_ = debug_fixed_degraded_intervals_enable_ ? "not_in_window" : "disabled";
+
+  if (!local_reinit_enable_)
+  {
+    local_mode_ = "NORMAL";
+    local_reinit_reason_ = "disabled";
+    return;
+  }
+
+  if (debug_fixed_degraded_intervals_enable_)
+  {
+    const bool in_first =
+        bag_elapsed_sec_ >= fixed_degraded_first_start_sec_ &&
+        bag_elapsed_sec_ <= fixed_degraded_first_end_sec_;
+    const bool in_second =
+        bag_elapsed_sec_ >= fixed_degraded_second_start_sec_ &&
+        bag_elapsed_sec_ <= fixed_degraded_second_end_sec_;
+    in_fixed_degraded_window_ = in_first || in_second;
+    fixed_degraded_reason_ = in_first ? "debug_fixed_degraded_window_1" :
+                       in_second ? "debug_fixed_degraded_window_2" : "not_in_window";
+
+    if (in_fixed_degraded_window_)
+    {
+      if (local_mode_ != "DEGRADED_HOLD") enterLocalReinitMode("DEGRADED_HOLD", fixed_degraded_reason_);
+    }
+    else if (local_mode_ == "DEGRADED_HOLD")
+    {
+      if (degraded_bootstrap_enable_)
+      {
+        enterLocalReinitMode("DEGRADED_BOOTSTRAP", "exit_degraded_hold");
+      }
+      else
+      {
+        ROS_WARN("[LOCAL_REINIT] Exit DEGRADED_HOLD -> NORMAL: degraded_bootstrap disabled.");
+        local_mode_ = "NORMAL";
+        local_reinit_reason_ = "exit_degraded_hold_no_post_reinit";
+        local_mode_start_time_ = now;
+      }
+    }
+  }
+  else if (local_mode_ == "DEGRADED_HOLD" || local_mode_ == "DEGRADED_BOOTSTRAP")
+  {
+    local_mode_ = "NORMAL";
+    local_reinit_reason_ = "debug_fixed_degraded_disabled";
+    local_mode_start_time_ = now;
+  }
+
+  if (local_mode_ == "DEGRADED_BOOTSTRAP" && !degraded_bootstrap_enable_)
+  {
+    local_mode_ = "NORMAL";
+    local_reinit_reason_ = "degraded_bootstrap_disabled";
+    local_mode_start_time_ = now;
+  }
+
+  if ((local_mode_ == "DEGRADED_BOOTSTRAP" || local_mode_ == "LOCAL_REINIT" || local_mode_ == "RELOCALIZE") &&
+      local_mode_start_time_ >= 0.0)
+  {
+    const double mode_elapsed = now - local_mode_start_time_;
+    const bool enough_time = local_post_reinit_duration_sec_ <= 0.0 || mode_elapsed >= local_post_reinit_duration_sec_;
+    const bool enough_lio = lio_bootstrap_frames_ >= local_post_reinit_lio_frames_;
+    const bool enough_vio = vio_bootstrap_frames_ >= local_post_reinit_vio_frames_ || !img_en;
+    if (enough_time && enough_lio && enough_vio)
+    {
+      ROS_WARN("[LOCAL_REINIT] Exit %s -> NORMAL: elapsed=%.3f lio_bootstrap=%d vio_bootstrap=%d",
+               local_mode_.c_str(), mode_elapsed, lio_bootstrap_frames_, vio_bootstrap_frames_);
+      local_mode_ = "NORMAL";
+      local_reinit_reason_ = "stable_bootstrap";
+      local_mode_start_time_ = now;
+      local_vio_low_start_time_ = -1.0;
+      local_lio_weak_start_time_ = -1.0;
+      local_vio_unavailable_ = false;
+      local_lio_weak_ = false;
+    }
+  }
+}
+
+const char *LIVMapper::systemModeName(SystemMode mode)
+{
+  switch (mode)
+  {
+    case SystemMode::NORMAL: return "NORMAL";
+    case SystemMode::DEGRADED_HOLD: return "DEGRADED_HOLD";
+    case SystemMode::DEGRADED_BOOTSTRAP: return "DEGRADED_BOOTSTRAP";
+    case SystemMode::LOCAL_REINIT: return "LOCAL_REINIT";
+  }
+  return "NORMAL";
+}
+
+const char *LIVMapper::rejectReasonName(RejectReason reason)
+{
+  switch (reason)
+  {
+    case RejectReason::NONE: return "NONE";
+    case RejectReason::SAFETY: return "SAFETY";
+    case RejectReason::DEGRADED_HOLD: return "DEGRADED_HOLD";
+    case RejectReason::BACKWARD_SLIP: return "BACKWARD_SLIP";
+    case RejectReason::LOCAL_REINIT: return "LOCAL_REINIT";
+    case RejectReason::BOOTSTRAP: return "BOOTSTRAP";
+    case RejectReason::SMALL_MOTION: return "SMALL_MOTION";
+    case RejectReason::NO_POINTS: return "NO_POINTS";
+    case RejectReason::UNKNOWN: return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+LIVMapper::ObservationQuality LIVMapper::evaluateObservationQuality() const
+{
+  ObservationQuality quality;
+  quality.speed = _state.vel_end.norm();
+  const V3D rpy = RotMtoEuler(_state.rot_end);
+  quality.roll_deg = rpy.x() * 57.29577951308232;
+  quality.pitch_deg = rpy.y() * 57.29577951308232;
+  quality.speed_abnormal = safety_max_speed_ > 0.0 && quality.speed > safety_max_speed_;
+  quality.attitude_abnormal =
+      degraded_hold_attitude_reject_deg_ > 0.0 &&
+      (std::fabs(quality.roll_deg) > degraded_hold_attitude_reject_deg_ ||
+       std::fabs(quality.pitch_deg) > degraded_hold_attitude_reject_deg_);
+
+  if (voxelmap_manager)
+  {
+    quality.lio_degenerated = voxelmap_manager->isLidarDegenerated();
+    quality.lio_valid =
+        voxelmap_manager->last_update_status_ != "skipped" &&
+        voxelmap_manager->last_update_status_ != "rejected";
+    quality.map_update_weak =
+        deg_guard_last_lio_voxel_map_skip_reason_ != "none" &&
+        deg_guard_last_lio_voxel_map_skip_reason_ != "not_lio" &&
+        deg_guard_last_lio_voxel_map_skip_reason_ != "forced_by_lidar_frames" &&
+        deg_guard_last_lio_voxel_map_skip_reason_ != "forced_by_time";
+  }
+  if (vio_manager)
+  {
+    quality.vio_low_tracked = vio_manager->total_points < deg_guard_min_visual_tracked_points_;
+    quality.vio_valid = !quality.vio_low_tracked;
+  }
+  if (uwb_manager)
+  {
+    const UwbUpdateSummary &uwb_summary = uwb_manager->lastUpdateSummary();
+    quality.uwb_valid = !uwb_summary.relocalize_required;
+    quality.uwb_residual_abnormal = uwb_summary.relocalize_required;
+  }
+
+  quality.backward_distance = std::max(corridor_prior_backward_distance_window_,
+                                       safety_backward_distance_in_window_);
+  quality.backward_slip =
+      (corridor_prior_action_ == "block_map_update" ||
+       corridor_prior_action_ == "local_reinit" ||
+       corridor_prior_action_ == "downweight" ||
+       quality.backward_distance > corridor_prior_backward_distance_threshold_);
+
+  if (safety_fail_safe_mode_) quality.reason = "safety";
+  else if (quality.backward_slip) quality.reason = "backward_slip";
+  else if (quality.lio_degenerated) quality.reason = "lio_degenerated";
+  else if (quality.vio_low_tracked) quality.reason = "vio_low_tracked";
+  else if (quality.map_update_weak) quality.reason = "map_update_weak";
+  else quality.reason = "normal";
+  return quality;
+}
+
+void LIVMapper::updateSystemModeFromQuality(const ObservationQuality &quality)
+{
+  if (!local_reinit_enable_) return;
+  if (safety_fail_safe_mode_)
+  {
+    if (local_mode_ != "DEGRADED_HOLD") enterLocalReinitMode("DEGRADED_HOLD", "safety");
+    return;
+  }
+  if (local_mode_ == "NORMAL" &&
+      quality.backward_slip &&
+      corridor_prior_action_ == "local_reinit")
+  {
+    enterLocalReinitMode("LOCAL_REINIT", "BACKWARD_LOCAL_REINIT");
+  }
+}
+
+LIVMapper::UpdateDecision LIVMapper::makeUpdateDecision(const ObservationQuality &quality) const
+{
+  UpdateDecision decision;
+  if (local_mode_ == "DEGRADED_HOLD" || safety_fail_safe_mode_)
+  {
+    decision.allow_lio_update = false;
+    decision.allow_vio_update = false;
+    decision.allow_uwb_update = false;
+    decision.allow_voxel_map_update = false;
+    decision.allow_visual_map_update = false;
+    decision.allow_publish = false;
+    decision.mode = SystemMode::DEGRADED_HOLD;
+    decision.reason = safety_fail_safe_mode_ ? RejectReason::SAFETY : RejectReason::DEGRADED_HOLD;
+    decision.reason_text = safety_fail_safe_mode_ ? safety_last_reason_ : local_reinit_reason_;
+    return decision;
+  }
+
+  if (local_mode_ == "DEGRADED_BOOTSTRAP")
+  {
+    decision.allow_vio_update = false;
+    decision.mode = SystemMode::DEGRADED_BOOTSTRAP;
+    decision.reason = RejectReason::BOOTSTRAP;
+    decision.reason_text = local_reinit_reason_;
+    return decision;
+  }
+
+  if (local_mode_ == "LOCAL_REINIT" || local_mode_ == "RELOCALIZE")
+  {
+    decision.allow_vio_update = false;
+    decision.allow_uwb_update = local_mode_ != "RELOCALIZE";
+    decision.mode = SystemMode::LOCAL_REINIT;
+    decision.reason = RejectReason::LOCAL_REINIT;
+    decision.reason_text = local_reinit_reason_;
+    return decision;
+  }
+
+  decision.mode = SystemMode::NORMAL;
+  if (quality.backward_slip &&
+      (corridor_prior_action_ == "block_map_update" || corridor_prior_action_ == "downweight"))
+  {
+    decision.allow_voxel_map_update = corridor_prior_update_voxel_map_enabled_;
+    decision.allow_visual_map_update = corridor_prior_visual_map_update_enabled_;
+    decision.reason = RejectReason::BACKWARD_SLIP;
+    decision.reason_text = "BACKWARD_SLIP";
+  }
+  return decision;
+}
+
+LIVMapper::MapUpdateDecision LIVMapper::decideMapUpdate(bool lio_degenerated,
+                                                        bool stride_ready,
+                                                        bool force_ready,
+                                                        bool has_points) const
+{
+  MapUpdateDecision decision;
+  decision.allow = current_decision_.allow_voxel_map_update && !lio_degenerated && stride_ready && has_points;
+  if (!current_decision_.allow_voxel_map_update)
+  {
+    decision.reason = current_decision_.reason;
+    decision.skip_reason = current_decision_.reason == RejectReason::BACKWARD_SLIP ? "BACKWARD_SLIP" :
+                           current_decision_.reason == RejectReason::DEGRADED_HOLD ? "DEGRADED_HOLD" :
+                           current_decision_.reason == RejectReason::BOOTSTRAP ? "BOOTSTRAP" :
+                           current_decision_.reason == RejectReason::LOCAL_REINIT ? "LOCAL_REINIT" :
+                           current_decision_.reason == RejectReason::SAFETY ? "DEGRADED_HOLD" : "UNKNOWN";
+    return decision;
+  }
+  if (!has_points)
+  {
+    decision.reason = RejectReason::NO_POINTS;
+    decision.skip_reason = "NO_POINTS";
+    return decision;
+  }
+  if (lio_degenerated)
+  {
+    decision.reason = RejectReason::BACKWARD_SLIP;
+    decision.skip_reason = current_quality_.backward_slip ? "BACKWARD_SLIP" : "UNKNOWN";
+    return decision;
+  }
+  if (!stride_ready && !force_ready)
+  {
+    decision.reason = RejectReason::SMALL_MOTION;
+    decision.skip_reason = "SMALL_MOTION";
+    return decision;
+  }
+  if (!stride_ready && force_ready)
+  {
+    decision.allow = true;
+    decision.reason = RejectReason::NONE;
+    decision.skip_reason = "forced";
+    return decision;
+  }
+  decision.allow = true;
+  decision.reason = RejectReason::NONE;
+  decision.skip_reason = "none";
+  return decision;
+}
+
+void LIVMapper::printDiagnostics(const char *stage)
+{
+  if (diagnostics_level_ == "off") return;
+  const double now = LidarMeasures.last_lio_update_time;
+  if (diagnostics_level_ == "summary")
+  {
+    if (diagnostics_last_summary_time_ >= 0.0 &&
+        now - diagnostics_last_summary_time_ < diagnostics_summary_interval_sec_)
+    {
+      return;
+    }
+    diagnostics_last_summary_time_ = now;
+    ROS_INFO("[Diagnostics] mode=%s lio_valid=%d vio_valid=%d uwb_valid=%d map_update=%d backward_distance=%.3f speed=%.3f roll=%.2f pitch=%.2f decision_reason=%s stage=%s",
+             systemModeName(current_decision_.mode),
+             static_cast<int>(current_quality_.lio_valid),
+             static_cast<int>(current_quality_.vio_valid),
+             static_cast<int>(current_quality_.uwb_valid),
+             static_cast<int>(current_decision_.allow_voxel_map_update),
+             current_quality_.backward_distance,
+             current_quality_.speed,
+             current_quality_.roll_deg,
+             current_quality_.pitch_deg,
+             current_decision_.reason_text.c_str(),
+             stage ? stage : "frame");
+  }
+}
+
+void LIVMapper::updateLocalTrackingLostDetectors(const char *sensor)
+{
+  if (!local_reinit_enable_) return;
+  const double now = LidarMeasures.last_lio_update_time;
+  const std::string sensor_name = sensor ? sensor : "";
+  if (sensor_name == "VIO")
+  {
+    const bool low = deg_guard_last_visual_tracked_points_ >= 0 &&
+                     deg_guard_last_visual_tracked_points_ < local_vio_unavailable_tracked_points_;
+    if (low)
+    {
+      if (local_vio_low_start_time_ < 0.0) local_vio_low_start_time_ = now;
+      local_vio_unavailable_ = now - local_vio_low_start_time_ >= local_tracking_lost_window_sec_;
+    }
+    else
+    {
+      local_vio_low_start_time_ = -1.0;
+      local_vio_unavailable_ = false;
+    }
+  }
+  else if (sensor_name == "LIO")
+  {
+    const bool weak = !deg_guard_last_lio_voxel_map_updated_ ||
+                      (local_lio_weak_residual_threshold_ > 0.0 &&
+                       voxelmap_manager &&
+                       voxelmap_manager->last_average_residual_ > local_lio_weak_residual_threshold_);
+    if (weak)
+    {
+      if (local_lio_weak_start_time_ < 0.0) local_lio_weak_start_time_ = now;
+      local_lio_weak_ = now - local_lio_weak_start_time_ >= local_tracking_lost_window_sec_;
+    }
+    else
+    {
+      local_lio_weak_start_time_ = -1.0;
+      local_lio_weak_ = false;
+    }
+  }
+
+  if (local_mode_ == "NORMAL" && local_vio_unavailable_ && local_lio_weak_)
+  {
+    enterLocalReinitMode("LOCAL_REINIT", "local_tracking_lost");
+  }
+}
+
 void LIVMapper::processImu() 
 {
   // double t0 = omp_get_wtime();
+  const StatesGroup state_before_imu = _state;
+  skip_mapping_this_frame_ = false;
+  if (safety_guard_enable_ && safety_fail_safe_mode_)
+  {
+    if (safety_reliable_state_ready_) _state = safety_reliable_state_;
+    _state.vel_end.setZero();
+    state_propagat = _state;
+    if (voxelmap_manager) voxelmap_manager->state_ = _state;
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    return;
+  }
+  if (!validateStateForSafety("IMU-pre", state_before_imu, _state, false, false)) return;
 
+  const bool imu_was_initializing = p_imu && p_imu->imu_need_init;
   p_imu->Process2(LidarMeasures, _state, feats_undistort);
 
+  if (!validateStateForSafety("IMU-post", state_before_imu, _state, false, false))
+  {
+    return;
+  }
+
   if (gravity_align_en) gravityAlignment();
+
+  if (!validateStateForSafety("gravity-post", state_before_imu, _state, false, false))
+  {
+    return;
+  }
 
   snapStateForDeterminism(_state);
   state_propagat = _state;
   voxelmap_manager->state_ = _state;
   voxelmap_manager->feats_undistort_ = feats_undistort;
+  if (safety_guard_enable_ && imu_was_initializing)
+  {
+    // ponytail: the IMU init/gravity-align frame has no undistorted scan yet; start mapping on the next synced frame.
+    skip_mapping_this_frame_ = true;
+  }
 
   // double t_prop = omp_get_wtime();
 
@@ -662,6 +2620,17 @@ void LIVMapper::stateEstimationAndMapping()
 {
   static int vio_dispatch_count = 0;
   static int lio_dispatch_count = 0;
+
+  deterministic_frame_id_++;
+  updateLocalModeAtFrameStart();
+  const StatesGroup state_before_frame = _state;
+  validateStateForSafety("frame-pre", state_before_frame, _state, false, false);
+	  updateCorridorMotionPrior("frame-pre", _state);
+  current_quality_ = evaluateObservationQuality();
+  updateSystemModeFromQuality(current_quality_);
+  current_decision_ = makeUpdateDecision(current_quality_);
+  update_decision_ready_ = true;
+  printDiagnostics("frame-pre");
 
   switch (LidarMeasures.lio_vio_flg)
   {
@@ -685,6 +2654,11 @@ void LIVMapper::stateEstimationAndMapping()
       handleLIO();
       break;
   }
+  maybeRecoverFailSafe();
+  current_quality_ = evaluateObservationQuality();
+  current_decision_ = makeUpdateDecision(current_quality_);
+  writeDegeneracyGuardLog("frame-end");
+  printDiagnostics("frame-end");
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
   if (state_update_flg) latest_ekf_state = _state;
@@ -693,62 +2667,80 @@ void LIVMapper::stateEstimationAndMapping()
 void LIVMapper::applyUwbUpdate(const char *stage)
 {
   if (!uwb_manager || !uwb_manager->updateEnabled()) return;
-
-  V3D output_delta = V3D::Zero();
-  int used_count = 0;
-  if (uwb_output_correction_en_)
+  const bool is_lio_frame = LidarMeasures.lio_vio_flg == LIO || LidarMeasures.lio_vio_flg == LO;
+  if (uwb_update_only_on_lio_ && !is_lio_frame) return;
+  if (update_decision_ready_ && !current_decision_.allow_uwb_update) return;
+  if (safety_guard_enable_ && safety_fail_safe_mode_) return;
+  if (uwb_skip_when_lio_frozen_ && lio_freeze_state_ready_)
   {
-    StatesGroup corrected_state = _state;
-    corrected_state.pos_end += uwb_output_target_offset_;
-    const V3D pos_before = corrected_state.pos_end;
-    used_count = uwb_manager->applyRangeUpdate(corrected_state);
-    if (used_count <= 0) return;
-
-    output_delta = corrected_state.pos_end - pos_before;
-    uwb_output_target_offset_ += output_delta;
-    if (!uwb_output_smooth_en_)
-    {
-      uwb_output_pos_offset_ = uwb_output_target_offset_;
-    }
-  }
-  else
-  {
-    const V3D pos_before = _state.pos_end;
-    used_count = uwb_manager->applyRangeUpdate(_state);
-    if (used_count <= 0) return;
-    output_delta = _state.pos_end - pos_before;
-
-    snapStateForDeterminism(_state);
-    voxelmap_manager->state_ = _state;
-    if (vio_manager) vio_manager->updateFrameState(_state);
-
-    if (imu_prop_enable)
-    {
-      ekf_finish_once = true;
-      latest_ekf_state = _state;
-      latest_ekf_time = LidarMeasures.last_lio_update_time;
-      state_update_flg = true;
-    }
+    ROS_WARN_THROTTLE(1.0, "[UWB] Skip update while LIO state is frozen.");
+    return;
   }
 
-  ROS_INFO_THROTTLE(1.0, "[UWB] Applied %d range measurements after %s update.",
-                    used_count, stage ? stage : "state");
+  uwb_output_target_offset_.z() = 0.0;
+  uwb_output_pos_offset_.z() = 0.0;
+  const V3D pos_before = _state.pos_end;
+  const int used_count =
+      uwb_manager->applyRangeUpdateAt(_state, LidarMeasures.last_lio_update_time, uwb_update_window_sec_);
+  const UwbUpdateSummary &summary = uwb_manager->lastUpdateSummary();
+  std::ostringstream anchor_ids;
+  for (size_t i = 0; i < summary.used_anchor_ids.size(); ++i)
+  {
+    if (i > 0) anchor_ids << "|";
+    anchor_ids << summary.used_anchor_ids[i];
+  }
+  deterministic_last_uwb_anchor_ids_ = anchor_ids.str();
+  deterministic_last_uwb_update_ = used_count > 0;
+
+  if (summary.relocalize_required ||
+      (uwb_relocalize_en_ &&
+       uwb_relocalize_xy_threshold_ > 0.0 &&
+       summary.xy_correction_before_step > uwb_relocalize_xy_threshold_))
+  {
+    enterLocalReinitMode("RELOCALIZE", "uwb_xy_correction_over_threshold");
+    return;
+  }
+  if (used_count <= 0) return;
+
+  V3D output_delta = _state.pos_end - pos_before;
+  output_delta.z() = 0.0;
+  uwb_output_target_offset_.setZero();
+  uwb_output_pos_offset_.setZero();
+  applyDegeneracyGuardCorrections("UWB-XY");
+
+  snapStateForDeterminism(_state);
+  voxelmap_manager->state_ = _state;
+  if (vio_manager) vio_manager->updateFrameState(_state);
+
+  if (imu_prop_enable)
+  {
+    ekf_finish_once = true;
+    latest_ekf_state = _state;
+    latest_ekf_time = LidarMeasures.last_lio_update_time;
+    state_update_flg = true;
+  }
+
+  ROS_INFO_THROTTLE(1.0,
+                    "[UWB] Applied XY update used=%d after %s stamp=%.6f anchors=%s xy_delta=%.4f z_before=%.4f z_after=%.4f.",
+                    used_count,
+                    stage ? stage : "state",
+                    LidarMeasures.last_lio_update_time,
+                    deterministic_last_uwb_anchor_ids_.c_str(),
+                    std::hypot(output_delta.x(), output_delta.y()),
+                    summary.z_correction_before_clamp,
+                    summary.z_correction_after_clamp);
   if (vio_manager)
   {
     std::vector<std::string> lines;
     std::ostringstream oss;
-    oss << "[ UWB ] Applied " << used_count
-        << " range measurement(s) after " << (stage ? stage : "state")
-        << " update.";
+    oss << "[ UWB ] Applied XY update used=" << used_count
+        << " after " << (stage ? stage : "state")
+        << " stamp=" << std::fixed << std::setprecision(6) << LidarMeasures.last_lio_update_time
+        << " anchors=" << deterministic_last_uwb_anchor_ids_
+        << " xy_delta=" << std::hypot(output_delta.x(), output_delta.y())
+        << " z_before=" << summary.z_correction_before_clamp
+        << " z_after=" << summary.z_correction_after_clamp;
     lines.push_back(oss.str());
-    if (uwb_output_correction_en_)
-    {
-      std::ostringstream offset_oss;
-      offset_oss << "[ UWB ] output_delta=" << output_delta.transpose()
-                 << " output_offset=" << uwb_output_pos_offset_.transpose()
-                 << " output_target=" << uwb_output_target_offset_.transpose();
-      lines.push_back(offset_oss.str());
-    }
     vio_manager->appendTimingLogLines(lines);
   }
 }
@@ -756,9 +2748,12 @@ void LIVMapper::applyUwbUpdate(const char *stage)
 void LIVMapper::advanceUwbOutputCorrection()
 {
   if (!uwb_output_correction_en_) return;
+  uwb_output_target_offset_.z() = 0.0;
+  uwb_output_pos_offset_.z() = 0.0;
   if (!uwb_output_smooth_en_)
   {
     uwb_output_pos_offset_ = uwb_output_target_offset_;
+    uwb_output_pos_offset_.z() = 0.0;
     return;
   }
 
@@ -772,23 +2767,94 @@ void LIVMapper::advanceUwbOutputCorrection()
     step *= uwb_output_smooth_max_step_m_ / std::max(step_norm, 1e-9);
   }
   uwb_output_pos_offset_ += step;
+  uwb_output_pos_offset_.z() = 0.0;
 }
 
 V3D LIVMapper::outputPosition() const
 {
-  if (!uwb_output_correction_en_) return _state.pos_end;
-  return _state.pos_end + uwb_output_pos_offset_;
+  V3D out_pos = uwb_output_correction_en_ ? (_state.pos_end + uwb_output_pos_offset_) : _state.pos_end;
+  out_pos.z() = _state.pos_end.z();
+  return out_pos;
 }
 
 void LIVMapper::handleVIO() 
 {
+  if (safety_guard_enable_ && safety_fail_safe_mode_)
+  {
+    deg_guard_last_sensor_type_ = "VIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ = "safety_fail_safe";
+    deg_guard_last_action_ = "fail_safe";
+    deg_guard_last_reason_ = safety_last_reason_;
+    deg_guard_last_lio_voxel_map_updated_ = false;
+    deg_guard_last_lio_voxel_map_skip_reason_ = "DEGRADED_HOLD";
+    clearSafetyLocalCaches();
+    return;
+  }
+	  if (vio_manager == nullptr || LidarMeasures.measures.empty())
+	  {
+    deg_guard_last_sensor_type_ = "VIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ = (vio_manager == nullptr) ? "null_vio_manager" : "empty_measure_group";
+    deg_guard_last_action_ = "none";
+    deg_guard_last_reason_ = deg_guard_last_reject_reason_;
+	    return;
+	  }
 
-  euler_cur = RotMtoEuler(_state.rot_end);
+  if (isDegradedHoldMode())
+  {
+    const StatesGroup state_before_degraded_hold = _state;
+    applyDegradedHoldConstraint("VIO-DEGRADED_HOLD", true);
+    deg_guard_last_sensor_type_ = "VIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ =
+        degraded_hold_last_reject_reason_ == "none" ? "DEGRADED_HOLD" : degraded_hold_last_reject_reason_;
+    deg_guard_last_action_ = "degraded_hold";
+    deg_guard_last_reason_ = "DEGRADED_HOLD";
+    deg_guard_last_visual_tracked_points_ = -1;
+    deg_guard_last_final_pose_delta_ = (_state.pos_end - state_before_degraded_hold.pos_end).norm();
+    deterministic_last_vio_update_ = false;
+    if (vio_manager)
+    {
+      vio_manager->disable_visual_map_update_this_frame = true;
+      vio_manager->visual_map_update_disable_reason = "DEGRADED_HOLD";
+      vio_manager->force_skip_visual_ekf_this_frame = true;
+      vio_manager->force_skip_visual_ekf_reason = "DEGRADED_HOLD";
+      vio_manager->last_visual_update_status = "skipped";
+      vio_manager->last_visual_update_reject_reason = deg_guard_last_reject_reason_;
+    }
+    if (imu_prop_enable)
+    {
+      ekf_finish_once = true;
+      latest_ekf_state = _state;
+      latest_ekf_time = LidarMeasures.last_lio_update_time;
+      state_update_flg = true;
+    }
+    ROS_WARN_THROTTLE(0.5,
+                      "[LOCAL_REINIT] DEGRADED_HOLD skip VIO pose/map update: local_elapsed=%.3f bag_elapsed=%.3f reason=%s",
+                      local_elapsed_sec_, bag_elapsed_sec_, deg_guard_last_reject_reason_.c_str());
+    return;
+  }
+
+  if (update_decision_ready_ &&
+      !current_decision_.allow_vio_update &&
+      !current_decision_.allow_visual_map_update)
+  {
+    deg_guard_last_sensor_type_ = "VIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ = current_decision_.reason_text;
+    deg_guard_last_action_ = "decision_skip";
+    deg_guard_last_reason_ = current_decision_.reason_text;
+    deterministic_last_vio_update_ = false;
+    return;
+  }
+
+	  euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << std::endl;
     
-  if (pcl_w_wait_pub->empty() || (pcl_w_wait_pub == nullptr)) 
+  if ((pcl_w_wait_pub == nullptr) || pcl_w_wait_pub->empty())
   {
     std::cout << "[ VIO ] No point!!!" << std::endl;
     return;
@@ -806,8 +2872,33 @@ void LIVMapper::handleVIO()
   }
 
   const bool use_visual_frame = shouldSelectVisualFrame();
-  if (!use_visual_frame)
-  {
+	  if (!use_visual_frame)
+	  {
+	    deterministic_last_vio_update_ = false;
+	    if (deg_guard_enable_)
+    {
+      deg_guard_last_sensor_type_ = "VIO";
+      deg_guard_last_update_status_ = "skipped";
+      deg_guard_last_reject_reason_ = "visual_selector:" + last_selector_reason_;
+      deg_guard_last_action_ = "none";
+      deg_guard_last_reason_ = deg_guard_last_reject_reason_;
+      deg_guard_last_visual_tracked_points_ = -1;
+      deg_guard_last_update_translation_norm_ = 0.0;
+      deg_guard_last_update_translation_rate_mps_ = 0.0;
+      deg_guard_last_update_yaw_deg_ = 0.0;
+      deg_guard_last_update_yaw_rate_degps_ = 0.0;
+      deg_guard_last_visual_update_rot_deg_ = 0.0;
+      deg_guard_last_visual_update_rot_rate_degps_ = 0.0;
+      deg_guard_last_final_pose_delta_ = 0.0;
+      const double current_time = LidarMeasures.last_lio_update_time;
+      deg_guard_last_dt_ =
+          (deg_guard_last_vio_time_ >= 0.0 && current_time > deg_guard_last_vio_time_) ?
+          (current_time - deg_guard_last_vio_time_) : deg_guard_camera_dt_;
+      deg_guard_last_dt_ = std::max(1e-4, deg_guard_last_dt_);
+      deg_guard_last_vio_time_ = current_time;
+      deg_guard_last_vio_skip_affects_degenerate_ = false;
+    }
+
     static int adaptive_skip_count = 0;
     adaptive_skip_count++;
     if (adaptive_skip_count % 10 == 1)
@@ -836,16 +2927,22 @@ void LIVMapper::handleVIO()
       vio_manager->has_last_visual_guard_pos = true;
     }
 
-    applyUwbUpdate("VIO-skip");
-    advanceUwbOutputCorrection();
+	    if (!deterministic_mode_ || !uwb_update_only_on_lio_) applyUwbUpdate("VIO-skip");
+	    advanceUwbOutputCorrection();
+    applyDegeneracyGuardCorrections("VIO-skip");
 
-    publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+    if ((!update_decision_ready_ || current_decision_.allow_publish) &&
+        !(safety_guard_enable_ && safety_fail_safe_mode_))
+    {
+      publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+    }
 
     euler_cur = RotMtoEuler(_state.rot_end);
     const V3D out_pos = outputPosition();
     fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
              << out_pos.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
-             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
+             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " "
+             << (feats_undistort ? feats_undistort->points.size() : 0) << std::endl;
 
     if (vio_manager)
     {
@@ -887,12 +2984,119 @@ void LIVMapper::handleVIO()
     return;
   }
 
-  vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  if (lio_freeze_state_when_degenerate_ && lio_freeze_state_ready_)
+  {
+    // ponytail: while LIO is frozen, VIO can only fight the freeze; skip it until LIO is observable again.
+    _state = lio_freeze_state_;
+    _state.vel_end.setZero();
+    applyDegeneracyGuardCorrections("VIO-freeze");
+    snapStateForDeterminism(_state);
+    voxelmap_manager->state_ = _state;
+    if (vio_manager)
+    {
+      vio_manager->updateFrameState(_state);
+      vio_manager->last_visual_guard_time = LidarMeasures.last_lio_update_time - _first_lidar_time;
+      vio_manager->last_visual_guard_pos = _state.pos_end;
+      vio_manager->has_last_visual_guard_pos = true;
+    }
+
+    ROS_WARN_THROTTLE(1.0, "[VIO] Skip visual update while LIO state is frozen by degenerated constraints.");
+
+	    if (!deterministic_mode_ || !uwb_update_only_on_lio_) applyUwbUpdate("VIO-freeze");
+	    advanceUwbOutputCorrection();
+
+    if (imu_prop_enable)
+    {
+      ekf_finish_once = true;
+      latest_ekf_state = _state;
+      latest_ekf_time = LidarMeasures.last_lio_update_time;
+      state_update_flg = true;
+    }
+
+    if ((!update_decision_ready_ || current_decision_.allow_publish) &&
+        !(safety_guard_enable_ && safety_fail_safe_mode_))
+    {
+      publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+    }
+
+    euler_cur = RotMtoEuler(_state.rot_end);
+    const V3D out_pos = outputPosition();
+    fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
+             << out_pos.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
+             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " "
+             << (feats_undistort ? feats_undistort->points.size() : 0) << std::endl;
+    return;
+  }
+
+		  const StatesGroup state_before_vio_update = _state;
+		  if (vio_manager)
+		  {
+		    auto visualModeReason = [&]() {
+		      if (local_mode_ == "DEGRADED_HOLD") return std::string("DEGRADED_HOLD");
+		      if (local_mode_ == "DEGRADED_BOOTSTRAP" ||
+		          local_mode_ == "LOCAL_REINIT" ||
+		          local_mode_ == "RELOCALIZE")
+		      {
+		        return std::string("BOOTSTRAP");
+		      }
+		      return std::string("");
+		    };
+		    vio_manager->disable_visual_map_update_this_frame =
+		        (update_decision_ready_ && !current_decision_.allow_visual_map_update) ||
+		        localModeBlocksVisualMapUpdate();
+		    vio_manager->visual_map_update_disable_reason =
+		        vio_manager->disable_visual_map_update_this_frame ?
+		        (localModeBlocksVisualMapUpdate() ? visualModeReason() : current_decision_.reason_text) : "";
+		    vio_manager->force_skip_visual_ekf_this_frame =
+		        localModeSkipsVisualEkf() ||
+		        (update_decision_ready_ && !current_decision_.allow_vio_update);
+		    vio_manager->force_skip_visual_ekf_reason =
+		        vio_manager->force_skip_visual_ekf_this_frame ?
+		        (!current_decision_.allow_vio_update ? current_decision_.reason_text : visualModeReason()) : "";
+		    vio_manager->adaptive_external_noise_scale = updateAdaptiveSensorNoiseScale("VIO");
+		  }
+	  vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+	  const std::string vio_update_status = vio_manager ? vio_manager->last_visual_update_status : "accepted";
+  const std::string vio_reject_reason = vio_manager ? vio_manager->last_visual_update_reject_reason : "";
+  const std::string vio_guard_reason = vio_manager ? vio_manager->last_visual_update_guard_reason : "";
+  if (vio_manager)
+  {
+    deg_guard_last_vio_noise_scale_ = vio_manager->last_adaptive_img_point_cov_scale;
+    deg_guard_last_weight_reason_ = vio_manager->last_adaptive_weight_reason;
+	  }
+	  evaluateDegeneracyGuardUpdate("VIO", state_before_vio_update, -1, vio_manager ? vio_manager->total_points : -1);
+	  deterministic_last_vio_update_ = !(vio_update_status == "skipped" || vio_update_status == "rejected");
+	  if (local_mode_ == "DEGRADED_BOOTSTRAP" || local_mode_ == "LOCAL_REINIT" || local_mode_ == "RELOCALIZE")
+	  {
+	    vio_bootstrap_frames_++;
+	  }
+	  updateLocalTrackingLostDetectors("VIO");
+  if ((vio_update_status == "skipped" || vio_update_status == "rejected" || vio_update_status == "downweighted") &&
+      deg_guard_last_update_status_ == "accepted")
+  {
+    deg_guard_last_update_status_ = vio_update_status;
+    deg_guard_last_reject_reason_ = !vio_reject_reason.empty() ? vio_reject_reason : vio_guard_reason;
+  }
+  else if (!vio_guard_reason.empty() && deg_guard_last_reject_reason_.empty())
+  {
+    deg_guard_last_reject_reason_ = vio_guard_reason;
+  }
+  applyDegeneracyGuardCorrections("VIO");
   snapStateForDeterminism(_state);
+  if (!validateStateForSafety("VIO-post", state_before_vio_update, _state, true, false))
+  {
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    return;
+  }
   vio_manager->updateFrameState(_state);
   updateVisualObservationHints();
-  applyUwbUpdate("VIO");
-  advanceUwbOutputCorrection();
+	  if (!deterministic_mode_ || !uwb_update_only_on_lio_) applyUwbUpdate("VIO");
+	  advanceUwbOutputCorrection();
+  if (!validateStateForSafety("VIO-after-uwb", state_before_vio_update, _state, false, false))
+  {
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    return;
+  }
 
   if (imu_prop_enable) 
   {
@@ -914,7 +3118,11 @@ void LIVMapper::handleVIO()
   //   visual_sub_map->push_back(temp_map);
   // }
 
-  publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+  if ((!update_decision_ready_ || current_decision_.allow_publish) &&
+      validateStateForSafety("VIO-pre-publish", state_before_vio_update, _state, false, false))
+  {
+    publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+  }
   if (!suppress_image_pub_)
   {
     publish_img_counter_++;
@@ -928,7 +3136,8 @@ void LIVMapper::handleVIO()
   const V3D out_pos = outputPosition();
   fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
             << out_pos.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
-            << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " " << feats_undistort->points.size() << std::endl;
+            << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << " "
+            << (feats_undistort ? feats_undistort->points.size() : 0) << std::endl;
 
 }
 
@@ -1031,14 +3240,74 @@ void LIVMapper::updateVisualObservationHints()
 
 void LIVMapper::handleLIO() 
 {    
+  if (safety_guard_enable_ && safety_fail_safe_mode_)
+  {
+    deg_guard_last_sensor_type_ = "LIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ = "safety_fail_safe";
+    deg_guard_last_action_ = "fail_safe";
+    deg_guard_last_reason_ = safety_last_reason_;
+    deg_guard_last_lio_update_executed_ = false;
+    deg_guard_last_lio_voxel_map_updated_ = false;
+    deg_guard_last_lio_voxel_map_skip_reason_ = "DEGRADED_HOLD";
+    clearSafetyLocalCaches();
+    return;
+  }
+  if (!validateStateForSafety("LIO-pre", _state, _state, false, false)) return;
+
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
            << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
            << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << endl;
            
-  if (feats_undistort->empty() || (feats_undistort == nullptr)) 
+	  if ((feats_undistort == nullptr) || feats_undistort->empty())
+	  {
+	    std::cout << "[ LIO ]: No point!!!" << std::endl;
+	    return;
+	  }
+
+  if (isDegradedHoldMode())
   {
-    std::cout << "[ LIO ]: No point!!!" << std::endl;
+    const StatesGroup state_before_degraded_hold = _state;
+    applyDegradedHoldConstraint("LIO-DEGRADED_HOLD", true);
+    deg_guard_last_sensor_type_ = "LIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ =
+        degraded_hold_last_reject_reason_ == "none" ? "DEGRADED_HOLD" : degraded_hold_last_reject_reason_;
+    deg_guard_last_action_ = "degraded_hold";
+    deg_guard_last_reason_ = "DEGRADED_HOLD";
+    deg_guard_last_lio_update_executed_ = false;
+    deterministic_last_lio_update_ = false;
+    deg_guard_last_lio_voxel_map_updated_ = false;
+    deg_guard_last_lio_voxel_map_skip_reason_ = "DEGRADED_HOLD";
+    deg_guard_last_final_pose_delta_ = (_state.pos_end - state_before_degraded_hold.pos_end).norm();
+    if (imu_prop_enable)
+    {
+      ekf_finish_once = true;
+      latest_ekf_state = _state;
+      latest_ekf_time = LidarMeasures.last_lio_update_time;
+      state_update_flg = true;
+    }
+    euler_cur = RotMtoEuler(_state.rot_end);
+    geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
+    if (!update_decision_ready_ || current_decision_.allow_publish) publish_odometry(pubOdomAftMapped);
+    ROS_WARN_THROTTLE(0.5,
+                      "[LOCAL_REINIT] DEGRADED_HOLD skip LIO pose/map update: local_elapsed=%.3f bag_elapsed=%.3f reason=%s",
+                      local_elapsed_sec_, bag_elapsed_sec_, deg_guard_last_reject_reason_.c_str());
+    return;
+  }
+
+  if (update_decision_ready_ && !current_decision_.allow_lio_update)
+  {
+    deg_guard_last_sensor_type_ = "LIO";
+    deg_guard_last_update_status_ = "skipped";
+    deg_guard_last_reject_reason_ = current_decision_.reason_text;
+    deg_guard_last_action_ = "decision_skip";
+    deg_guard_last_reason_ = current_decision_.reason_text;
+    deg_guard_last_lio_update_executed_ = false;
+    deterministic_last_lio_update_ = false;
+    deg_guard_last_lio_voxel_map_updated_ = false;
+    deg_guard_last_lio_voxel_map_skip_reason_ = rejectReasonName(current_decision_.reason);
     return;
   }
 
@@ -1072,13 +3341,106 @@ void LIVMapper::handleLIO()
 
   double t1 = omp_get_wtime();
 
+  const StatesGroup state_before_lio_update = _state;
+  voxelmap_manager->adaptive_external_noise_scale_ = updateAdaptiveSensorNoiseScale("LIO");
   voxelmap_manager->StateEstimation(state_propagat);
+  deg_guard_last_lio_noise_scale_ = voxelmap_manager->last_adaptive_noise_scale_;
+  deg_guard_last_weight_reason_ = voxelmap_manager->last_adaptive_weight_reason_;
+	  const std::string lio_update_status = voxelmap_manager->last_update_status_;
+	  const std::string lio_reject_reason = voxelmap_manager->last_reject_reason_;
+	  deg_guard_last_lio_update_executed_ = !(lio_update_status == "skipped" || lio_update_status == "rejected");
+	  deterministic_last_lio_update_ = deg_guard_last_lio_update_executed_;
+	  deg_guard_last_lio_downweighted_ = deg_guard_last_lio_noise_scale_ > 1.001;
   _state = voxelmap_manager->state_;
   _pv_list = voxelmap_manager->pv_list_;
+  evaluateDegeneracyGuardUpdate("LIO", state_before_lio_update, voxelmap_manager->effct_feat_num_, -1);
+  deg_guard_last_lio_downweighted_ =
+      deg_guard_last_lio_downweighted_ || (deg_guard_last_update_status_ == "downweighted");
+  if ((lio_update_status == "skipped" || lio_update_status == "rejected") &&
+      deg_guard_last_update_status_ == "accepted")
+  {
+    deg_guard_last_update_status_ = lio_update_status;
+    deg_guard_last_reject_reason_ = lio_reject_reason;
+  }
+  applyDegeneracyGuardCorrections("LIO");
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
+  if (!validateStateForSafety("LIO-post", state_before_lio_update, _state, true, false))
+  {
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    return;
+  }
+  const bool lio_pose_finite = _state.pos_end.allFinite() && _state.rot_end.allFinite();
+  double lio_state_jump_trans_m = 0.0;
+  double lio_state_jump_rot_deg = 0.0;
+  bool lio_state_jump = false;
+  if (lio_state_jump_guard_en_)
+  {
+    if (!lio_pose_finite)
+    {
+      lio_state_jump = true;
+    }
+    else if (last_lio_stable_state_ready_)
+    {
+      lio_state_jump_trans_m = (_state.pos_end - last_lio_stable_state_.pos_end).norm();
+      const Eigen::Matrix3d delta_rot = last_lio_stable_state_.rot_end.transpose() * _state.rot_end;
+      lio_state_jump_rot_deg = Eigen::AngleAxisd(delta_rot).angle() * 57.29577951308232;
+      lio_state_jump = (lio_state_jump_max_trans_m_ > 0.0 && lio_state_jump_trans_m > lio_state_jump_max_trans_m_) ||
+                       (lio_state_jump_max_rot_deg_ > 0.0 && lio_state_jump_rot_deg > lio_state_jump_max_rot_deg_);
+    }
+  }
+  if (lio_state_jump)
+  {
+    ROS_WARN_THROTTLE(1.0,
+                      "[LIO] Reject state jump: dtrans=%.3f/%.3f m, drot=%.3f/%.3f deg, finite=%d.",
+                      lio_state_jump_trans_m,
+                      lio_state_jump_max_trans_m_,
+                      lio_state_jump_rot_deg,
+                      lio_state_jump_max_rot_deg_,
+                      static_cast<int>(lio_pose_finite));
+  }
+
+  const bool lio_unstable_after_state = voxelmap_manager->isLidarDegenerated() || lio_state_jump;
+  if (lio_unstable_after_state)
+  {
+    lio_degenerate_frame_count_++;
+  }
+  else
+  {
+    lio_degenerate_frame_count_ = 0;
+    lio_freeze_state_ready_ = false;
+    last_lio_stable_state_ = _state;
+    last_lio_stable_state_ready_ = true;
+  }
+  if (lio_freeze_state_when_degenerate_ &&
+      lio_unstable_after_state &&
+      lio_degenerate_frame_count_ >= lio_freeze_degenerate_min_frames_)
+  {
+    if (!lio_freeze_state_ready_)
+    {
+      lio_freeze_state_ = last_lio_stable_state_ready_ ? last_lio_stable_state_ :
+                          (ekf_finish_once ? latest_ekf_state : _state);
+      lio_freeze_state_.vel_end.setZero();
+      lio_freeze_state_ready_ = true;
+    }
+    _state = lio_freeze_state_;
+    _state.vel_end.setZero();
+    applyDegeneracyGuardCorrections("LIO-freeze");
+    snapStateForDeterminism(_state);
+    voxelmap_manager->state_ = _state;
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    ROS_WARN_THROTTLE(1.0,
+                      "[LIO] Freeze state during unstable LiDAR constraints: frames=%d ratio=%.6f.",
+                      lio_degenerate_frame_count_,
+                      voxelmap_manager->getLidarConstraintRatio());
+  }
   applyUwbUpdate("LIO");
   advanceUwbOutputCorrection();
+  if (!validateStateForSafety("LIO-after-uwb", state_before_lio_update, _state, false, false))
+  {
+    if (vio_manager) vio_manager->updateFrameState(_state);
+    return;
+  }
 
   double t2 = omp_get_wtime();
 
@@ -1090,7 +3452,7 @@ void LIVMapper::handleLIO()
     state_update_flg = true;
   }
 
-  if (pose_output_en) 
+  if (pose_output_en && !(safety_guard_enable_ && safety_fail_safe_mode_))
   {
     static bool pos_opend = false;
     static int ocount = 0;
@@ -1116,44 +3478,120 @@ void LIVMapper::handleLIO()
   
   euler_cur = RotMtoEuler(_state.rot_end);
   geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
-  publish_odometry(pubOdomAftMapped);
+  if ((!update_decision_ready_ || current_decision_.allow_publish) &&
+      validateStateForSafety("LIO-pre-odom", state_before_lio_update, _state, false, false))
+  {
+    publish_odometry(pubOdomAftMapped);
+  }
 
   double t3 = omp_get_wtime();
 
   const int map_update_stride = std::max(1, lio_map_update_stride_);
   lio_map_update_counter_++;
-  const bool do_map_update = (map_update_stride <= 1) || ((lio_map_update_counter_ % map_update_stride) == 0);
-  double t4 = t3;
-
-  if (do_map_update)
+  lio_frames_since_voxel_map_update_++;
+  const bool lio_degenerated = voxelmap_manager->isLidarDegenerated() || lio_freeze_state_ready_;
+  const bool stride_ready = (map_update_stride <= 1) || ((lio_map_update_counter_ % map_update_stride) == 0);
+  const double time_since_map_update =
+      (lio_last_voxel_map_update_time_ >= 0.0 && LidarMeasures.last_lio_update_time > lio_last_voxel_map_update_time_) ?
+      (LidarMeasures.last_lio_update_time - lio_last_voxel_map_update_time_) : std::numeric_limits<double>::infinity();
+	  const bool force_map_context = lio_force_voxel_map_update_;
+  const bool force_by_frames =
+      lio_force_voxel_map_update_ && force_map_context &&
+      lio_frames_since_voxel_map_update_ >= std::max(1, lio_force_map_update_lidar_frames_);
+	  const bool force_by_time =
+	      lio_force_voxel_map_update_ && force_map_context && lio_force_map_update_interval_ > 0.0 &&
+	      time_since_map_update >= lio_force_map_update_interval_;
+	  const bool force_ready = force_by_frames || force_by_time;
+	  MapUpdateDecision map_decision =
+	      decideMapUpdate(lio_degenerated, stride_ready, force_ready, true);
+	  bool do_map_update = map_decision.allow;
+	  std::string voxel_map_skip_reason = map_decision.skip_reason;
+	  if (!do_map_update && map_decision.reason == RejectReason::SMALL_MOTION && force_ready)
   {
-    PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
-    transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
-    for (size_t i = 0; i < world_lidar->points.size(); i++)
-    {
-      voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
-      M3D point_crossmat = voxelmap_manager->cross_mat_list_[i];
-      M3D var = voxelmap_manager->body_cov_list_[i];
-      var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
-            (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
-      voxelmap_manager->pv_list_[i].var = var;
-    }
-    voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
-    if (print_console_timing_en_ && (frame_num % std::max(1, print_console_timing_stride_) == 0))
-    {
-      std::cout << "[ LIO ] Update Voxel Map" << std::endl;
-    }
-    _pv_list = voxelmap_manager->pv_list_;
-
-    t4 = omp_get_wtime();
-
-    if (voxelmap_manager->config_setting_.map_sliding_en)
-    {
-      voxelmap_manager->mapSliding();
-    }
+    do_map_update = true;
+    voxel_map_skip_reason = force_by_frames ? "forced_by_lidar_frames" : "forced_by_time";
+    ROS_WARN_THROTTLE(1.0,
+	                      "[LIO] Force voxel map update: reason=%s frames_since=%d time_since=%.3f s.",
+                      voxel_map_skip_reason.c_str(),
+                      lio_frames_since_voxel_map_update_,
+                      time_since_map_update);
   }
-  
-  PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
+  deg_guard_last_lio_voxel_map_updated_ = do_map_update;
+  deg_guard_last_lio_voxel_map_skip_reason_ = voxel_map_skip_reason;
+  double t4 = t3;
+  if (!do_map_update)
+  {
+    ROS_WARN_THROTTLE(1.0,
+                      "[LIO] Skip voxel map update: reason=%s degenerated=%d stride_ready=%d frames_since=%d time_since=%.3f s.",
+                      voxel_map_skip_reason.c_str(),
+                      static_cast<int>(lio_degenerated),
+                      static_cast<int>(stride_ready),
+                      lio_frames_since_voxel_map_update_,
+                      time_since_map_update);
+  }
+
+	  if (do_map_update)
+	  {
+	    PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
+    transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
+    const size_t update_count = std::min({world_lidar->points.size(),
+                                          voxelmap_manager->pv_list_.size(),
+                                          voxelmap_manager->cross_mat_list_.size(),
+                                          voxelmap_manager->body_cov_list_.size()});
+    if (update_count == 0)
+    {
+	      do_map_update = false;
+	      deg_guard_last_lio_voxel_map_updated_ = false;
+	      deg_guard_last_lio_voxel_map_skip_reason_ = "NO_POINTS";
+	      ROS_WARN_THROTTLE(1.0, "[LIO] Skip voxel map update: reason=NO_POINTS.");
+    }
+    else
+    {
+      if (update_count < world_lidar->points.size() ||
+          update_count < voxelmap_manager->pv_list_.size())
+      {
+        ROS_WARN_THROTTLE(1.0,
+                          "[LIO] Voxel map update point count mismatch: world=%zu pv=%zu cross=%zu cov=%zu, update=%zu.",
+                          world_lidar->points.size(),
+                          voxelmap_manager->pv_list_.size(),
+                          voxelmap_manager->cross_mat_list_.size(),
+                          voxelmap_manager->body_cov_list_.size(),
+                          update_count);
+      }
+      for (size_t i = 0; i < update_count; i++)
+      {
+        voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
+        M3D point_crossmat = voxelmap_manager->cross_mat_list_[i];
+        M3D var = voxelmap_manager->body_cov_list_[i];
+        var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
+              (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
+        voxelmap_manager->pv_list_[i].var = var;
+      }
+      voxelmap_manager->pv_list_.resize(update_count);
+      voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
+      lio_frames_since_voxel_map_update_ = 0;
+      lio_last_voxel_map_update_time_ = LidarMeasures.last_lio_update_time;
+      if (print_console_timing_en_ && (frame_num % std::max(1, print_console_timing_stride_) == 0))
+      {
+        std::cout << "[ LIO ] Update Voxel Map, reason=" << voxel_map_skip_reason << std::endl;
+      }
+      _pv_list = voxelmap_manager->pv_list_;
+
+      t4 = omp_get_wtime();
+
+      if (voxelmap_manager->config_setting_.map_sliding_en)
+      {
+        voxelmap_manager->mapSliding();
+	      }
+	    }
+	  }
+		  if (local_mode_ == "DEGRADED_BOOTSTRAP" || local_mode_ == "LOCAL_REINIT" || local_mode_ == "RELOCALIZE")
+	  {
+	    lio_bootstrap_frames_++;
+	  }
+	  updateLocalTrackingLostDetectors("LIO");
+
+	  PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
   int size = laserCloudFullRes->points.size();
   PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
 
@@ -1163,11 +3601,22 @@ void LIVMapper::handleLIO()
   }
   *pcl_w_wait_pub = *laserCloudWorld;
 
-  if (!img_en) publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
-  if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);
-  if (voxelmap_manager->config_setting_.is_pub_plane_map_) voxelmap_manager->pubVoxelMap();
-  publish_path(pubPath);
-  publish_mavros(mavros_pose_publisher);
+  if ((!update_decision_ready_ || current_decision_.allow_publish) &&
+      !(safety_guard_enable_ && safety_fail_safe_mode_) &&
+      validateStateForSafety("LIO-pre-publish", state_before_lio_update, _state, false, false))
+  {
+    if (!img_en) publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
+    if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);
+    if (voxelmap_manager->config_setting_.is_pub_plane_map_) voxelmap_manager->pubVoxelMap();
+    publish_path(pubPath);
+    publish_mavros(mavros_pose_publisher);
+  }
+  if (deg_guard_last_lio_update_executed_ &&
+      deg_guard_last_update_status_ != "skipped" &&
+      deg_guard_last_update_status_ != "rejected")
+  {
+    recordReliableStateForSafety("LIO");
+  }
 
   double t5 = omp_get_wtime();
 
@@ -1375,6 +3824,12 @@ void LIVMapper::run()
 
     processImu();
     const double t_imu_end = omp_get_wtime();
+    if (skip_mapping_this_frame_)
+    {
+      writeDegeneracyGuardLog("imu-init-skip");
+      rate.sleep();
+      continue;
+    }
 
     // if (!p_imu->imu_time_init) continue;
 
@@ -1544,7 +3999,9 @@ void LIVMapper::imu_prop_callback(const ros::TimerEvent &e)
 
 void LIVMapper::transformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud, PointCloudXYZI::Ptr &trans_cloud)
 {
+  if (trans_cloud == nullptr) return;
   PointCloudXYZI().swap(*trans_cloud);
+  if (input_cloud == nullptr || input_cloud->empty()) return;
   trans_cloud->reserve(input_cloud->size());
   for (size_t i = 0; i < input_cloud->size(); i++)
   {
@@ -1848,118 +4305,10 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   sig_buffer.notify_all();
 }
 
-bool LIVMapper::syncLivoByLidarNearestImage(LidarMeasureGroup &meas)
-{
-  if (meas.lio_vio_flg == LIO)
-  {
-    if (!has_pending_vio_img_) return false;
-
-    meas.lio_vio_flg = VIO;
-    meas.measures.clear();
-
-    MeasureGroup m;
-    m.vio_time = pending_vio_time_;
-    m.lio_time = meas.last_lio_update_time;
-    m.img = pending_vio_img_;
-
-    pending_vio_img_.release();
-    pending_vio_time_ = 0.0;
-    has_pending_vio_img_ = false;
-    lidar_pushed = false;
-
-    meas.measures.push_back(m);
-    sig_buffer.notify_all();
-    return true;
-  }
-
-  if (meas.lio_vio_flg != WAIT && meas.lio_vio_flg != VIO) return false;
-
-  std::unique_lock<std::mutex> buffer_lock(mtx_buffer);
-  if (lid_raw_data_buffer.empty() || imu_buffer.empty() || img_buffer.empty()) return false;
-
-  PointCloudXYZI::Ptr lidar = lid_raw_data_buffer.front();
-  if (!lidar || lidar->points.size() <= 1) return false;
-
-  const double lidar_beg_time = lid_header_time_buffer.front();
-  const double lidar_end_time = lidar_beg_time + lidar->points.back().curvature / double(1000);
-  if (imu_en && last_timestamp_imu < lidar_end_time) return false;
-
-  const double target_img_time = lidar_end_time - exposure_time_init;
-  auto after_it = std::lower_bound(img_time_buffer.begin(), img_time_buffer.end(), target_img_time);
-  if (after_it == img_time_buffer.end()) return false;
-
-  size_t img_idx = static_cast<size_t>(std::distance(img_time_buffer.begin(), after_it));
-  if (img_idx > 0)
-  {
-    const double before_time = img_time_buffer[img_idx - 1] + exposure_time_init;
-    const double after_time = img_time_buffer[img_idx] + exposure_time_init;
-    // ponytail: choose one image per LiDAR frame; earlier wins ties to avoid using a future image when equally close.
-    if (std::fabs(lidar_end_time - before_time) <= std::fabs(after_time - lidar_end_time))
-    {
-      img_idx--;
-    }
-  }
-
-  const cv::Mat nearest_img = img_buffer[img_idx];
-  const double nearest_img_time = img_time_buffer[img_idx] + exposure_time_init;
-
-  if (meas.last_lio_update_time < 0.0) meas.last_lio_update_time = lidar_beg_time;
-
-  MeasureGroup m;
-  m.imu.clear();
-  m.lio_time = lidar_end_time;
-
-  if (deterministic_imu_buffer_sort_en_)
-  {
-    std::sort(imu_buffer.begin(), imu_buffer.end(),
-              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
-                return a->header.stamp.toSec() < b->header.stamp.toSec();
-              });
-  }
-  while (!imu_buffer.empty())
-  {
-    const double imu_time = imu_buffer.front()->header.stamp.toSec();
-    if (imu_time > lidar_end_time) break;
-    if (imu_time > meas.last_lio_update_time) m.imu.push_back(imu_buffer.front());
-    imu_buffer.pop_front();
-  }
-
-  meas.lidar = lidar;
-  meas.lidar_frame_beg_time = lidar_beg_time;
-  meas.lidar_frame_end_time = lidar_end_time;
-  meas.pcl_proc_cur = lidar;
-  PointCloudXYZI().swap(*meas.pcl_proc_next);
-
-  lid_raw_data_buffer.pop_front();
-  lid_header_time_buffer.pop_front();
-
-  pending_vio_img_ = nearest_img;
-  pending_vio_time_ = nearest_img_time;
-  has_pending_vio_img_ = true;
-  img_buffer.erase(img_buffer.begin(), img_buffer.begin() + static_cast<long>(img_idx + 1));
-  img_time_buffer.erase(img_time_buffer.begin(), img_time_buffer.begin() + static_cast<long>(img_idx + 1));
-  buffer_lock.unlock();
-  sig_buffer.notify_all();
-
-  if (deterministic_imu_buffer_sort_en_)
-  {
-    std::sort(m.imu.begin(), m.imu.end(),
-              [](const sensor_msgs::Imu::ConstPtr &a, const sensor_msgs::Imu::ConstPtr &b) {
-                return a->header.stamp.toSec() < b->header.stamp.toSec();
-              });
-  }
-
-  meas.measures.push_back(m);
-  meas.lio_vio_flg = LIO;
-  lidar_pushed = true;
-  return true;
-}
-
 bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 {
   const bool pending_livo_vio =
-      slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_ &&
-      (deterministic_pending_vio_image_en_ || livo_lidar_nearest_image_sync_en_);
+      deterministic_pending_vio_image_en_ && slam_mode_ == LIVO && meas.lio_vio_flg == LIO && has_pending_vio_img_;
   if (lid_raw_data_buffer.empty() && lidar_en && !pending_livo_vio) return false;
   if (img_en && img_buffer.empty() && !pending_livo_vio) return false;
   if (imu_buffer.empty() && imu_en && !pending_livo_vio) return false;
@@ -2033,8 +4382,6 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
   case LIVO:
   {
-    if (livo_lidar_nearest_image_sync_en_) return syncLivoByLidarNearestImage(meas);
-
     /*** For LIVO mode, the time of LIO update is set to be the same as VIO, LIO
      * first than VIO imediatly ***/
     EKF_STATE last_lio_vio_flg = meas.lio_vio_flg;
@@ -2284,9 +4631,22 @@ void LIVMapper::publish_img_rgb(const image_transport::Publisher &pubImage, VIOM
 void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,const ros::Publisher &pubLaserCloudMap, VIOManagerPtr vio_manager)
 {
 
-  if (pcl_w_wait_pub->empty()) return;
+  if (safety_guard_enable_)
+  {
+    std::string reason;
+    if (safety_fail_safe_mode_ || !isStateFiniteForSafety(_state, "publish_frame_world", &reason))
+    {
+      if (!safety_fail_safe_mode_) enterFailSafe(reason.empty() ? "publish_frame_world_invalid_state" : reason, nullptr);
+      return;
+    }
+  }
+  if (pcl_w_wait_pub == nullptr || pcl_w_wait_pub->empty()) return;
   PointCloudXYZRGB::Ptr laserCloudWorldRGB(new PointCloudXYZRGB());
-  const bool need_rgb_cloud = img_en && (colorize_cloud_en_ || pcd_save_en);
+  const bool can_colorize = (vio_manager != nullptr) &&
+                            (vio_manager->new_frame_ != nullptr) &&
+                            (vio_manager->new_frame_->cam_ != nullptr) &&
+                            !vio_manager->img_rgb.empty();
+  const bool need_rgb_cloud = img_en && (colorize_cloud_en_ || pcd_save_en) && can_colorize;
   if (need_rgb_cloud)
   {
     static int pub_num = 1;
@@ -2356,7 +4716,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
   /* 2. noted that pcd save will influence the real-time performences **/
   if (pcd_save_en)
   {
-    int size = feats_undistort->points.size();
+    int size = feats_undistort ? feats_undistort->points.size() : 0;
     PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(size, 1));
     static int scan_wait_num = 0;
     
@@ -2464,8 +4824,10 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
   {
     Eigen::Quaterniond q(_state.rot_end);
     const V3D out_pos = outputPosition();
-    fout_pcd_pos << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " " << q.w() << " " << q.x() << " " << q.y()
-                  << " " << q.z() << " " << endl;
+    std::ostringstream stamp_oss;
+    stamp_oss << std::fixed << std::setprecision(9) << LidarMeasures.last_lio_update_time;
+    fout_pcd_pos << stamp_oss.str() << " " << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " "
+                 << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " " << endl;
   }
   
   if (need_rgb_cloud && laserCloudWorldRGB->size() > 0) PointCloudXYZI().swap(*pcl_wait_pub);
@@ -2474,6 +4836,8 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
 
 void LIVMapper::publish_visual_sub_map(const ros::Publisher &pubSubVisualMap)
 {
+  if (safety_guard_enable_ && safety_fail_safe_mode_) return;
+  if (visual_sub_map == nullptr) return;
   PointCloudXYZI::Ptr laserCloudFullRes(visual_sub_map);
   int size = laserCloudFullRes->points.size(); if (size == 0) return;
   PointCloudXYZI::Ptr sub_pcl_visual_map_pub(new PointCloudXYZI());
@@ -2490,6 +4854,7 @@ void LIVMapper::publish_visual_sub_map(const ros::Publisher &pubSubVisualMap)
 
 void LIVMapper::publish_effect_world(const ros::Publisher &pubLaserCloudEffect, const std::vector<PointToPlane> &ptpl_list)
 {
+  if (safety_guard_enable_ && safety_fail_safe_mode_) return;
   int effect_feat_num = ptpl_list.size();
   PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(effect_feat_num, 1));
   for (int i = 0; i < effect_feat_num; i++)
@@ -2519,6 +4884,15 @@ template <typename T> void LIVMapper::set_posestamp(T &out)
 
 void LIVMapper::publish_odometry(const ros::Publisher &pubOdomAftMapped)
 {
+  if (safety_guard_enable_)
+  {
+    std::string reason;
+    if (safety_fail_safe_mode_ || !isStateFiniteForSafety(_state, "publish_odom", &reason))
+    {
+      if (!safety_fail_safe_mode_) enterFailSafe(reason.empty() ? "publish_odom_invalid_state" : reason, nullptr);
+      return;
+    }
+  }
   odomAftMapped.header.frame_id = "camera_init";
   odomAftMapped.child_frame_id = "aft_mapped";
   odomAftMapped.header.stamp = ros::Time::now(); //.ros::Time()fromSec(last_timestamp_lidar);
@@ -2541,6 +4915,15 @@ void LIVMapper::publish_odometry(const ros::Publisher &pubOdomAftMapped)
 
 void LIVMapper::publish_mavros(const ros::Publisher &mavros_pose_publisher)
 {
+  if (safety_guard_enable_)
+  {
+    std::string reason;
+    if (safety_fail_safe_mode_ || !isStateFiniteForSafety(_state, "publish_mavros", &reason))
+    {
+      if (!safety_fail_safe_mode_) enterFailSafe(reason.empty() ? "publish_mavros_invalid_state" : reason, nullptr);
+      return;
+    }
+  }
   msg_body_pose.header.stamp = ros::Time::now();
   msg_body_pose.header.frame_id = "camera_init";
   set_posestamp(msg_body_pose.pose);
@@ -2549,6 +4932,15 @@ void LIVMapper::publish_mavros(const ros::Publisher &mavros_pose_publisher)
 
 void LIVMapper::publish_path(const ros::Publisher pubPath)
 {
+  if (safety_guard_enable_)
+  {
+    std::string reason;
+    if (safety_fail_safe_mode_ || !isStateFiniteForSafety(_state, "publish_path", &reason))
+    {
+      if (!safety_fail_safe_mode_) enterFailSafe(reason.empty() ? "publish_path_invalid_state" : reason, nullptr);
+      return;
+    }
+  }
   set_posestamp(msg_body_pose.pose);
   msg_body_pose.header.stamp = ros::Time::now();
   msg_body_pose.header.frame_id = "camera_init";

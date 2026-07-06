@@ -25,6 +25,7 @@ which is included as part of this source code package.
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <string>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -66,6 +67,7 @@ typedef struct VoxelMapConfig
   // config of ICP stability guard
   double icp_max_rot_step_deg;
   double icp_max_trans_step_m;
+  bool reject_degenerate_update;
 
   bool deterministic_lio_update_en;
 } VoxelMapConfig;
@@ -239,6 +241,18 @@ public:
   std::vector<PointToPlane> ptpl_list_;
   bool lidar_degenerated_ = false;
   double lidar_constraint_ratio_ = 0.0;
+  bool adaptive_sensor_weighting_en_ = false;
+  double adaptive_external_noise_scale_ = 1.0;
+  double adaptive_low_feature_noise_scale_ = 2.0;
+  double adaptive_high_residual_noise_scale_ = 2.0;
+  double adaptive_residual_ref_ = 0.05;
+  double adaptive_max_noise_scale_ = 10.0;
+  int adaptive_min_lidar_features_ = 30;
+  double last_average_residual_ = 0.0;
+  double last_adaptive_noise_scale_ = 1.0;
+  std::string last_adaptive_weight_reason_ = "off";
+  std::string last_update_status_ = "accepted";
+  std::string last_reject_reason_ = "";
 
   VoxelMapManager(VoxelMapConfig &config_setting, std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &voxel_map)
       : config_setting_(config_setting), voxel_map_(voxel_map)

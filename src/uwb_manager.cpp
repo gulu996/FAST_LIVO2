@@ -372,6 +372,7 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<bool>("uwb/rts", rts_high_, false);
   nh.param<std::string>("uwb/mode", mode_, "external_anchors");
   nh.param<std::string>("uwb/parser_mode", parser_mode_, "uwb");
+  nh.param<std::string>("uwb/range_model", range_model_, "3d");
   nh.param<std::string>("uwb/log_filename", log_filename_, "uwb_ranges.txt");
   nh.param<int>("uwb/log_flush_stride", log_flush_stride_, 1);
   nh.param<std::string>("uwb/replay_file", replay_file_, "");
@@ -388,6 +389,12 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("uwb/max_residual_m", max_residual_m_, 3.0);
   nh.param<double>("uwb/update_max_rot_step_deg", update_max_rot_step_deg_, 1.0);
   nh.param<double>("uwb/update_max_trans_step_m", update_max_trans_step_m_, 0.10);
+  nh.param<double>("uwb/max_xy_correction_m", max_xy_correction_m_, 1.0);
+  nh.param<bool>("uwb/diagnostic_only", diagnostic_only_, false);
+  nh.param<bool>("uwb/relocalize_en", relocalize_en_, false);
+  nh.param<int>("uwb/relocalize_min_anchors", relocalize_min_anchors_, 4);
+  nh.param<double>("uwb/relocalize_max_residual_m", relocalize_max_residual_m_, 1.0);
+  nh.param<double>("uwb/relocalize_max_correction_m", relocalize_max_correction_m_, 0.5);
   nh.param<bool>("uwb/tag_offset_estimate_en", tag_offset_estimate_en_, false);
   nh.param<int>("uwb/tag_offset_estimate_min_anchors", tag_offset_estimate_min_anchors_, 2);
   nh.param<double>("uwb/tag_offset_init_cov_m", tag_offset_init_cov_m_, 0.10);
@@ -507,6 +514,12 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   replay_speed_ = std::max(1e-6, replay_speed_);
   input_source_ = toLower(input_source_);
   replay_time_mode_ = toLower(replay_time_mode_);
+  range_model_ = toLower(range_model_);
+  if (range_model_ != "3d" && range_model_ != "xy")
+  {
+    ROS_WARN("[UWB] Unknown uwb/range_model='%s'. Use '3d'.", range_model_.c_str());
+    range_model_ = "3d";
+  }
   min_range_m_ = std::max(0.0, min_range_m_);
   max_range_m_ = std::max(min_range_m_, max_range_m_);
   max_age_s_ = std::max(0.0, max_age_s_);
@@ -517,6 +530,10 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   max_residual_m_ = std::max(0.0, max_residual_m_);
   update_max_rot_step_deg_ = std::max(0.0, update_max_rot_step_deg_);
   update_max_trans_step_m_ = std::max(0.0, update_max_trans_step_m_);
+  max_xy_correction_m_ = std::max(0.0, max_xy_correction_m_);
+  relocalize_min_anchors_ = std::max(1, relocalize_min_anchors_);
+  relocalize_max_residual_m_ = std::max(0.0, relocalize_max_residual_m_);
+  relocalize_max_correction_m_ = std::max(0.0, relocalize_max_correction_m_);
   tag_offset_estimate_min_anchors_ = std::max(1, tag_offset_estimate_min_anchors_);
   tag_offset_init_cov_m_ = std::max(1e-4, tag_offset_init_cov_m_);
   tag_offset_process_noise_m_ = std::max(0.0, tag_offset_process_noise_m_);
@@ -583,6 +600,18 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
       configured_anchors_[anchor.id] = anchor;
       if (anchor.enabled && !anchor_frame_align_en_) anchors_[anchor.id] = anchor;
     }
+  }
+
+  int enabled_anchor_count_for_update = 0;
+  for (const auto &item : configured_anchors_)
+  {
+    if (item.second.enabled) enabled_anchor_count_for_update++;
+  }
+  if (enabled_anchor_count_for_update >= 4 && min_update_anchors_ < 3)
+  {
+    ROS_WARN("[UWB] %d anchors are enabled; raising uwb/min_update_anchors from %d to 3.",
+             enabled_anchor_count_for_update, min_update_anchors_);
+    min_update_anchors_ = 3;
   }
 
   if (legacy_entry_exit_mode && baseline_distance_m_ > 0.0)
@@ -690,9 +719,11 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
     }
   }
 
-  ROS_INFO("[UWB] enable=%d update=%d mode=%s parser=%s anchors_for_update=%zu",
+  ROS_INFO("[UWB] enable=%d update=%d mode=%s parser=%s range_model=%s diagnostic_only=%d anchors_for_update=%zu min_update_anchors=%d relocalize_en=%d",
            static_cast<int>(en_), static_cast<int>(update_en_),
-           mode_.c_str(), parser_mode_.c_str(), anchors_.size());
+           mode_.c_str(), parser_mode_.c_str(), range_model_.c_str(),
+           static_cast<int>(diagnostic_only_), anchors_.size(), min_update_anchors_,
+           static_cast<int>(relocalize_en_));
   if (position_cov_floor_m_ > 0.0)
   {
     ROS_INFO("[UWB] Position covariance floor enabled for UWB updates: %.3f m",
@@ -927,10 +958,12 @@ bool UwbManager::loadReplayFile()
     }
   }
 
-  std::sort(replay_measurements_.begin(), replay_measurements_.end(),
-            [](const UwbRangeMeasurement &a, const UwbRangeMeasurement &b) {
-              return a.stamp < b.stamp;
-            });
+	std::sort(replay_measurements_.begin(), replay_measurements_.end(),
+	          [](const UwbRangeMeasurement &a, const UwbRangeMeasurement &b) {
+	            if (a.stamp != b.stamp) return a.stamp < b.stamp;
+	            if (a.anchor_id != b.anchor_id) return a.anchor_id < b.anchor_id;
+	            return a.range_m < b.range_m;
+	          });
 
   if (!replay_measurements_.empty())
   {
@@ -993,6 +1026,66 @@ std::vector<UwbRangeMeasurement> UwbManager::takeReplayMeasurements(double now)
     measurements.push_back(measurement);
     replay_index_++;
   }
+  return measurements;
+}
+
+std::vector<UwbRangeMeasurement> UwbManager::takeReplayMeasurementsInWindow(double center_stamp, double half_window_s)
+{
+  std::vector<UwbRangeMeasurement> measurements;
+  if (replay_measurements_.empty() || replay_index_ >= replay_measurements_.size()) return measurements;
+  if (center_stamp <= 0.0 || !std::isfinite(center_stamp)) return measurements;
+
+  const double window = std::max(0.0, half_window_s);
+  const double lower = center_stamp - window;
+  const double upper = center_stamp + window;
+
+  if (!replay_started_)
+  {
+    replay_started_ = true;
+    replay_ros_start_stamp_ = center_stamp;
+    if (!replay_file_start_stamp_ready_)
+    {
+      replay_file_start_stamp_ = replay_measurements_.front().stamp;
+      replay_file_start_stamp_ready_ = true;
+    }
+  }
+
+  auto dueTime = [&](const UwbRangeMeasurement &measurement) {
+    double due_time = measurement.stamp;
+    if (replay_time_mode_ != "absolute")
+    {
+      const double effective_replay_speed = ros::Time::isSimTime() ? 1.0 : replay_speed_;
+      due_time = replay_ros_start_stamp_ +
+                 (measurement.stamp - replay_file_start_stamp_) / effective_replay_speed;
+    }
+    return due_time;
+  };
+
+  while (replay_index_ < replay_measurements_.size())
+  {
+    const double due_time = dueTime(replay_measurements_[replay_index_]);
+    if (due_time >= lower) break;
+    replay_index_++;
+  }
+
+  size_t idx = replay_index_;
+  while (idx < replay_measurements_.size())
+  {
+    const double due_time = dueTime(replay_measurements_[idx]);
+    if (due_time > upper) break;
+    UwbRangeMeasurement measurement = replay_measurements_[idx];
+    measurement.stamp = due_time;
+    measurements.push_back(measurement);
+    idx++;
+  }
+  replay_index_ = idx;
+
+  std::sort(measurements.begin(), measurements.end(),
+            [](const UwbRangeMeasurement &a, const UwbRangeMeasurement &b) {
+              if (a.stamp != b.stamp) return a.stamp < b.stamp;
+              if (a.anchor_id != b.anchor_id) return a.anchor_id < b.anchor_id;
+              return a.range_m < b.range_m;
+            });
   return measurements;
 }
 
@@ -1133,6 +1226,39 @@ std::vector<UwbRangeMeasurement> UwbManager::takeRecentMeasurements(double now)
     if (max_age_s_ > 0.0 && now - measurement.stamp > max_age_s_) continue;
     measurements.push_back(measurement);
   }
+  return measurements;
+}
+
+std::vector<UwbRangeMeasurement> UwbManager::takeRecentMeasurementsInWindow(double center_stamp, double half_window_s)
+{
+  std::vector<UwbRangeMeasurement> measurements;
+  std::deque<UwbRangeMeasurement> future_measurements;
+  const double window = std::max(0.0, half_window_s);
+  const double lower = center_stamp - window;
+  const double upper = center_stamp + window;
+
+  std::lock_guard<std::mutex> lock(measurement_mutex_);
+  while (!measurement_queue_.empty())
+  {
+    UwbRangeMeasurement measurement = measurement_queue_.front();
+    measurement_queue_.pop_front();
+    if (measurement.stamp < lower) continue;
+    if (measurement.stamp <= upper)
+    {
+      measurements.push_back(measurement);
+    }
+    else
+    {
+      future_measurements.push_back(measurement);
+    }
+  }
+  measurement_queue_.swap(future_measurements);
+  std::sort(measurements.begin(), measurements.end(),
+            [](const UwbRangeMeasurement &a, const UwbRangeMeasurement &b) {
+              if (a.stamp != b.stamp) return a.stamp < b.stamp;
+              if (a.anchor_id != b.anchor_id) return a.anchor_id < b.anchor_id;
+              return a.range_m < b.range_m;
+            });
   return measurements;
 }
 
@@ -1949,11 +2075,15 @@ void UwbManager::logUpdate(double stamp, int used_count, double residual_norm, c
   std::lock_guard<std::mutex> lock(log_mutex_);
   if (!log_file_.is_open()) return;
 
-  log_file_ << std::fixed << std::setprecision(6)
-            << stamp << " UPDATE used=" << used_count
-            << " residual_norm=" << residual_norm
-            << " rot_add=" << rot_add.transpose()
-            << " trans_add=" << trans_add.transpose()
+	  log_file_ << std::fixed << std::setprecision(6)
+	            << stamp << " UPDATE used=" << used_count
+	            << " residual_norm=" << residual_norm
+	            << " action=" << last_update_summary_.action
+	            << " xy_correction_before_step=" << last_update_summary_.xy_correction_before_step
+	            << " z_correction_before_clamp=" << last_update_summary_.z_correction_before_clamp
+	            << " z_correction_after_clamp=" << last_update_summary_.z_correction_after_clamp
+	            << " rot_add=" << rot_add.transpose()
+	            << " trans_add=" << trans_add.transpose()
             << " tag_offset=" << tag_offset_est_body_.transpose()
             << " tag_offset_add=" << tag_offset_add.transpose()
             << " ranges_pre_update={" << range_details << "}"
@@ -1963,8 +2093,16 @@ void UwbManager::logUpdate(double stamp, int used_count, double residual_norm, c
 
 int UwbManager::applyRangeUpdate(StatesGroup &state)
 {
-  if (!en_ || !update_en_) return 0;
   const double now = ros::Time::now().toSec();
+  return applyRangeUpdateAt(state, now, max_age_s_);
+}
+
+int UwbManager::applyRangeUpdateAt(StatesGroup &state, double center_stamp, double half_window_s)
+{
+  last_update_summary_ = UwbUpdateSummary();
+  last_update_summary_.stamp = center_stamp;
+  if (!en_ || !update_en_) return 0;
+  const double now = center_stamp;
   if ((anchor_frame_align_en_ && !anchor_frame_align_start_pose_ready_) ||
       (!anchor_frame_align_en_ && baseline_anchor_init_en_ && !baseline_start_pose_ready_))
   {
@@ -1984,8 +2122,8 @@ int UwbManager::applyRangeUpdate(StatesGroup &state)
 
   const std::string source = toLower(input_source_);
   const auto measurements = (source == "file" || source == "txt" || source == "replay") ?
-                            takeReplayMeasurements(now) :
-                            takeRecentMeasurements(now);
+                            takeReplayMeasurementsInWindow(center_stamp, half_window_s) :
+                            takeRecentMeasurementsInWindow(center_stamp, half_window_s);
   if (measurements.empty()) return 0;
   const bool anchor_frame_ready = tryAlignAnchorFrame(state, measurements);
   const bool baseline_ready = anchor_frame_align_en_ ? false : tryInitializeBaselineAnchors(state, measurements);
@@ -2028,18 +2166,37 @@ int UwbManager::applyRangeUpdate(StatesGroup &state)
     }
     return 0;
   }
-  return applyLatestMeasurements(state, measurements);
+  return applyLatestMeasurements(state, measurements, center_stamp);
 }
 
-int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements)
+int UwbManager::applyLatestMeasurements(StatesGroup &state,
+                                        const std::vector<UwbRangeMeasurement> &measurements,
+                                        double update_stamp)
 {
+  last_update_summary_ = UwbUpdateSummary();
+  last_update_summary_.stamp = update_stamp;
   std::map<int, UwbRangeMeasurement> latest_by_anchor;
   for (const auto &measurement : measurements)
   {
     if (anchors_.find(measurement.anchor_id) == anchors_.end()) continue;
     latest_by_anchor[measurement.anchor_id] = measurement;
   }
-  if (static_cast<int>(latest_by_anchor.size()) < min_update_anchors_) return 0;
+  if (static_cast<int>(latest_by_anchor.size()) < min_update_anchors_)
+  {
+    std::ostringstream ids;
+    for (const auto &item : latest_by_anchor)
+    {
+      if (ids.tellp() > 0) ids << "|";
+      ids << item.first;
+    }
+    last_update_summary_.used_count = static_cast<int>(latest_by_anchor.size());
+    last_update_summary_.action = "skip_latest_anchors";
+    logEvent(update_stamp, "WARN",
+             "SKIP_EKF_UPDATE latest_anchors=" + std::to_string(latest_by_anchor.size()) +
+             " required=" + std::to_string(min_update_anchors_) +
+             " ids=" + ids.str());
+    return 0;
+  }
 
   std::vector<UwbRangeMeasurement> usable_measurements;
   usable_measurements.reserve(latest_by_anchor.size());
@@ -2055,6 +2212,7 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
   const V3D tag_offset_used = tag_offset_estimate_en_ ? tag_offset_est_body_ : tag_offset_body_;
   const V3D tag_position_w = state.pos_end + state.rot_end * tag_offset_used;
   std::ostringstream range_details;
+  bool has_range_detail = false;
   int row = 0;
   for (const auto &measurement : usable_measurements)
   {
@@ -2062,12 +2220,35 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     if (anchor_it == anchors_.end()) continue;
 
     const V3D diff = tag_position_w - anchor_it->second.position_w;
-    const double predicted_range = diff.norm();
-    if (predicted_range < 1e-6) continue;
-
+    const double predicted_range_3d = uwbPredictedRange3d(tag_position_w, anchor_it->second.position_w);
+    const double predicted_range_xy = uwbPredictedRangeXy(tag_position_w, anchor_it->second.position_w);
+    const double predicted_range = (range_model_ == "xy") ? predicted_range_xy : predicted_range_3d;
     const double residual = measurement.range_m - predicted_range;
-    if (!std::isfinite(residual)) continue;
-    if (max_residual_m_ > 0.0 && std::fabs(residual) > max_residual_m_)
+    const double abs_residual = std::fabs(residual);
+
+    auto appendRangeDetail = [&](bool accepted, const std::string &reason) {
+      if (has_range_detail) range_details << ";";
+      has_range_detail = true;
+      range_details << "id=" << measurement.anchor_id
+                    << ",anchor=[" << anchor_it->second.position_w.transpose() << "]"
+                    << ",tag=[" << tag_position_w.transpose() << "]"
+                    << ",measured=" << measurement.range_m
+                    << ",predicted=" << predicted_range
+                    << ",predicted_3d=" << predicted_range_3d
+                    << ",predicted_xy=" << predicted_range_xy
+                    << ",range_model=" << range_model_
+                    << ",residual=" << residual
+                    << ",abs_residual=" << abs_residual
+                    << ",accepted=" << static_cast<int>(accepted)
+                    << ",reason=" << reason;
+    };
+
+    if (predicted_range < 1e-6 || !std::isfinite(predicted_range) || !std::isfinite(residual))
+    {
+      appendRangeDetail(false, "bad_prediction");
+      continue;
+    }
+    if (max_residual_m_ > 0.0 && abs_residual > max_residual_m_)
     {
       ROS_WARN_THROTTLE(2.0, "[UWB] Reject range anchor=%d residual=%.3f m > %.3f m",
                         measurement.anchor_id, residual, max_residual_m_);
@@ -2078,41 +2259,68 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
             << " max_residual=" << max_residual_m_
             << " measured=" << measurement.range_m
             << " predicted=" << predicted_range
+            << " predicted_3d=" << predicted_range_3d
+            << " predicted_xy=" << predicted_range_xy
+            << " range_model=" << range_model_
             << " anchor_pos=[" << anchor_it->second.position_w.transpose() << "]"
             << " tag_pos=[" << tag_position_w.transpose() << "]";
-        logEventThrottled(ros::Time::now().toSec(),
-                          "reject_range_" + std::to_string(measurement.anchor_id),
-                          2.0, "WARN", oss.str());
+	        logEventThrottled(update_stamp,
+	                          "reject_range_" + std::to_string(measurement.anchor_id),
+	                          2.0, "WARN", oss.str());
       }
+      appendRangeDetail(false, "max_residual");
       continue;
     }
 
-    const V3D direction = diff / predicted_range;
-    H.block<1, 3>(row, 0) = direction.transpose() * (-state.rot_end * skewSymmetric(tag_offset_used));
-    H.block<1, 3>(row, 3) = direction.transpose();
+    const double dir_x = diff.x() / predicted_range;
+    const double dir_y = diff.y() / predicted_range;
+    H(row, 3) = dir_x;
+    H(row, 4) = dir_y;
     if (tag_offset_estimate_en_)
     {
-      H_tag.block<1, 3>(row, 0) = direction.transpose() * state.rot_end;
+      const V3D tag_dir = (range_model_ == "xy") ? V3D(dir_x, dir_y, 0.0) : (diff / predicted_range);
+      H_tag.block<1, 3>(row, 0) = tag_dir.transpose() * state.rot_end;
     }
     z(row) = residual;
-    if (row > 0) range_details << ";";
-    range_details << "id=" << measurement.anchor_id
-                  << ",anchor=[" << anchor_it->second.position_w.transpose() << "]"
-                  << ",tag=[" << tag_position_w.transpose() << "]"
-                  << ",measured=" << measurement.range_m
-                  << ",predicted=" << predicted_range
-                  << ",residual=" << residual;
+    appendRangeDetail(true, "used");
+    last_update_summary_.used_anchor_ids.push_back(measurement.anchor_id);
     row++;
   }
 
-  if (row < min_update_anchors_) return 0;
+  if (row < min_update_anchors_)
+  {
+    last_update_summary_.used_count = row;
+    last_update_summary_.range_details = range_details.str();
+    last_update_summary_.action = "skip_min_anchors";
+    std::ostringstream oss;
+    oss << "SKIP_EKF_UPDATE used=" << row
+        << " required=" << min_update_anchors_
+        << " range_details={" << range_details.str() << "}";
+    logEvent(update_stamp, "WARN", oss.str());
+    return 0;
+  }
   H.conservativeResize(row, DIM_STATE);
   H_tag.conservativeResize(row, 3);
   z.conservativeResize(row);
   Eigen::MatrixXd R = Eigen::MatrixXd::Identity(row, row) * (range_noise_m_ * range_noise_m_);
+  const double residual_norm = z.norm();
+  const double residual_rms = residual_norm / std::sqrt(static_cast<double>(row));
 
-  const bool estimate_tag_offset_this_update =
-      tag_offset_estimate_en_ && row >= tag_offset_estimate_min_anchors_;
+  if (diagnostic_only_)
+  {
+    last_update_summary_.used_count = row;
+    last_update_summary_.residual_norm = residual_norm;
+    last_update_summary_.range_details = range_details.str();
+    last_update_summary_.action = "diagnostic_only";
+    logUpdate(update_stamp, row, residual_norm, V3D::Zero(), V3D::Zero(),
+              V3D::Zero(), range_details.str());
+    ROS_INFO_THROTTLE(1.0,
+                      "[UWB] diagnostic_only used=%d residual_norm=%.3f residual_rms=%.3f range_model=%s",
+                      row, residual_norm, residual_rms, range_model_.c_str());
+    return 0;
+  }
+
+  const bool estimate_tag_offset_this_update = false;
 
   if (!estimate_tag_offset_this_update)
   {
@@ -2126,7 +2334,7 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
         oss << "SKIP_TAG_OFFSET_ESTIMATION used_anchors=" << row
             << " required=" << tag_offset_estimate_min_anchors_
             << " pose_update_still_runs=1";
-        logEventThrottled(ros::Time::now().toSec(), "skip_tag_offset_estimation", 3.0, "WARN", oss.str());
+	        logEventThrottled(update_stamp, "skip_tag_offset_estimation", 3.0, "WARN", oss.str());
       }
     }
 
@@ -2134,7 +2342,7 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     if (position_cov_floor_m_ > 0.0)
     {
       const double floor_var = position_cov_floor_m_ * position_cov_floor_m_;
-      for (int i = 0; i < 3; ++i)
+      for (int i = 0; i < 2; ++i)
       {
         const int idx = 3 + i;
         cov_for_uwb(idx, idx) = std::max(cov_for_uwb(idx, idx), floor_var);
@@ -2146,8 +2354,8 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     if (ldlt.info() != Eigen::Success)
     {
       ROS_WARN_THROTTLE(2.0, "[UWB] Skip update: innovation covariance decomposition failed.");
-      logEventThrottled(ros::Time::now().toSec(), "skip_cov_decomposition", 2.0, "WARN",
-                        "SKIP_EKF_UPDATE innovation_covariance_decomposition_failed");
+	      logEventThrottled(update_stamp, "skip_cov_decomposition", 2.0, "WARN",
+	                        "SKIP_EKF_UPDATE innovation_covariance_decomposition_failed");
       return 0;
     }
 
@@ -2155,14 +2363,50 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
     Eigen::VectorXd dx_dynamic = K * z;
     if (dx_dynamic.size() != DIM_STATE || !dx_dynamic.allFinite()) return 0;
 
-    VD(DIM_STATE) dx = VD(DIM_STATE)::Zero();
-    dx = dx_dynamic;
+	    VD(DIM_STATE) dx = VD(DIM_STATE)::Zero();
+	    dx = dx_dynamic;
+	    const double z_before_clamp = dx(5);
+	    VD(DIM_STATE) dx_xy = VD(DIM_STATE)::Zero();
+	    dx_xy(3) = dx(3);
+	    dx_xy(4) = dx(4);
+	    dx = dx_xy;
 
-    V3D rot_add = dx.block<3, 1>(0, 0);
-    V3D trans_add = dx.block<3, 1>(3, 0);
-    const double rot_step_deg = rot_add.norm() * 57.29577951308232;
-    const double trans_step_m = trans_add.norm();
-    double step_scale = 1.0;
+	    V3D rot_add = dx.block<3, 1>(0, 0);
+	    V3D trans_add = dx.block<3, 1>(3, 0);
+	    const double rot_step_deg = 0.0;
+	    const double raw_xy_step_m = std::hypot(trans_add.x(), trans_add.y());
+	    const double trans_step_m = raw_xy_step_m;
+	    last_update_summary_.xy_correction_before_step = raw_xy_step_m;
+	    last_update_summary_.z_correction_before_clamp = z_before_clamp;
+	    last_update_summary_.z_correction_after_clamp = 0.0;
+	    if (max_xy_correction_m_ > 0.0 && raw_xy_step_m > max_xy_correction_m_)
+	    {
+	      last_update_summary_.used_count = row;
+	      last_update_summary_.residual_norm = residual_norm;
+	      last_update_summary_.rot_add = rot_add;
+	      last_update_summary_.trans_add = trans_add;
+	      last_update_summary_.range_details = range_details.str();
+	      const bool relocalize_allowed =
+	          relocalize_en_ &&
+	          row >= relocalize_min_anchors_ &&
+	          (relocalize_max_residual_m_ <= 0.0 || residual_rms <= relocalize_max_residual_m_) &&
+	          (relocalize_max_correction_m_ <= 0.0 || raw_xy_step_m <= relocalize_max_correction_m_);
+	      last_update_summary_.relocalize_required = relocalize_allowed;
+	      last_update_summary_.action = relocalize_allowed ? "relocalize" : "reject_large_correction";
+	      logUpdate(update_stamp, row, residual_norm, rot_add, trans_add, V3D::Zero(), range_details.str());
+	      std::ostringstream oss;
+	      oss << (relocalize_allowed ? "UWB_RELOCALIZE_REQUIRED" : "REJECT_UWB_CORRECTION")
+	          << " xy_correction=" << raw_xy_step_m
+	          << " max_xy_correction=" << max_xy_correction_m_
+	          << " residual_rms=" << residual_rms
+	          << " relocalize_en=" << static_cast<int>(relocalize_en_)
+	          << " relocalize_min_anchors=" << relocalize_min_anchors_
+	          << " relocalize_max_residual=" << relocalize_max_residual_m_
+	          << " relocalize_max_correction=" << relocalize_max_correction_m_;
+	      logEvent(update_stamp, "WARN", oss.str());
+	      return 0;
+	    }
+	    double step_scale = 1.0;
     if (update_max_rot_step_deg_ > 0.0 && rot_step_deg > update_max_rot_step_deg_)
     {
       step_scale = std::min(step_scale, update_max_rot_step_deg_ / std::max(rot_step_deg, 1e-9));
@@ -2178,19 +2422,26 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
       trans_add = dx.block<3, 1>(3, 0);
     }
 
-    state += dx;
+	    state += dx;
     const MD(DIM_STATE, DIM_STATE) I_STATE = MD(DIM_STATE, DIM_STATE)::Identity();
     const MD(DIM_STATE, DIM_STATE) I_KH = I_STATE - K * H;
     state.cov = I_KH * cov_for_uwb * I_KH.transpose() + K * R * K.transpose();
     state.cov = 0.5 * (state.cov + state.cov.transpose());
     snapStateForDeterminism(state);
 
-    logUpdate(ros::Time::now().toSec(), row, z.norm(), rot_add, trans_add,
-              V3D::Zero(), range_details.str());
-    ROS_INFO_THROTTLE(1.0, "[UWB] EKF update used=%d residual_norm=%.3f trans_add=%.4f m",
-                      row, z.norm(), trans_add.norm());
-    return row;
-  }
+	    last_update_summary_.used_count = row;
+	    last_update_summary_.residual_norm = residual_norm;
+	    last_update_summary_.rot_add = rot_add;
+	    last_update_summary_.trans_add = trans_add;
+	    last_update_summary_.tag_offset_add = V3D::Zero();
+	    last_update_summary_.range_details = range_details.str();
+	    last_update_summary_.action = "xy_update";
+	    logUpdate(update_stamp, row, residual_norm, rot_add, trans_add,
+	              V3D::Zero(), range_details.str());
+	    ROS_INFO_THROTTLE(1.0, "[UWB] XY EKF update used=%d residual_norm=%.3f xy_add=%.4f m z_before=%.4f z_after=0.0000",
+	                      row, residual_norm, std::hypot(trans_add.x(), trans_add.y()), z_before_clamp);
+	    return row;
+	  }
 
   constexpr int DIM_UWB_JOINT = DIM_STATE + 3;
   Eigen::MatrixXd H_joint = Eigen::MatrixXd::Zero(row, DIM_UWB_JOINT);
@@ -2202,7 +2453,7 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
   if (position_cov_floor_m_ > 0.0)
   {
     const double floor_var = position_cov_floor_m_ * position_cov_floor_m_;
-    for (int i = 0; i < 3; ++i)
+	    for (int i = 0; i < 2; ++i)
     {
       const int idx = 3 + i;
       P_joint(idx, idx) = std::max(P_joint(idx, idx), floor_var);
@@ -2217,7 +2468,7 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
   if (ldlt.info() != Eigen::Success)
   {
     ROS_WARN_THROTTLE(2.0, "[UWB] Skip update: innovation covariance decomposition failed.");
-    logEventThrottled(ros::Time::now().toSec(), "skip_cov_decomposition", 2.0, "WARN",
+    logEventThrottled(update_stamp, "skip_cov_decomposition", 2.0, "WARN",
                       "SKIP_EKF_UPDATE innovation_covariance_decomposition_failed");
     return 0;
   }
@@ -2270,10 +2521,17 @@ int UwbManager::applyLatestMeasurements(StatesGroup &state, const std::vector<Uw
   tag_offset_cov_ = P_joint_updated.block(DIM_STATE, DIM_STATE, 3, 3);
   snapStateForDeterminism(state);
 
-  logUpdate(ros::Time::now().toSec(), row, z.norm(), rot_add, trans_add,
+  last_update_summary_.used_count = row;
+  last_update_summary_.residual_norm = residual_norm;
+  last_update_summary_.rot_add = rot_add;
+  last_update_summary_.trans_add = trans_add;
+  last_update_summary_.tag_offset_add = tag_offset_add;
+  last_update_summary_.range_details = range_details.str();
+  last_update_summary_.action = "joint_update";
+  logUpdate(update_stamp, row, residual_norm, rot_add, trans_add,
             tag_offset_add, range_details.str());
   ROS_INFO_THROTTLE(1.0, "[UWB] EKF update used=%d residual_norm=%.3f trans_add=%.4f m tag_offset=[%.3f %.3f %.3f]",
-                    row, z.norm(), trans_add.norm(),
+                    row, residual_norm, trans_add.norm(),
                     tag_offset_est_body_.x(), tag_offset_est_body_.y(), tag_offset_est_body_.z());
   return row;
 }

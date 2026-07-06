@@ -15,7 +15,8 @@ common:
   max_prop_imu_buffer_size: 10000
   sync_img_buffer_min_size: 5
   sync_img_lookahead_time: 0.12
-  livo_lidar_nearest_image_sync_en: true
+
+deterministic_mode: true
 
 deterministic_debug:
   force_single_thread: true
@@ -84,19 +85,31 @@ vio:
   visual_map_max_total_points: 20000 # 视觉点总量硬上限；满后按frame id淘汰最早的点
   visual_map_max_add_per_frame: 300 # 控制单帧新增点数量，适合Jetson长时间运行
   visual_map_min_shi_tomasi_score: 5.0 # 保留角点质量筛选，同时避免视觉地图长期只有少量可跟踪点
-  min_retrieve_points: 15 # 至少跟踪15个视觉点才进入视觉EKF；兼顾更新频率与坏图保护
-  min_update_meas: 300 # patch残差数量门限；跟踪点不足时仍会跳过状态更新
+  min_retrieve_points: 15 # 基础配置；degeneracy_guard启用时由vio_skip_tracked_points覆盖，避免低点数直接skip
+  min_update_meas: 300 # 基础配置；degeneracy_guard启用时由vio_min_update_meas覆盖，低点数改为高噪声更新
   low_track_force_update_stride: 0 # 关闭低跟踪强制VIO，避免坏图像靠少量点硬更新
   low_track_force_min_points: 12 # 备用参数；low_track_force_update_stride=0时不生效
   visual_update_guard_en: true # 视觉EKF总修正门限，超过则回滚到LIO/IMU预测，防止出口过曝导致突然倒退
   visual_update_max_trans_m: 0.12 # 收紧单帧视觉总平移修正上限，坏图导致的大跳变会回滚
-  visual_update_max_rot_deg: 2.0 # 收紧单帧视觉总旋转修正上限
-  visual_update_max_backward_m: 0.01 # 视觉更新后的最终位姿相对上一帧允许的反向步长硬上限，不限制VIO正常回拉LIO超前
+  visual_update_max_rot_deg: 8.0 # 视觉旋转保护放宽；实际门控优先使用rot_rate，触发后默认降权不reject
+  visual_update_max_trans_rate_mps: 3.0
+  visual_update_max_rot_rate_degps: 240.0 # 30Hz下约等价于8deg/frame
+  visual_update_max_backward_rate_mps: 0.5
+  visual_update_max_lateral_rate_mps: 1.0
+  visual_update_max_backward_m: 0.05 # 视觉更新后的最终位姿相对上一帧允许的反向步长；默认仅log不reject
   visual_update_max_backward_ratio: 0.08 # 最终位姿反向步长不能超过当前帧预测前进距离的比例
-  visual_update_backward_abs_floor_m: 0.003 # 最终位姿反向步长动态阈值下限，避免低速时过度敏感
-  visual_update_max_lateral_m: 0.08 # 垂直于速度方向的视觉修正硬上限
+  visual_update_backward_abs_floor_m: 0.05 # 最终位姿反向步长动态阈值下限，避免低速时过度敏感
+  visual_update_max_lateral_m: 0.08 # 垂直于速度方向的视觉修正阈值；默认仅log不reject
   visual_update_max_lateral_ratio: 0.35 # 横向修正不能超过当前帧预测前进距离的比例
   visual_update_max_exposure_delta: 0.30 # 曝光估计突变较大时回滚视觉更新
+  visual_update_large_update_guard_action: "downweight_update"
+  visual_update_large_rotation_action: "downweight_update"
+  reject_visual_large_rotation: false
+  visual_update_large_rotation_noise_scale: 2.0
+  visual_update_backward_guard_action: "log_only"
+  visual_update_lateral_guard_action: "log_only"
+  visual_update_exposure_guard_action: "reject_update"
+  visual_update_nonfinite_guard_action: "reject_update"
   image_quality_gate_en: true # 打开整帧质量门，过曝/过暗/低对比图像直接跳过VIO更新
   image_quality_max_saturated_fraction: 0.22 # 全图超过约22%接近白色才整帧跳过
   image_quality_max_tile_saturated_fraction: 0.90 # 单个小区域接近全白才整帧跳过；普通天空/灯光区域交给patch门处理
@@ -120,6 +133,7 @@ vio:
 imu:
   imu_en: true
   imu_int_frame: 30
+  gravity_est_en: false # 电梯竖直加速度会污染在线重力估计；初始化后固定重力更稳
   acc_cov: 0.8 # 0.2
   gyr_cov: 0.5 # 0.5
   b_acc_cov: 0.001 # 0.1
@@ -131,16 +145,17 @@ uwb:
 
   # 数据来源：serial在线读串口；file离线从replay_file回放之前保存的uwb_ranges.txt
   source: "file" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
-  replay_file: "/home/gulu/Downloads/uwb_ranges1.txt"
+  replay_file: "/home/gulu/Downloads/uwb_full_0s_to_post215_spliced_scans20_scans19_all_anchor_debug.txt"
   replay_time_mode: "relative" # relative: UWB文件首行时间戳作为0，对齐rosbag开始播放；absolute: 按原始时间戳对齐/clock
-  replay_speed: 2.0 # 未启用/use_sim_time时应与rosbag -r倍速一致；启用--clock和/use_sim_time时程序自动按1.0处理
+  replay_speed: 3.0 # 未启用/use_sim_time时应与rosbag -r倍速一致；启用--clock和/use_sim_time时程序自动按1.0处理
 
   # 基站配置统一使用external_anchors：
   # 1) 入口/出口双基站：把入口设为[0,0,0]，出口设为[0,两基站距离,0]即可。
   # 2) 多基站且已知外部坐标：把对应anchor的flag设为1，并填写外部测量坐标。
-  # position是外部anchor坐标系，不要求和FAST-LIVO2初始坐标系一致；
-  # 程序会自动估计外部anchor坐标系到FAST-LIVO2局部坐标系的刚体变换。
+  # anchor_frame_align_en=true时：position是外部anchor坐标系，程序会估计到FAST-LIVO2局部坐标系的刚体变换。
+  # anchor_frame_align_en=false时：position必须已经是FAST-LIVO2/camera_init坐标，程序直接用于测距更新。
   mode: "external_anchors"
+  anchor_frame_align_en: false # 已手动填写FAST-LIVO2/camera_init坐标，直接使用anchors坐标，不估计UWB坐标系变换
   start_anchor_origin_en: false # true表示start_anchor_origin_id对应的UWB基站坐标为[0,0,0]且就是FAST-LIVO2起点；程序跳过anchor坐标系对齐，直接用anchors坐标做测距约束
   start_anchor_origin_id: 0 # start_anchor_origin_en=true时，该anchor必须启用且position接近[0,0,0]
   start_anchor_origin_tolerance_m: 0.20 # 起点anchor坐标与[0,0,0]允许的误差；超过则回退到普通anchor_frame_align流程
@@ -150,27 +165,38 @@ uwb:
   anchors:
     - id: 0
       flag: 1 # 入口基站；启用该anchor并使用position参与UWB更新
-      position: [0.0, 0.0, 0.0]
+      position: [-8.6,  -4.0, 0.0]
     - id: 1
       flag: 1 # 出口基站；这里178.0就是入口/出口两基站距离，单位米
-      position: [0.0, 188.0, 0.0]
+      position: [60.3,   0.5, 0.0]
     - id: 2
-      flag: 0 # 未使用的anchor保持0；多基站时改为1并填写外部坐标
-      position: [0.0, 0.0, 0.0]
+      flag: 1 # 未使用的anchor保持0；多基站时改为1并填写外部坐标
+      position: [44.0,  49.8, 0.0]
     - id: 3
-      flag: 0
-      position: [0.0, 0.0, 0.0]
+      flag: 1
+      position: [-19.7, 43.7, 0.0]
 
   # 常用调参
   tag_offset_body: [0.0, 0.0, 0.0] # UWB天线相对IMU/body坐标系的位置
-  init_min_motion_m: 150.0 # 估计入口-出口方向前至少运动的距离；有明显横移时可增大
+  range_model: "3d" # 真实/合成UWB测距是三维欧氏距离；xy仅用于二维伪测距数据
+  diagnostic_only: false # true只记录predicted/residual，不修改滤波状态
+  init_min_motion_m: 60.0 # Elevator01实测局部运动约70m，150m会让UWB一直等初始化
   range_noise_m: 0.10
   position_cov_floor_m: 3.0 # UWB更新专用位置协方差下限；LIO/VIO过于自信导致UWB拉不动时增大，0表示关闭
-  output_correction_en: true # true: UWB修正输出轨迹/odom，不直接移动局部地图坐标，避免下一帧LIO把修正拉回去
+  update_window_sec: 0.05 # 每个LiDAR时间戳只融合[t-0.05,t+0.05]内的UWB
+  update_only_on_lio: true # 禁止VIO回调后插入UWB更新，保证处理顺序确定
+  max_xy_correction_m: 0.5 # UWB未限幅xy修正超过该值时拒绝本次更新，不默认进入RELOCALIZE
+  relocalize_en: false
+  relocalize_min_anchors: 4
+  relocalize_max_residual_m: 1.0
+  relocalize_max_correction_m: 0.5
+  relocalize_xy_threshold: 1.0
+  debug_output_correction_en: false # debug-only；主路径直接更新滤波器内部state的x/y，不走发布层offset修正
   output_smooth_en: true # true: UWB输出修正按帧平滑过渡，避免轨迹突然折线跳变
   output_smooth_alpha: 0.15 # 每帧向UWB目标修正量靠近的比例，越大越跟手，越小越平滑
   output_smooth_max_step_m: 0.05 # 每帧输出修正量最大变化，建议0.03~0.10；越小轨迹越平滑但收敛更慢
-  max_residual_m: 6.0
+  skip_when_lio_frozen: true # LIO冻结时不继续更新UWB偏移，避免不可观测电梯段被测距拉走
+  max_residual_m: 3.0
 
   # 高级参数：通常不需要修改
   serial_port: "/dev/ttyUSB0"
@@ -185,20 +211,20 @@ uwb:
   max_range_m: 250.0 # 入口/出口基站相距178m，远端测距不能用100m门限提前丢弃
   max_age_s: 5.0 # 离线relative倍速回放时允许少量调度滞后，避免误丢UWB replay数据
   max_queue_size: 512
-  min_update_anchors: 1
+  min_update_anchors: 3
   # 0.000或小于min_range_m的测距会在解析阶段直接忽略；正常重复距离不再额外丢弃
   update_max_rot_step_deg: 1.0
-  update_max_trans_step_m: 0.20 # output_correction_en=true时可适当增大；只修正输出轨迹，不会直接破坏局部地图
+  update_max_trans_step_m: 0.05 # 电梯退化时UWB不能单帧猛拉，只做小步输出修正
   tag_offset_estimate_en: false # 可选在线估计UWB天线杆臂；需要anchor世界坐标有效且运动/观测充分
   tag_offset_estimate_min_anchors: 2
   tag_offset_init_cov_m: 0.10
   tag_offset_process_noise_m: 0.0 # 刚性安装建议为0；非0会允许杆臂缓慢变化
   tag_offset_update_max_step_m: 0.01
   tag_offset_max_norm_m: 1.0
-  anchor_frame_align_min_motion_m: 150.0 # external_anchors模式下可单独覆盖init_min_motion_m；有先横移/换道时建议60~120
+  anchor_frame_align_min_motion_m: 60.0 # external_anchors模式下可单独覆盖init_min_motion_m；有先横移/换道时建议60~120
   anchor_frame_align_use_start_range_offset: true # 用起点到start anchor的第一条有效距离修正平移
   anchor_frame_align_yaw_only: true # 只对齐平面航向，假设外部坐标和FAST-LIVO2都以重力为Z轴，避免高度噪声引入倾斜
-  anchor_frame_align_multi_en: true # 启用多基站联合对齐；达到下面基站数量后，不再只依赖start/end两点
+  anchor_frame_align_multi_en: false # ponytail: 当前synthetic UWB联合对齐RMSE约6~9m，先用0/1基线初始化；标定好2/3坐标后再打开multi
   anchor_frame_align_multi_min_anchors: 3 # 至少多少个已启用且有足够测距样本的基站才使用联合优化
   anchor_frame_align_multi_max_rmse_m: 3.0 # 去除最差20%样本后的RMSE上限，超过时继续等待更多数据
   anchor_position_estimate_en: false # 通常保持false；flag=0 anchor自由3D估计在隧道/近似直线运动下歧义很大
@@ -213,11 +239,22 @@ uwb:
 
 lio:
   max_iterations: 3
-  map_update_stride: 2 # 仅每2帧更新一次地图体素，优先实时定位（可降建图细节）
+  map_update_stride: 1 # 长廊优先保持10Hz地图更新，避免局部地图长期不刷新
+  force_voxel_map_update: true
+  force_map_update_interval: 0.3 # 雷达10Hz，退化/长廊模式下最多约3帧强制刷新一次地图
+  force_map_update_lidar_frames: 3
+  degeneracy_ratio_thresh: 0.10 # 点面法向分布过单一时认为LIO退化；不关闭ICP，只用于降权/日志/强制建图
+  degeneracy_min_effective_features: 50
+  freeze_state_when_degenerate: false # 长走廊不再冻结状态，改为日志/降权，避免轨迹原地锁死
+  freeze_degenerate_min_frames: 1
+  state_jump_guard_en: true
+  state_jump_max_trans_m: 0.30 # ponytail: 30Hz轨迹单帧>0.3m约等于>9m/s，当前数据中这是电梯漂移爆点；高速平台需放宽
+  state_jump_max_rot_deg: 5.0
   icp_min_iterations: 1 # ICP最小迭代次数：至少做1次
   icp_early_stop_residual_ratio: 0.03 # 残差相对改善低于该阈值且已收敛时提前停止
   icp_max_rot_step_deg: 1.2 # ICP单次旋转更新上限（度），抑制异常匹配导致姿态突跳
   icp_max_trans_step_m: 0.20 # ICP单次平移更新上限（米），抑制”轨迹上天”
+  reject_degenerate_update: false # 退化时不跳过ICP，改用adaptive noise downweight
   dept_err: 0.02
   beam_err: 0.15
   min_eigen_value: 0.005 # 0.005
@@ -246,9 +283,129 @@ runtime_guard:
   enable: false # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复
   frame_time_budget_s: 0.06 # 预算每帧处理时间不超过多少ms
 
+bag_start_offset: 0.0 # rosbag -s 起点；仅供debug固定退化窗口使用，主流程不依赖固定时间
+
+debug_fixed_degraded_intervals:
+  enable: false # debug-only: 固定时间退化窗口，默认关闭，主流程不依赖特定bag时间
+  trigger_mode: "manual_time"
+  bag_start_offset: 0.0
+  first_start_sec: 150.0
+  first_end_sec: 205.0
+  second_start_sec: 525.0
+  second_end_sec: 565.0
+
+degraded_hold:
+  disable_visual_map: true
+  disable_voxel_map: true
+  attitude_reject_deg: 5.0
+  speed_reject_mps: 1.0
+
+degraded_bootstrap:
+  enable: true
+
+local_reinit:
+  enable: true
+  post_lio_bootstrap_frames: 30
+  post_vio_bootstrap_frames: 90
+  post_duration_sec: 5.0
+  tracking_lost_window_sec: 1.0
+  vio_unavailable_tracked_points: 2
+  lio_weak_residual_threshold: 0.20
+
 uav:
   imu_rate_odom: false
   gravity_align_en: true
+  lock_z_after_gravity_align_en: false # deprecated: 旧硬锁z已禁用；请使用 degeneracy_guard/z soft constraint
+
+degeneracy_guard:
+  enable: true
+
+  enable_z_soft_constraint: false
+  z_ref: 0.0
+  sigma_z: 0.20
+  sigma_vz: 0.30
+  z_soft_gain: 1.0
+
+  enable_nhc: false
+  sigma_body_vy: 0.05
+  sigma_body_vz: 0.05
+  nhc_min_speed: 0.05
+  nhc_only_in_degenerate: true
+  nhc_gain: 1.0
+
+  enable_backward_guard: true
+  backward_step_threshold: 0.05
+  backward_speed_threshold: 0.20
+  backward_consecutive_frames: 10
+  backward_guard_action: "log_only"
+
+  enable_corridor_detection: true
+  min_lidar_features: 30
+  min_visual_tracked_points: 2
+  vio_low_feature_tracked_points: 5
+  use_vio_skip_for_degenerate: false
+  use_vio_large_rotation_for_reject: false
+  reject_visual_large_rotation: false
+  camera_dt: 0.033333333
+  lidar_dt: 0.10
+  max_update_translation_norm: 0.5
+  max_update_yaw_deg: 5.0
+  max_update_translation_rate_mps: 3.0
+  max_update_yaw_rate_degps: 180.0
+  hessian_condition_threshold: 1000.0
+  min_degenerate_frames: 3
+  recover_frames: 3
+
+  degenerate_lio_noise_scale: 1.2
+  degenerate_vio_noise_scale: 2.0
+  enable_adaptive_sensor_weighting: false
+  adaptive_lio_base_noise_scale: 1.0
+  adaptive_vio_base_noise_scale: 1.0
+  adaptive_lio_low_feature_noise_scale: 2.0
+  adaptive_vio_low_track_noise_scale: 20.0
+  vio_low_feature_noise_scale: 20.0
+  adaptive_lio_high_residual_noise_scale: 2.0
+  adaptive_lio_residual_ref: 0.05
+  adaptive_max_noise_scale: 10.0
+  vio_skip_tracked_points: 1 # tracked<=1才跳过VIO；2-5个点走高噪声更新
+  vio_skip_min_tracked_points: 2 # 兼容旧参数：VIO内部逻辑为 total_points < 2 时skip
+  vio_min_update_meas: 32
+  reject_large_update_in_degenerate: false
+  reject_nonfinite_update: true
+  max_degenerate_update_translation: 0.3
+  max_degenerate_update_yaw_deg: 3.0
+
+  log_file: "/tmp/degeneracy_guard_log.txt"
+
+corridor_motion_prior:
+  enable: true
+  only_in_degenerate: true
+  axis_estimation_sec: 5.0
+  axis_estimation_max_sec: 10.0
+  min_axis_motion: 1.0
+  backward_window_sec: 5.0
+  backward_distance_threshold: 1.0
+  fail_safe_window_sec: 8.0
+  fail_safe_backward_distance_threshold: 2.0
+  backward_action: "downweight"
+  lio_downweight_scale: 5.0
+  vio_downweight_scale: 10.0
+  disable_map_update_on_downweight: true
+  disable_visual_map_update_on_downweight: true
+
+safety_guard:
+  enable_safety_guard: true
+  max_speed: 3.0
+  max_frame_translation: 0.5
+  max_frame_rotation_deg: 15.0
+  fail_safe_recover_frames: 10
+  backward_time_window: 5.0
+  backward_distance_threshold: 1.0
+  backward_action: "log_only"
+
+diagnostics:
+  level: "summary" # off/summary/verbose；verbose才写每帧CSV细表
+  summary_interval_sec: 1.0
 
 publish:
   dense_map_en: true

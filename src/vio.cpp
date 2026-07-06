@@ -1431,7 +1431,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       // t_5 += omp_get_wtime() - t_1;
     }
   }
-  total_points = visual_submap->voxel_points.size();
+  total_points = visual_submap ? static_cast<int>(visual_submap->trackedSize()) : 0;
 
   // double t3 = omp_get_wtime();
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
@@ -1447,6 +1447,8 @@ bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
   G.setZero();
   H_T_H.setZero();
+  if (visual_submap == nullptr) return false;
+  total_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
   if (total_points == 0) return false;
   
   compute_jacobian_time = update_ekf_time = 0.0;
@@ -1660,11 +1662,12 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
 void VIOManager::updateVisualMapPoints(cv::Mat img)
 {
-  if (total_points == 0) return;
+  if (visual_submap == nullptr || total_points == 0) return;
 
   int update_num = 0;
   SE3 pose_cur = new_frame_->T_f_w_;
-  for (int i = 0; i < total_points; i++)
+  const int safe_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
+  for (int i = 0; i < safe_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
     if (pt == nullptr) continue;
@@ -1679,7 +1682,9 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
 
     // TODO: condition: distance and view_angle
     // Step 1: time
+    if (pt->obs_.empty()) continue;
     Feature *last_feature = pt->obs_.back();
+    if (last_feature == nullptr) continue;
     // if(new_frame_->id_ >= last_feature->id_ + 10) add_flag = true; // 10
 
     // Step 2: delta_pose
@@ -1705,7 +1710,7 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     if (add_flag)
     {
       update_num += 1;
-      update_flag[i] = 1;
+      if (i < static_cast<int>(update_flag.size())) update_flag[i] = 1;
       float *patch_temp = new float[patch_size_total];
       getImagePatch(img, pc, patch_temp, 0);
       if (visual_patch_quality_gate_en)
@@ -1734,15 +1739,18 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
 
 void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
-  if (total_points == 0) return;
+  if (visual_submap == nullptr || total_points == 0) return;
 
-  for (int i = 0; i < visual_submap->voxel_points.size(); i++)
+  const int safe_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
+  for (int i = 0; i < safe_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr) continue;
 
     if (!pt->is_normal_initialized_) continue;
     if (pt->is_converged_) continue;
     if (pt->obs_.size() <= 5) continue;
+    if (i >= static_cast<int>(update_flag.size())) continue;
     if (update_flag[i] == 0) continue;
 
     const V3D &p_w = pt->pos_;
@@ -1869,7 +1877,9 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
 
 void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
-  if (total_points == 0) return;
+  if (visual_submap == nullptr) return;
+  const int safe_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
+  if (safe_points == 0) return;
   // if(new_frame_->id_ != 2) return; //124
 
   int patch_size = 25;
@@ -1892,9 +1902,10 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
   };
 
   int num = 0;
-  for (int i = 0; i < visual_submap->voxel_points.size(); i++)
+  for (int i = 0; i < safe_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr || pt->ref_patch == nullptr) continue;
 
     if (pt->is_normal_initialized_)
     {
@@ -1935,6 +1946,7 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
       float error_est = 0.0;
       float error_gt = 0.0;
 
+      if (visual_submap->warp_patch[i].size() < static_cast<size_t>(patch_size_total)) continue;
       for (int ind = 0; ind < patch_size_total; ind++)
       {
         error_est += (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time * patch_buffer[ind]) *
@@ -2032,9 +2044,10 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
       }
     }
   }
-  for (int i = 0; i < visual_submap->voxel_points.size(); i++)
+  for (int i = 0; i < safe_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr || pt->ref_patch == nullptr) continue;
 
     if (!pt->is_normal_initialized_) continue;
 
@@ -2095,6 +2108,8 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
 void VIOManager::precomputeReferencePatches(int level)
 {
   double t1 = omp_get_wtime();
+  if (visual_submap == nullptr) return;
+  total_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
   if (total_points == 0) return;
   MD(1, 2) Jimg;
   MD(2, 3) Jdpi;
@@ -2167,6 +2182,8 @@ void VIOManager::precomputeReferencePatches(int level)
 
 bool VIOManager::updateStateInverse(cv::Mat img, int level)
 {
+  if (visual_submap == nullptr) return false;
+  total_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
   if (total_points == 0) return false;
   if (state) snapStateForDeterminism(*state);
   if (state_propagat) snapStateForDeterminism(*state_propagat);
@@ -2239,6 +2256,7 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       const float w_ref_br = subpix_u_ref * subpix_v_ref;
 
       vector<float> P = visual_submap->warp_patch[i];
+      if (P.size() < static_cast<size_t>(patch_size_total * (level + 1))) continue;
       for (int x = 0; x < patch_size; x++)
       {
         uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * img_step + u_ref_i - patch_size_half * scale;
@@ -2288,7 +2306,8 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
-      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      const double effective_img_point_cov = img_point_cov * std::max(1.0, last_adaptive_img_point_cov_scale);
+      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / effective_img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
@@ -2331,6 +2350,8 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
 
 bool VIOManager::updateState(cv::Mat img, int level)
 {
+  if (visual_submap == nullptr) return false;
+  total_points = std::min(total_points, static_cast<int>(visual_submap->trackedSize()));
   if (total_points == 0) return false;
   if (state) snapStateForDeterminism(*state);
   if (state_propagat) snapStateForDeterminism(*state_propagat);
@@ -2412,6 +2433,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
       float w_ref_br = subpix_u_ref * subpix_v_ref;
 
       vector<float> P = visual_submap->warp_patch[i];
+      if (P.size() < static_cast<size_t>(patch_size_total * (pyramid_level + 1))) continue;
       double inv_ref_expo = visual_submap->inv_expo_list[i];
       // ROS_ERROR("inv_ref_expo: %.3lf, state->inv_expo_time: %.3lf\n", inv_ref_expo, state->inv_expo_time);
 
@@ -2484,7 +2506,8 @@ bool VIOManager::updateState(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
-      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      const double effective_img_point_cov = img_point_cov * std::max(1.0, last_adaptive_img_point_cov_scale);
+      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / effective_img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
@@ -2530,6 +2553,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
 void VIOManager::updateFrameState(StatesGroup state)
 {
+  if (!new_frame_) return;
   M3D Rwi(state.rot_end);
   V3D Pwi(state.pos_end);
   Rcw = Rci * Rwi.transpose();
@@ -2539,7 +2563,8 @@ void VIOManager::updateFrameState(StatesGroup state)
 
 void VIOManager::plotTrackedPoints()
 {
-  int total_points = visual_submap->voxel_points.size();
+  if (visual_submap == nullptr) return;
+  int total_points = static_cast<int>(visual_submap->trackedSize());
   if (total_points == 0) return;
   // int inlier_count = 0;
   // for (int i = 0; i < img_cp.rows / grid_size; i++)
@@ -2561,6 +2586,7 @@ void VIOManager::plotTrackedPoints()
   for (int i = 0; i < total_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr) continue;
     V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
 
     if (visual_submap->errors[i] <= visual_submap->propa_errors[i])
@@ -3410,6 +3436,41 @@ void VIOManager::updateStateWithBoardObservation()
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  last_visual_update_status = "accepted";
+  last_visual_update_reject_reason.clear();
+  last_visual_update_guard_reason.clear();
+  last_visual_update_dt = 0.0;
+  last_visual_update_trans_m = 0.0;
+  last_visual_update_trans_rate_mps = 0.0;
+	  last_visual_update_rot_deg = 0.0;
+	  last_visual_update_rot_rate_degps = 0.0;
+	  total_points = 0;
+	  auto resetVisualMapStatsForFrame = [&]() {
+	    last_visual_map_pg_size = static_cast<int>(pg.size());
+	    last_visual_map_candidate_slots = 0;
+	    last_visual_map_patch_rejects = 0;
+	    last_visual_map_added_points = 0;
+	    last_visual_map_insert_reject_invalid = 0;
+	    last_visual_map_insert_reject_voxel_full = 0;
+	    last_visual_map_insert_reject_voxel_cap = 0;
+	    last_visual_map_evicted_points = 0;
+	    last_visual_map_evicted_voxels = 0;
+	    last_visual_map_total_points_before = getVisualPointCount();
+	    last_visual_map_total_points_after = last_visual_map_total_points_before;
+	    last_visual_map_voxels_before = feat_map.size();
+	    last_visual_map_voxels_after = last_visual_map_voxels_before;
+	  };
+	  resetVisualMapStatsForFrame();
+
+	  if (img.empty())
+  {
+    last_visual_update_status = "skipped";
+    last_visual_update_reject_reason = "empty_image";
+    resetGrid();
+    frame_count++;
+    return;
+  }
+
   auto rememberVisualGuardPose = [&]()
   {
     last_visual_guard_time = img_time;
@@ -3422,7 +3483,6 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (width != img.cols || height != img.rows)
   {
-    if (img.empty()) printf("[ VIO ] Empty Image!\n");
     cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
   }
   img_rgb = img.clone();
@@ -3502,6 +3562,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (image_quality_reject)
   {
+    last_visual_update_status = "skipped";
+    last_visual_update_reject_reason = "image_quality";
     resetGrid();
     current_board_observations_.clear();
     aruco_time_detect_markers = 0.0;
@@ -3586,10 +3648,60 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       low_track_force_update_stride > 0 &&
       total_points >= low_track_force_min_points &&
       (frame_count % low_track_force_update_stride == 0);
-  const bool skip_visual_ekf = (total_points < min_retrieve_points) && !low_track_force_update;
+		  const bool low_tracked_points = (total_points < min_retrieve_points) && !low_track_force_update;
+		  const bool skip_visual_ekf = force_skip_visual_ekf_this_frame || low_tracked_points;
+		  std::string skip_visual_ekf_reason = "NONE";
+		  if (force_skip_visual_ekf_this_frame)
+		  {
+		    skip_visual_ekf_reason = force_skip_visual_ekf_reason.empty() ?
+		                             "EXTERNAL_SKIP_VISUAL_EKF" : force_skip_visual_ekf_reason;
+		  }
+		  else if (low_tracked_points)
+		  {
+		    skip_visual_ekf_reason = "LOW_TRACKED_POINTS";
+		  }
   const bool print_console =
       console_timing_print_en &&
       ((frame_count % std::max(1, console_timing_print_stride)) == 0);
+
+  last_adaptive_img_point_cov_scale = 1.0;
+  last_adaptive_weight_reason = adaptive_sensor_weighting_en ? "nominal" : "off";
+  if (adaptive_sensor_weighting_en)
+  {
+    double adaptive_scale = std::max(1.0, adaptive_external_noise_scale);
+    std::ostringstream adaptive_reason;
+    bool has_adaptive_reason = false;
+    auto add_adaptive_reason = [&](const std::string &reason) {
+      if (has_adaptive_reason) adaptive_reason << ";";
+      adaptive_reason << reason;
+      has_adaptive_reason = true;
+    };
+
+    if (adaptive_external_noise_scale > 1.0) add_adaptive_reason("external_guard");
+    const int low_track_threshold = std::max(0, adaptive_min_tracked_points);
+    if (low_track_threshold > 0 && total_points < low_track_threshold)
+    {
+      adaptive_scale *= std::max(1.0, adaptive_low_track_noise_scale);
+      add_adaptive_reason("low_visual_points");
+    }
+    else if (min_retrieve_points > 0 && total_points < min_retrieve_points)
+    {
+      const double missing_ratio =
+          static_cast<double>(min_retrieve_points - total_points) / static_cast<double>(min_retrieve_points);
+      adaptive_scale *= 1.0 + std::max(0.0, missing_ratio) * (std::max(1.0, adaptive_low_track_noise_scale) - 1.0);
+      add_adaptive_reason("below_min_retrieve_points");
+    }
+
+    last_adaptive_img_point_cov_scale =
+        std::min(std::max(1.0, adaptive_scale), std::max(1.0, adaptive_max_noise_scale));
+    if (!has_adaptive_reason) add_adaptive_reason("nominal");
+    last_adaptive_weight_reason = adaptive_reason.str();
+    ROS_INFO_THROTTLE(1.0,
+                      "[ VIO ][AdaptiveWeight] img_point_cov_scale=%.3f total_points=%d reason=%s",
+                      last_adaptive_img_point_cov_scale,
+                      total_points,
+                      last_adaptive_weight_reason.c_str());
+  }
   double t2 = omp_get_wtime();
 
   const StatesGroup state_before_visual_update = *state;
@@ -3601,6 +3713,11 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double visual_update_backward_m = 0.0;
   double visual_update_correction_backward_m = 0.0;
   double visual_update_lateral_m = 0.0;
+  double visual_update_dt = 0.0;
+  double visual_update_trans_rate_mps = 0.0;
+  double visual_update_rot_rate_degps = 0.0;
+  double visual_update_backward_rate_mps = 0.0;
+  double visual_update_lateral_rate_mps = 0.0;
   double visual_update_backward_limit_m = visual_update_max_backward_m;
   double visual_update_lateral_limit_m = visual_update_max_lateral_m;
   double visual_update_exposure_delta = 0.0;
@@ -3626,8 +3743,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       aruco_time_update = 0.0;
     }
   }
-  else
-  {
+		  else
+		  {
+		    last_visual_update_status = "skipped";
+		    last_visual_update_reject_reason = skip_visual_ekf_reason;
     const bool aruco_update_ran = run_aruco_this_frame && !current_board_observations_.empty();
 
     if (aruco_update_ran)
@@ -3641,22 +3760,40 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       aruco_time_update = 0.0;
     }
 
-    const double t_map_gen_begin = omp_get_wtime();
-    generateVisualMapPoints(img, pg);
-    pruneVisualMap();
-    last_visual_map_total_points_after = getVisualPointCount();
-    last_visual_map_voxels_after = feat_map.size();
-    const double t_map_gen = omp_get_wtime() - t_map_gen_begin;
+	    double t_map_gen = 0.0;
+	    if (!disable_visual_map_update_this_frame)
+	    {
+	      const double t_map_gen_begin = omp_get_wtime();
+	      generateVisualMapPoints(img, pg);
+	      pruneVisualMap();
+	      last_visual_map_total_points_after = getVisualPointCount();
+	      last_visual_map_voxels_after = feat_map.size();
+	      t_map_gen = omp_get_wtime() - t_map_gen_begin;
+	    }
+	    else
+	    {
+	      ROS_WARN_THROTTLE(0.5,
+	                        "[ VIO ] Disable visual map update: reason=%s",
+	                        visual_map_update_disable_reason.c_str());
+	    }
 
     const double t_low_exit = omp_get_wtime();
     const double vio_time_now = t_low_exit - t1;
     frame_count++;
     ave_total = ave_total * (frame_count - 1) / frame_count + vio_time_now / frame_count;
 
-    if (print_console)
-    {
-      printf("[ VIO ] Skip visual EKF update: low tracked points (%d < %d), map-gen=%.6f s, total=%.6f s.\n",
-             total_points, min_retrieve_points, t_map_gen, vio_time_now);
+	    if (print_console)
+	    {
+	      if (skip_visual_ekf_reason == "LOW_TRACKED_POINTS")
+	      {
+	        printf("[ VIO ] Skip visual EKF update: reason=LOW_TRACKED_POINTS, tracked_points=%d, min_tracked_points=%d, map-gen=%.6f s, total=%.6f s.\n",
+	               total_points, min_retrieve_points, t_map_gen, vio_time_now);
+	      }
+	      else
+	      {
+	        printf("[ VIO ] Skip visual EKF update: reason=%s, tracked_points=%d, min_tracked_points=%d, map-gen=%.6f s, total=%.6f s.\n",
+	               skip_visual_ekf_reason.c_str(), total_points, min_retrieve_points, t_map_gen, vio_time_now);
+	      }
       printf("[ VIO ] Visual map gen stats: pg=%d, candidates=%d, patch_reject=%d, added=%d, reject(invalid/full/cap)=%d/%d/%d, evicted(points/voxels)=%d/%d, map_points=%zu->%zu, voxels=%zu->%zu.\n",
              last_visual_map_pg_size,
              last_visual_map_candidate_slots,
@@ -3727,15 +3864,22 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       }
     }
 
-    {
-      vector<string> lines;
-      {
-        std::ostringstream oss;
-        oss << "[ VIO ] Skip visual EKF update: low tracked points (" << total_points << " < "
-            << min_retrieve_points << "), map-gen=" << formatDouble6(t_map_gen)
-            << " s, total=" << formatDouble6(vio_time_now) << " s.";
-        lines.push_back(oss.str());
-      }
+	    {
+	      vector<string> lines;
+	      if (disable_visual_map_update_this_frame)
+	      {
+	        lines.push_back(std::string("[ VIO ] Visual map update disabled: reason=") +
+	                        visual_map_update_disable_reason + ".");
+	      }
+		      {
+		        std::ostringstream oss;
+	        oss << "[ VIO ] Skip visual EKF update: reason=" << skip_visual_ekf_reason
+	            << ", tracked_points=" << total_points
+	            << ", min_tracked_points=" << min_retrieve_points
+	            << ", map-gen=" << formatDouble6(t_map_gen)
+	            << " s, total=" << formatDouble6(vio_time_now) << " s.";
+	        lines.push_back(oss.str());
+	      }
       {
         std::ostringstream oss;
         oss << "[ VIO ] Visual map gen stats: pg=" << last_visual_map_pg_size
@@ -3816,6 +3960,16 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     const Eigen::Matrix3d delta_rot = state_before_visual_update.rot_end.transpose() * state->rot_end;
     visual_update_rot_deg = Eigen::AngleAxisd(delta_rot).angle() * 57.29577951308232;
     visual_update_exposure_delta = std::fabs(state->inv_expo_time - state_before_visual_update.inv_expo_time);
+    visual_update_dt =
+        (last_visual_guard_time >= 0.0 && img_time > last_visual_guard_time) ? img_time - last_visual_guard_time : 1.0 / 30.0;
+    visual_update_dt = std::max(1e-4, visual_update_dt);
+    visual_update_trans_rate_mps = visual_update_trans_m / visual_update_dt;
+    visual_update_rot_rate_degps = visual_update_rot_deg / visual_update_dt;
+    last_visual_update_dt = visual_update_dt;
+    last_visual_update_trans_m = visual_update_trans_m;
+    last_visual_update_trans_rate_mps = visual_update_trans_rate_mps;
+    last_visual_update_rot_deg = visual_update_rot_deg;
+    last_visual_update_rot_rate_degps = visual_update_rot_rate_degps;
 
     const double speed = state_before_visual_update.vel_end.norm();
     if (speed > 0.2)
@@ -3830,11 +3984,11 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         visual_update_backward_m = std::max(0.0, -frame_step.dot(vel_dir));
       }
 
-      const double visual_guard_dt =
-          (last_visual_guard_time >= 0.0 && img_time > last_visual_guard_time) ? img_time - last_visual_guard_time : 0.0;
-      if (visual_guard_dt > 1e-4)
+      visual_update_backward_rate_mps = visual_update_backward_m / visual_update_dt;
+      visual_update_lateral_rate_mps = visual_update_lateral_m / visual_update_dt;
+      if (visual_update_dt > 1e-4)
       {
-        const double predicted_step_m = speed * visual_guard_dt;
+        const double predicted_step_m = speed * visual_update_dt;
         const double backward_by_ratio_m = std::max(0.0, visual_update_max_backward_ratio) * predicted_step_m;
         const double lateral_by_ratio_m = std::max(0.0, visual_update_max_lateral_ratio) * predicted_step_m;
         visual_update_backward_limit_m =
@@ -3856,39 +4010,69 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         std::isfinite(state->pos_end[0]) && std::isfinite(state->pos_end[1]) && std::isfinite(state->pos_end[2]) &&
         std::isfinite(state->inv_expo_time) && state->inv_expo_time > 0.0;
 
+    bool visual_update_downweighted_by_guard = false;
+    double visual_update_guard_noise_scale = 1.0;
+    auto normalizeGuardAction = [](const std::string &action_in) {
+      std::string action = action_in;
+      if (action == "downweight") action = "downweight_update";
+      return (action == "reject_update" || action == "downweight_update" || action == "log_only" || action == "none") ?
+             action : std::string("reject_update");
+    };
+    auto recordVisualGuard = [&](const std::string &reason, const std::string &action_in) {
+      const std::string action = normalizeGuardAction(action_in);
+      if (!last_visual_update_guard_reason.empty()) last_visual_update_guard_reason += ";";
+      last_visual_update_guard_reason += reason + ":" + action;
+      if (action == "reject_update" && !visual_update_rejected_by_guard)
+      {
+        visual_update_rejected_by_guard = true;
+        visual_update_reject_reason = reason;
+      }
+      else if (action == "downweight_update")
+      {
+        visual_update_downweighted_by_guard = true;
+        const double reason_scale =
+            (reason == "large_rotation") ? visual_update_large_rotation_noise_scale : 2.0;
+        visual_update_guard_noise_scale *= std::max(1.0, reason_scale);
+      }
+    };
+
     if (!finite_state)
     {
-      visual_update_rejected_by_guard = true;
-      visual_update_reject_reason = "non_finite_state";
+      recordVisualGuard("non_finite_state", visual_update_nonfinite_guard_action);
     }
-    else if (visual_update_trans_m > std::max(0.01, visual_update_max_trans_m))
+    if (visual_update_max_trans_rate_mps > 0.0 &&
+        visual_update_trans_rate_mps > visual_update_max_trans_rate_mps)
     {
-      visual_update_rejected_by_guard = true;
-      visual_update_reject_reason = "large_translation";
+      recordVisualGuard("large_translation", visual_update_large_update_guard_action);
     }
-    else if (visual_update_rot_deg > std::max(0.1, visual_update_max_rot_deg))
+    if ((visual_update_max_rot_rate_degps > 0.0 &&
+         visual_update_rot_rate_degps > visual_update_max_rot_rate_degps) ||
+        (visual_update_max_rot_rate_degps <= 0.0 &&
+         visual_update_rot_deg > std::max(0.1, visual_update_max_rot_deg)))
     {
-      visual_update_rejected_by_guard = true;
-      visual_update_reject_reason = "large_rotation";
+      recordVisualGuard("large_rotation",
+                        (reject_visual_large_rotation || use_vio_large_rotation_for_reject) ?
+                        std::string("reject_update") : visual_update_large_rotation_action);
     }
-    else if (visual_update_backward_m > std::max(0.0, visual_update_backward_limit_m))
+    if (visual_update_max_backward_rate_mps > 0.0 &&
+        visual_update_backward_rate_mps > visual_update_max_backward_rate_mps)
     {
-      visual_update_rejected_by_guard = true;
-      visual_update_reject_reason = "backward_step";
+      recordVisualGuard("backward_step", visual_update_backward_guard_action);
     }
-    else if (visual_update_lateral_m > std::max(0.0, visual_update_lateral_limit_m))
+    if (visual_update_max_lateral_rate_mps > 0.0 &&
+        visual_update_lateral_rate_mps > visual_update_max_lateral_rate_mps)
     {
-      visual_update_rejected_by_guard = true;
-      visual_update_reject_reason = "lateral_step";
+      recordVisualGuard("lateral_step", visual_update_lateral_guard_action);
     }
-    else if (exposure_estimate_en && visual_update_exposure_delta > std::max(0.0, visual_update_max_exposure_delta))
+    if (exposure_estimate_en && visual_update_exposure_delta > std::max(0.0, visual_update_max_exposure_delta))
     {
-      visual_update_rejected_by_guard = true;
-      visual_update_reject_reason = "large_exposure_change";
+      recordVisualGuard("large_exposure_change", visual_update_exposure_guard_action);
     }
 
     if (visual_update_rejected_by_guard)
     {
+      last_visual_update_status = "rejected";
+      last_visual_update_reject_reason = visual_update_reject_reason;
       *state = state_before_visual_update;
       state->cov = cov_before_visual_update;
       G.setZero();
@@ -3929,6 +4113,67 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       rememberVisualGuardPose();
       return;
     }
+
+    if (visual_update_downweighted_by_guard)
+    {
+      last_visual_update_status = "downweighted";
+      last_visual_update_reject_reason = last_visual_update_guard_reason;
+      visual_update_guard_noise_scale =
+          std::min(std::max(1.0, visual_update_guard_noise_scale), std::max(1.0, adaptive_max_noise_scale));
+      last_adaptive_img_point_cov_scale =
+          std::min(std::max(1.0, last_adaptive_img_point_cov_scale * visual_update_guard_noise_scale),
+                   std::max(1.0, adaptive_max_noise_scale));
+
+      const double update_scale = 1.0 / std::max(1.0, visual_update_guard_noise_scale);
+      StatesGroup state_after_visual_update = *state;
+      VD(DIM_STATE) dx = state_after_visual_update - state_before_visual_update;
+      dx *= update_scale;
+      *state = state_before_visual_update;
+      *state += dx;
+      state->cov = cov_before_visual_update + update_scale * (state_after_visual_update.cov - cov_before_visual_update);
+      state->cov = 0.5 * (state->cov + state->cov.transpose());
+      updateFrameState(*state);
+      const V3D post_delta_pos = state->pos_end - state_before_visual_update.pos_end;
+      const Eigen::Matrix3d post_delta_rot = state_before_visual_update.rot_end.transpose() * state->rot_end;
+      last_visual_update_trans_m = post_delta_pos.norm();
+      last_visual_update_trans_rate_mps = last_visual_update_trans_m / visual_update_dt;
+      last_visual_update_rot_deg = Eigen::AngleAxisd(post_delta_rot).angle() * 57.29577951308232;
+      last_visual_update_rot_rate_degps = last_visual_update_rot_deg / visual_update_dt;
+      last_visual_update_guard_reason += ";post_update_noise_scale:" + formatDouble6(visual_update_guard_noise_scale);
+    }
+
+    if (!last_visual_update_guard_reason.empty())
+    {
+      if (print_console)
+      {
+        printf("[ VIO ] Guard %s: %s, dtrans=%.3f m %.3fm/s, drot=%.3f deg %.3fdeg/s, step_back=%.3f m %.3fm/s, lat=%.3f m %.3fm/s.\n",
+               visual_update_downweighted_by_guard ? "downweight" : "log-only",
+               last_visual_update_guard_reason.c_str(),
+               visual_update_trans_m, visual_update_trans_rate_mps,
+               visual_update_rot_deg, visual_update_rot_rate_degps,
+               visual_update_backward_m, visual_update_backward_rate_mps,
+               visual_update_lateral_m, visual_update_lateral_rate_mps);
+      }
+      vector<string> lines;
+      std::ostringstream oss;
+      oss << "[ VIO ] Guard " << (visual_update_downweighted_by_guard ? "downweight" : "log-only") << ": "
+          << last_visual_update_guard_reason
+          << ", dt=" << formatDouble6(visual_update_dt)
+          << ", dtrans=" << formatDouble6(visual_update_trans_m)
+          << " m, trans_rate=" << formatDouble6(visual_update_trans_rate_mps)
+          << " m/s, drot=" << formatDouble6(visual_update_rot_deg)
+          << " deg, rot_rate=" << formatDouble6(visual_update_rot_rate_degps)
+          << " deg/s, step_back_rate=" << formatDouble6(visual_update_backward_rate_mps)
+          << " m/s, lat_rate=" << formatDouble6(visual_update_lateral_rate_mps) << " m/s.";
+      lines.push_back(oss.str());
+      appendTimingLogLines(lines);
+    }
+  }
+
+  if (last_visual_update_status == "accepted" && last_adaptive_img_point_cov_scale > 1.001)
+  {
+    last_visual_update_status = "downweighted";
+    last_visual_update_reject_reason = last_adaptive_weight_reason;
   }
 
   // Keep an explicit guard to avoid accidental fall-through if skip-branch
@@ -3941,9 +4186,18 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   double t3 = omp_get_wtime();
 
-  generateVisualMapPoints(img, pg);
-  
-  double t4 = omp_get_wtime();
+	  if (!disable_visual_map_update_this_frame)
+	  {
+	    generateVisualMapPoints(img, pg);
+	  }
+	  else
+	  {
+	    ROS_WARN_THROTTLE(0.5,
+	                      "[ VIO ] Disable visual map update: reason=%s",
+	                      visual_map_update_disable_reason.c_str());
+	  }
+
+	  double t4 = omp_get_wtime();
   
   plotTrackedPoints();
 
@@ -3951,15 +4205,20 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   double t5 = omp_get_wtime();
 
-  updateVisualMapPoints(img);
+	  if (!disable_visual_map_update_this_frame)
+	  {
+	    updateVisualMapPoints(img);
+	  }
 
-  double t6 = omp_get_wtime();
+	  double t6 = omp_get_wtime();
 
-  updateReferencePatch(feat_map);
-
-  pruneVisualMap();
-  last_visual_map_total_points_after = getVisualPointCount();
-  last_visual_map_voxels_after = feat_map.size();
+	  if (!disable_visual_map_update_this_frame)
+	  {
+	    updateReferencePatch(feat_map);
+	    pruneVisualMap();
+	    last_visual_map_total_points_after = getVisualPointCount();
+	    last_visual_map_voxels_after = feat_map.size();
+	  }
 
   double t7 = omp_get_wtime();
   
@@ -4048,10 +4307,15 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     }
   }
 
-  {
-    vector<string> lines;
-    {
-      std::ostringstream oss;
+	  {
+	    vector<string> lines;
+	    if (disable_visual_map_update_this_frame)
+	    {
+	      lines.push_back(std::string("[ VIO ] Visual map update disabled: reason=") +
+	                      visual_map_update_disable_reason + ".");
+	    }
+	    {
+	      std::ostringstream oss;
       oss << "[ VIO ] Visual map gen stats: pg=" << last_visual_map_pg_size
           << ", candidates=" << last_visual_map_candidate_slots
           << ", patch_reject=" << last_visual_map_patch_rejects

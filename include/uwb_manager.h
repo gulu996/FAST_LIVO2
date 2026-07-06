@@ -47,6 +47,35 @@ struct UwbAnchorDistanceConstraint
   double distance_m = 0.0;
 };
 
+struct UwbUpdateSummary
+{
+  int used_count = 0;
+  double stamp = 0.0;
+  double residual_norm = 0.0;
+  double xy_correction_before_step = 0.0;
+  double z_correction_before_clamp = 0.0;
+  double z_correction_after_clamp = 0.0;
+  bool relocalize_required = false;
+  V3D rot_add = V3D::Zero();
+  V3D trans_add = V3D::Zero();
+  V3D tag_offset_add = V3D::Zero();
+  std::vector<int> used_anchor_ids;
+  std::string range_details;
+  std::string action = "none";
+};
+
+inline double uwbPredictedRange3d(const V3D &tag_world, const V3D &anchor_world)
+{
+  return (tag_world - anchor_world).norm();
+}
+
+inline double uwbPredictedRangeXy(const V3D &tag_world, const V3D &anchor_world)
+{
+  const double dx = tag_world.x() - anchor_world.x();
+  const double dy = tag_world.y() - anchor_world.y();
+  return std::hypot(dx, dy);
+}
+
 class UwbManager
 {
 public:
@@ -58,6 +87,8 @@ public:
   bool isRunning() const { return running_.load(); }
   bool updateEnabled() const { return update_en_; }
   int applyRangeUpdate(StatesGroup &state);
+  int applyRangeUpdateAt(StatesGroup &state, double center_stamp, double half_window_s);
+  const UwbUpdateSummary &lastUpdateSummary() const { return last_update_summary_; }
 
 private:
   bool loadParameters(ros::NodeHandle &nh);
@@ -67,9 +98,11 @@ private:
   void readLoop();
   bool loadReplayFile();
   std::vector<UwbRangeMeasurement> takeReplayMeasurements(double now);
+  std::vector<UwbRangeMeasurement> takeReplayMeasurementsInWindow(double center_stamp, double half_window_s);
   void handleLine(const std::string &line, double stamp);
   std::vector<UwbRangeMeasurement> parseLine(const std::string &line, double stamp) const;
   std::vector<UwbRangeMeasurement> takeRecentMeasurements(double now);
+  std::vector<UwbRangeMeasurement> takeRecentMeasurementsInWindow(double center_stamp, double half_window_s);
   void logRawLine(double stamp, const std::string &line, const std::vector<UwbRangeMeasurement> &measurements);
   void logEvent(double stamp, const std::string &level, const std::string &message);
   void logEventThrottled(double stamp, const std::string &key, double period_s,
@@ -77,7 +110,9 @@ private:
   void logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
                  const V3D &trans_add, const V3D &tag_offset_add,
                  const std::string &range_details);
-  int applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
+  int applyLatestMeasurements(StatesGroup &state,
+                              const std::vector<UwbRangeMeasurement> &measurements,
+                              double update_stamp);
   bool tryAlignAnchorFrame(const StatesGroup &state,
                            const std::vector<UwbRangeMeasurement> &measurements);
   void collectAnchorFrameAlignSamples(const StatesGroup &state,
@@ -103,6 +138,7 @@ private:
   bool rts_high_ = false;
   std::string mode_ = "external_anchors";
   std::string parser_mode_ = "uwb";
+  std::string range_model_ = "3d";
   std::string log_filename_ = "uwb_ranges.txt";
   int log_flush_stride_ = 1;
   std::string replay_file_;
@@ -119,6 +155,12 @@ private:
   double max_residual_m_ = 3.0;
   double update_max_rot_step_deg_ = 1.0;
   double update_max_trans_step_m_ = 0.10;
+  double max_xy_correction_m_ = 1.0;
+  bool diagnostic_only_ = false;
+  bool relocalize_en_ = false;
+  int relocalize_min_anchors_ = 4;
+  double relocalize_max_residual_m_ = 1.0;
+  double relocalize_max_correction_m_ = 0.5;
   V3D tag_offset_body_ = V3D::Zero();
   bool tag_offset_estimate_en_ = false;
   int tag_offset_estimate_min_anchors_ = 2;
@@ -197,6 +239,7 @@ private:
   double replay_file_start_stamp_ = 0.0;
   bool replay_file_start_stamp_ready_ = false;
   double replay_ros_start_stamp_ = 0.0;
+  UwbUpdateSummary last_update_summary_;
 };
 
 typedef std::shared_ptr<UwbManager> UwbManagerPtr;
