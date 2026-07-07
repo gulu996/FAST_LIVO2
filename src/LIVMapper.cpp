@@ -113,6 +113,7 @@ LIVMapper::~LIVMapper()
 
 void LIVMapper::readParameters(ros::NodeHandle &nh)
 {
+  nh.param<bool>("experimental_features/enable", experimental_features_enable_, false);
   nh.param<string>("common/lid_topic", lid_topic, "/livox/lidar");
   nh.param<string>("common/imu_topic", imu_topic, "/livox/imu");
   nh.param<bool>("common/ros_driver_bug_fix", ros_driver_fix_en, false);
@@ -152,7 +153,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
   nh.param<int>("vio/max_iterations", max_iterations, 5);
-  IMG_POINT_COV = 200.0;  // 降低visual EKF权重：100.0→200.0，使EKF对visual测量的信任度减半
+  IMG_POINT_COV = experimental_features_enable_ ? 200.0 : 100.0;
   nh.param<bool>("vio/raycast_en", raycast_en, false);
   nh.param<bool>("vio/exposure_estimate_en", exposure_estimate_en, true);
   nh.param<double>("vio/inv_expo_cov", inv_expo_cov, 0.2);
@@ -566,11 +567,55 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
 
   nh.param<bool>("runtime_guard/enable", runtime_guard_en_, true);
   nh.param<double>("runtime_guard/frame_time_budget_s", frame_time_budget_s_, frame_time_budget_s_);
+  if (!experimental_features_enable_)
+  {
+    // ponytail: baseline mode must not let experiment guards change FAST-LIVO2 state, maps, or publishing.
+    deg_guard_enable_ = false;
+    deg_guard_enable_z_soft_constraint_ = false;
+    deg_guard_enable_nhc_ = false;
+    deg_guard_enable_backward_guard_ = false;
+    deg_guard_enable_corridor_detection_ = false;
+    deg_guard_enable_adaptive_sensor_weighting_ = false;
+    deg_guard_reject_large_update_in_degenerate_ = false;
+    safety_guard_enable_ = false;
+    safety_fail_safe_mode_ = false;
+    local_reinit_enable_ = false;
+    debug_fixed_degraded_intervals_enable_ = false;
+    degraded_bootstrap_enable_ = false;
+    disable_visual_map_in_degraded_hold_ = false;
+    disable_voxel_map_in_degraded_hold_ = false;
+    fixed_degraded_trigger_mode_ = "disabled";
+    local_mode_ = "NORMAL";
+    local_reinit_reason_ = "experimental_disabled";
+    corridor_prior_enable_ = false;
+    corridor_prior_action_ = "none";
+    corridor_prior_update_voxel_map_enabled_ = true;
+    corridor_prior_visual_map_update_enabled_ = true;
+    runtime_guard_en_ = false;
+    adaptive_visual_selector_en = false;
+    lio_freeze_state_when_degenerate_ = false;
+    lio_freeze_state_ready_ = false;
+    lio_state_jump_guard_en_ = false;
+    uwb_output_pos_offset_.setZero();
+    uwb_output_target_offset_.setZero();
+    vio_visual_update_guard_en_ = false;
+    vio_image_quality_gate_en_ = false;
+    vio_visual_patch_quality_gate_en_ = false;
+    visual_map_prune_en = false;
+    visual_map_max_voxels = 0;
+    visual_map_max_points_per_voxel = 0;
+    visual_map_max_total_points = 0;
+    visual_map_max_add_per_frame_ = 1000000000;
+    visual_map_min_shi_tomasi_score_ = 0.0;
+    current_decision_ = UpdateDecision();
+    update_decision_ready_ = false;
+  }
   if (frame_time_budget_s_ <= 0.0)
   {
     ROS_WARN("[RuntimeGuard] Invalid frame_time_budget_s=%.6f, fallback to 0.100000 s", frame_time_budget_s_);
     frame_time_budget_s_ = 0.1;
   }
+  ROS_INFO("[Experimental] enable=%d", static_cast<int>(experimental_features_enable_));
   ROS_INFO("[RuntimeGuard] enable=%d, frame_time_budget_s=%.6f s", static_cast<int>(runtime_guard_en_), frame_time_budget_s_);
   ROS_INFO("[DEGEN_GUARD] enable=%d adaptive_weight=%d z_soft=%d nhc=%d backward=%d corridor=%d action=%s log_file=%s",
            static_cast<int>(deg_guard_enable_),
@@ -599,6 +644,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
 
 void LIVMapper::updateRuntimeGuard(double frame_time_s)
 {
+  if (!experimental_features_enable_) return;
   if (!runtime_guard_en_) return;
   if (deterministic_mode_)
   {
@@ -1026,7 +1072,7 @@ void LIVMapper::updateCorridorMotionPrior(const char *stage, const StatesGroup &
   corridor_prior_backward_distance_window_ = 0.0;
   corridor_prior_backward_distance_fail_window_ = 0.0;
 
-  if (!corridor_prior_enable_ || isDegradedHoldMode() || isBootstrapMode() ||
+  if (!experimental_features_enable_ || !corridor_prior_enable_ || isDegradedHoldMode() || isBootstrapMode() ||
       (p_imu && p_imu->imu_need_init) ||
       (gravity_align_en && !gravity_align_finished) || !state.pos_end.allFinite())
   {
@@ -1211,6 +1257,7 @@ void LIVMapper::updateCorridorMotionPrior(const char *stage, const StatesGroup &
 
 double LIVMapper::updateAdaptiveSensorNoiseScale(const char *sensor)
 {
+  if (!experimental_features_enable_) return 1.0;
   const std::string sensor_name = sensor ? sensor : "state";
   const bool is_lio = sensor_name.find("LIO") != std::string::npos || sensor_name.find("LO") != std::string::npos;
   const bool is_vio = sensor_name.find("VIO") != std::string::npos;
@@ -1997,6 +2044,7 @@ void LIVMapper::clearSafetyLocalCaches()
 
 void LIVMapper::clearLocalMapsForReinit(const std::string &reason)
 {
+  if (!experimental_features_enable_) return;
   local_map_cleared_last_ = false;
   visual_map_cleared_last_ = false;
   tracker_reset_last_ = false;
@@ -2055,6 +2103,7 @@ void LIVMapper::clearLocalMapsForReinit(const std::string &reason)
 
 void LIVMapper::enterLocalReinitMode(const std::string &mode, const std::string &reason)
 {
+  if (!experimental_features_enable_) return;
   if (!local_reinit_enable_) return;
   if (local_mode_ == mode && local_reinit_reason_ == reason) return;
   local_mode_ = mode;
@@ -2129,11 +2178,13 @@ void LIVMapper::enterLocalReinitMode(const std::string &mode, const std::string 
 
 bool LIVMapper::isDegradedHoldMode() const
 {
+  if (!experimental_features_enable_) return false;
   return local_reinit_enable_ && local_mode_ == "DEGRADED_HOLD";
 }
 
 bool LIVMapper::isBootstrapMode() const
 {
+  if (!experimental_features_enable_) return false;
   return local_reinit_enable_ &&
          (local_mode_ == "DEGRADED_BOOTSTRAP" ||
           local_mode_ == "LOCAL_REINIT" ||
@@ -2192,6 +2243,7 @@ void LIVMapper::applyDegradedHoldConstraint(const char *stage, bool check_reject
 
 bool LIVMapper::localModeBlocksMapUpdate() const
 {
+  if (!experimental_features_enable_) return false;
   if (!local_reinit_enable_) return false;
   if (local_mode_ == "DEGRADED_HOLD") return disable_voxel_map_in_degraded_hold_;
   return local_mode_ == "RELOCALIZE";
@@ -2199,6 +2251,7 @@ bool LIVMapper::localModeBlocksMapUpdate() const
 
 bool LIVMapper::localModeBlocksVisualMapUpdate() const
 {
+  if (!experimental_features_enable_) return false;
   if (!local_reinit_enable_) return false;
   if (local_mode_ == "DEGRADED_HOLD") return disable_visual_map_in_degraded_hold_;
   return local_mode_ == "RELOCALIZE";
@@ -2206,6 +2259,7 @@ bool LIVMapper::localModeBlocksVisualMapUpdate() const
 
 bool LIVMapper::localModeSkipsVisualEkf() const
 {
+  if (!experimental_features_enable_) return false;
   if (!local_reinit_enable_) return false;
   if (local_mode_ == "DEGRADED_HOLD") return true;
   if (local_mode_ == "DEGRADED_BOOTSTRAP") return degraded_bootstrap_enable_;
@@ -2227,6 +2281,13 @@ void LIVMapper::updateLocalModeAtFrameStart()
   bag_elapsed_sec_ = bag_start_offset_ + local_elapsed_sec_;
   in_fixed_degraded_window_ = false;
   fixed_degraded_reason_ = debug_fixed_degraded_intervals_enable_ ? "not_in_window" : "disabled";
+
+  if (!experimental_features_enable_)
+  {
+    local_mode_ = "NORMAL";
+    local_reinit_reason_ = "experimental_disabled";
+    return;
+  }
 
   if (!local_reinit_enable_)
   {
@@ -2387,6 +2448,7 @@ LIVMapper::ObservationQuality LIVMapper::evaluateObservationQuality() const
 
 void LIVMapper::updateSystemModeFromQuality(const ObservationQuality &quality)
 {
+  if (!experimental_features_enable_) return;
   if (!local_reinit_enable_) return;
   if (safety_fail_safe_mode_)
   {
@@ -2404,6 +2466,7 @@ void LIVMapper::updateSystemModeFromQuality(const ObservationQuality &quality)
 LIVMapper::UpdateDecision LIVMapper::makeUpdateDecision(const ObservationQuality &quality) const
 {
   UpdateDecision decision;
+  if (!experimental_features_enable_) return decision;
   if (local_mode_ == "DEGRADED_HOLD" || safety_fail_safe_mode_)
   {
     decision.allow_lio_update = false;
@@ -2455,6 +2518,26 @@ LIVMapper::MapUpdateDecision LIVMapper::decideMapUpdate(bool lio_degenerated,
                                                         bool has_points) const
 {
   MapUpdateDecision decision;
+  if (!experimental_features_enable_)
+  {
+    decision.allow = has_points && (stride_ready || force_ready);
+    if (!has_points)
+    {
+      decision.reason = RejectReason::NO_POINTS;
+      decision.skip_reason = "NO_POINTS";
+    }
+    else if (!decision.allow)
+    {
+      decision.reason = RejectReason::SMALL_MOTION;
+      decision.skip_reason = "SMALL_MOTION";
+    }
+    else
+    {
+      decision.reason = RejectReason::NONE;
+      decision.skip_reason = force_ready && !stride_ready ? "forced" : "none";
+    }
+    return decision;
+  }
   decision.allow = current_decision_.allow_voxel_map_update && !lio_degenerated && stride_ready && has_points;
   if (!current_decision_.allow_voxel_map_update)
   {
@@ -2526,6 +2609,7 @@ void LIVMapper::printDiagnostics(const char *stage)
 
 void LIVMapper::updateLocalTrackingLostDetectors(const char *sensor)
 {
+  if (!experimental_features_enable_) return;
   if (!local_reinit_enable_) return;
   const double now = LidarMeasures.last_lio_update_time;
   const std::string sensor_name = sensor ? sensor : "";
@@ -2624,13 +2708,22 @@ void LIVMapper::stateEstimationAndMapping()
   deterministic_frame_id_++;
   updateLocalModeAtFrameStart();
   const StatesGroup state_before_frame = _state;
-  validateStateForSafety("frame-pre", state_before_frame, _state, false, false);
-	  updateCorridorMotionPrior("frame-pre", _state);
-  current_quality_ = evaluateObservationQuality();
-  updateSystemModeFromQuality(current_quality_);
-  current_decision_ = makeUpdateDecision(current_quality_);
-  update_decision_ready_ = true;
-  printDiagnostics("frame-pre");
+  if (experimental_features_enable_)
+  {
+    validateStateForSafety("frame-pre", state_before_frame, _state, false, false);
+    updateCorridorMotionPrior("frame-pre", _state);
+    current_quality_ = evaluateObservationQuality();
+    updateSystemModeFromQuality(current_quality_);
+    current_decision_ = makeUpdateDecision(current_quality_);
+    update_decision_ready_ = true;
+    printDiagnostics("frame-pre");
+  }
+  else
+  {
+    current_quality_ = ObservationQuality();
+    current_decision_ = UpdateDecision();
+    update_decision_ready_ = false;
+  }
 
   switch (LidarMeasures.lio_vio_flg)
   {
@@ -2654,11 +2747,14 @@ void LIVMapper::stateEstimationAndMapping()
       handleLIO();
       break;
   }
-  maybeRecoverFailSafe();
-  current_quality_ = evaluateObservationQuality();
-  current_decision_ = makeUpdateDecision(current_quality_);
-  writeDegeneracyGuardLog("frame-end");
-  printDiagnostics("frame-end");
+  if (experimental_features_enable_)
+  {
+    maybeRecoverFailSafe();
+    current_quality_ = evaluateObservationQuality();
+    current_decision_ = makeUpdateDecision(current_quality_);
+    writeDegeneracyGuardLog("frame-end");
+    printDiagnostics("frame-end");
+  }
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
   if (state_update_flg) latest_ekf_state = _state;
@@ -3042,18 +3138,21 @@ void LIVMapper::handleVIO()
 		      return std::string("");
 		    };
 		    vio_manager->disable_visual_map_update_this_frame =
-		        (update_decision_ready_ && !current_decision_.allow_visual_map_update) ||
-		        localModeBlocksVisualMapUpdate();
+		        experimental_features_enable_ &&
+		        ((update_decision_ready_ && !current_decision_.allow_visual_map_update) ||
+		         localModeBlocksVisualMapUpdate());
 		    vio_manager->visual_map_update_disable_reason =
 		        vio_manager->disable_visual_map_update_this_frame ?
 		        (localModeBlocksVisualMapUpdate() ? visualModeReason() : current_decision_.reason_text) : "";
 		    vio_manager->force_skip_visual_ekf_this_frame =
-		        localModeSkipsVisualEkf() ||
-		        (update_decision_ready_ && !current_decision_.allow_vio_update);
+		        experimental_features_enable_ &&
+		        (localModeSkipsVisualEkf() ||
+		         (update_decision_ready_ && !current_decision_.allow_vio_update));
 		    vio_manager->force_skip_visual_ekf_reason =
 		        vio_manager->force_skip_visual_ekf_this_frame ?
 		        (!current_decision_.allow_vio_update ? current_decision_.reason_text : visualModeReason()) : "";
-		    vio_manager->adaptive_external_noise_scale = updateAdaptiveSensorNoiseScale("VIO");
+		    vio_manager->adaptive_external_noise_scale =
+		        experimental_features_enable_ ? updateAdaptiveSensorNoiseScale("VIO") : 1.0;
 		  }
 	  vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
 	  const std::string vio_update_status = vio_manager ? vio_manager->last_visual_update_status : "accepted";
@@ -3089,7 +3188,7 @@ void LIVMapper::handleVIO()
     return;
   }
   vio_manager->updateFrameState(_state);
-  updateVisualObservationHints();
+  if (experimental_features_enable_) updateVisualObservationHints();
 	  if (!deterministic_mode_ || !uwb_update_only_on_lio_) applyUwbUpdate("VIO");
 	  advanceUwbOutputCorrection();
   if (!validateStateForSafety("VIO-after-uwb", state_before_vio_update, _state, false, false))
@@ -3151,7 +3250,7 @@ bool LIVMapper::shouldSelectVisualFrame()
   last_selector_reach_pose_keyframe_ = false;
   last_selector_reach_skip_limit_ = false;
 
-  if (!adaptive_visual_selector_en)
+  if (!experimental_features_enable_ || !adaptive_visual_selector_en)
   {
     last_selector_reason_ = "adaptive_off";
     return true;

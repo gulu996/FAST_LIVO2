@@ -3,7 +3,7 @@
   <arg name="rviz" default="true" />
   <arg name="play_bag" default="true" />
   <arg name="bag" default="/media/gulu/一只沙糖桔/数据集/数据集/Elevator01.bag" />
-  <arg name="bag_start" default="0.0" />
+  <arg name="bag_start" default="210.0" />
   <arg name="bag_rate" default="3.0" />
   <arg name="bag_delay" default="2.0" />
   <arg name="bag_queue" default="10000" />

@@ -1,3 +1,6 @@
+experimental_features:
+  enable: false
+
 common:
   img_topic: "/left_camera/image"
   lid_topic: "/livox/lidar"

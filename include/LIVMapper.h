@@ -206,6 +206,7 @@ public:
 
   bool lidar_map_inited = false, pcd_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false, hilti_en = false;
   bool save_log_en = true;
+  bool experimental_features_enable_ = false;
   bool uwb_output_correction_en_ = true;
   bool uwb_output_smooth_en_ = true;
   double uwb_output_smooth_alpha_ = 0.15;

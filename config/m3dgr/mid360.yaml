@@ -1,3 +1,6 @@
+experimental_features:
+  enable: false
+
 common:
   # ponytail: FAST-LIVO2 only consumes one image stream; use M3DGR D435i color as the single/left camera.
   img_topic: "/camera/color/image_raw"
