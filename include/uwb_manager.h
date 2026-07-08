@@ -65,6 +65,41 @@ struct UwbAnchorFrameAlignSample
   double stamp = 0.0;
 };
 
+struct UwbUpdateResult
+{
+  int used_count = 0;
+  std::string action = "none";
+  double residual_rms = 0.0;
+  double max_abs_residual = 0.0;
+  double xy_correction_raw = 0.0;
+  double xy_correction_applied = 0.0;
+  double time_diff = 0.0;
+  double correction_norm = 0.0;
+  double baseline_consistency_error = 0.0;
+  V3D uwb_only_position = V3D::Zero();
+  V3D filtered_uwb_position = V3D::Zero();
+  double uwb_only_residual_rms = 0.0;
+  double uwb_only_max_abs_residual = 0.0;
+  double uwb_only_position_jump = 0.0;
+  double uwb_only_speed = 0.0;
+  double slam_uwb_position_diff = 0.0;
+  int limited_update_consecutive_good_count = 0;
+  int relocalization_candidate_count = 0;
+  bool state_updated = false;
+  bool request_pause_map_insert = false;
+  bool request_relocalization = false;
+  bool relocalization_confirmed = false;
+  bool local_map_reset = false;
+  bool visual_cache_reset = false;
+  bool covariance_inflated = false;
+};
+
+struct UwbOnlyPositionSample
+{
+  V3D position = V3D::Zero();
+  double stamp = 0.0;
+};
+
 class UwbManager
 {
 public:
@@ -75,8 +110,9 @@ public:
   void shutdown();
   bool isRunning() const { return running_.load(); }
   bool updateEnabled() const { return en_; }
-  int applyRangeUpdate(StatesGroup &state);
-  int applyRangeUpdateAt(StatesGroup &state, double current_lidar_stamp, double lidar_start_stamp);
+  void setDegenerateMode(bool degenerated) { degraded_mode_ = degenerated; }
+  UwbUpdateResult applyRangeUpdate(StatesGroup &state);
+  UwbUpdateResult applyRangeUpdateAt(StatesGroup &state, double current_lidar_stamp, double lidar_start_stamp);
 
 private:
   bool loadParameters(ros::NodeHandle &nh);
@@ -97,7 +133,14 @@ private:
                          const std::string &level, const std::string &message);
   void logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
                  const V3D &trans_add, const V3D &tag_offset_add);
-  int applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
+  UwbUpdateResult applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
+  double effectivePositionCovFloor() const;
+  bool solveUwbOnlyPosition2D(const std::vector<UwbRangeMeasurement> &measurements,
+                              double z_world, const V3D &initial_position,
+                              V3D &position, double &residual_rms,
+                              double &max_abs_residual, double &geometry_score) const;
+  V3D updateFilteredUwbOnlyPosition(const V3D &position, double stamp,
+                                    double &position_jump, double &speed);
   bool tryAlignAnchorFrame(const StatesGroup &state,
                            const std::vector<UwbRangeMeasurement> &measurements);
   bool tryInitializeBaselineAnchors(const StatesGroup &state,
@@ -147,8 +190,75 @@ private:
   bool update_orientation_ = false;
   double max_residual_rms_ = 0.50;
   double max_xy_correction_normal_ = 0.50;
-  double max_update_step_xy_ = 0.10;
+  double max_update_step_xy_ = 0.05;
   double two_anchor_sigma_scale_ = 5.0;
+  std::string two_anchor_update_mode_ = "baseline_1d";
+  double baseline_1d_direct_alpha_ = 0.05;
+  double baseline_1d_direct_max_step_m_ = 0.03;
+  double two_anchor_normal_max_step_m_ = 0.05;
+  double two_anchor_degraded_max_step_m_ = 0.10;
+  double two_anchor_strong_degraded_max_step_m_ = 0.15;
+  double two_anchor_hard_max_step_m_ = 0.20;
+  double two_anchor_max_residual_ = 2.0;
+  double two_anchor_baseline_consistency_threshold_m_ = 2.0;
+  double two_anchor_max_residual_rms_ = 0.8;
+  double two_anchor_max_abs_residual_ = 1.5;
+  bool single_anchor_corridor_1d_en_ = true;
+  bool single_anchor_only_when_total_anchors_eq_2_ = true;
+  bool single_anchor_requires_baseline_initialized_ = true;
+  double single_anchor_alpha_ = 0.05;
+  double single_anchor_normal_max_step_m_ = 0.05;
+  double single_anchor_degraded_max_step_m_ = 0.10;
+  double single_anchor_strong_degraded_max_step_m_ = 0.15;
+  double single_anchor_hard_max_step_m_ = 0.20;
+  double single_anchor_max_residual_ = 2.0;
+  int single_anchor_confirm_count_required_ = 2;
+  double single_anchor_min_range_m_ = 1.0;
+  double single_anchor_max_range_m_ = 60.0;
+  double single_anchor_branch_margin_m_ = 0.5;
+  double single_anchor_near_anchor_disable_dist_m_ = 1.0;
+  double single_anchor_range_jump_threshold_m_ = 2.0;
+  double single_anchor_residual_jump_threshold_m_ = 1.0;
+  double single_anchor_speed_threshold_mps_ = 2.0;
+  double corridor_direction_max_angle_deg_ = 30.0;
+  bool disable_single_anchor_on_turn_ = true;
+  bool enable_corridor_segments_ = false;
+  bool degraded_mode_en_ = true;
+  int degraded_confirm_count_ = 3;
+  int strong_degraded_confirm_count_ = 5;
+  double multi_anchor_max_residual_rms_ = 0.8;
+  double multi_anchor_max_abs_residual_ = 1.5;
+  double max_time_diff_s_ = 0.05;
+  double limited_update_max_residual_rms_ = 2.0;
+  double limited_update_max_abs_residual_ = 3.0;
+  double limited_update_max_xy_raw_ = 3.0;
+  double limited_update_max_time_diff_s_ = 0.05;
+  int limited_update_require_consecutive_good_ = 2;
+  int limited_update_consecutive_good_count_ = 0;
+  double normal_update_max_xy_raw_ = 0.50;
+  double relocalization_candidate_min_xy_raw_ = 1.5;
+  double hard_reject_xy_raw_ = 3.0;
+  bool relocalization_en_ = false;
+  double relocalization_threshold_m_ = 1.5;
+  int relocalization_confirm_count_ = 5;
+  double uwb_only_max_residual_rms_ = 0.5;
+  double uwb_only_max_abs_residual_ = 1.0;
+  double uwb_position_jump_threshold_m_ = 1.0;
+  double uwb_speed_threshold_mps_ = 2.0;
+  double anchor_geometry_min_score_ = 1e-3;
+  int relocalization_candidate_count_ = 0;
+  int corridor_residual_stable_count_ = 0;
+  bool corridor_last_residual_valid_ = false;
+  double corridor_last_residual_ = 0.0;
+  bool corridor_last_tag_valid_ = false;
+  V3D corridor_last_tag_position_w_ = V3D::Zero();
+  int single_anchor_last_anchor_id_ = -1;
+  int single_anchor_last_branch_ = 0;
+  int single_anchor_confirm_counter_ = 0;
+  bool single_anchor_last_valid_ = false;
+  double single_anchor_last_range_m_ = 0.0;
+  double single_anchor_last_residual_m_ = 0.0;
+  double single_anchor_last_stamp_ = 0.0;
   int require_consecutive_good_updates_ = 3;
   double good_residual_rms_ = 0.30;
   bool suspect_hold_en_ = false;
@@ -161,6 +271,9 @@ private:
   double large_correction_reject_threshold_ = 3.0;
   std::string anchor_file_;
   double position_cov_floor_m_ = 0.0;
+  double position_cov_floor_degraded_m_ = 3.0;
+  bool position_cov_floor_degraded_only_ = true;
+  bool degraded_mode_ = false;
   double max_residual_m_ = 3.0;
   bool stale_repeat_filter_en_ = true;
   double stale_repeat_epsilon_m_ = 0.001;
@@ -246,6 +359,7 @@ private:
   double replay_last_slam_relative_time_ = -1.0;
   double replay_file_start_stamp_ = 0.0;
   bool replay_file_start_stamp_ready_ = false;
+  std::deque<UwbOnlyPositionSample> uwb_only_position_history_;
 };
 
 typedef std::shared_ptr<UwbManager> UwbManagerPtr;

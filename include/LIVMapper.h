@@ -38,6 +38,7 @@ public:
   void handleVIO();
   void handleLIO();
   void applyUwbUpdate(const char *stage);
+  void handleUwbRelocalizationConfirmed(UwbUpdateResult &result, const char *stage);
   void advanceUwbOutputCorrection();
   V3D outputPosition() const;
   void savePCD();
@@ -102,6 +103,9 @@ public:
   bool uwb_output_smooth_en_ = true;
   double uwb_output_smooth_alpha_ = 0.15;
   double uwb_output_smooth_max_step_m_ = 0.05;
+  int uwb_pause_map_update_frames_ = 0;
+  int uwb_pause_map_update_frames_after_correction_ = 3;
+  double uwb_pause_map_update_min_correction_m_ = 0.05;
   V3D uwb_output_pos_offset_ = V3D::Zero();
   V3D uwb_output_target_offset_ = V3D::Zero();
   bool pos_output_enable_timestamp_ = true;

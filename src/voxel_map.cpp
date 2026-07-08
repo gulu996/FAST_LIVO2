@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -704,6 +705,34 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
       voxel_map_[position]->UpdateOctoTree(p_v);
     }
   }
+}
+
+void VoxelMapManager::clearLocalMap()
+{
+  std::unordered_set<VoxelOctoTree *> deleted;
+  auto delete_map = [&deleted](std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &map) {
+    for (auto &kv : map)
+    {
+      if (kv.second != nullptr && deleted.insert(kv.second).second)
+      {
+        delete kv.second;
+      }
+    }
+    map.clear();
+  };
+
+  delete_map(voxel_map_);
+  delete_map(long_term_visual_map_);
+  visual_observed_voxels_.clear();
+  cross_mat_list_.clear();
+  body_cov_list_.clear();
+  pv_list_.clear();
+  ptpl_list_.clear();
+  lidar_degenerated_ = false;
+  lidar_constraint_ratio_ = 0.0;
+  current_frame_id_ = 0;
+  scan_count = 0;
+  last_slide_position = V3D::Zero();
 }
 
 void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, std::vector<PointToPlane> &ptpl_list)

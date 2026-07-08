@@ -142,8 +142,62 @@ uwb:
   range_noise_m: 0.10
   max_residual_rms: 0.50
   max_xy_correction_normal: 0.50
-  max_update_step_xy: 0.10
+  normal_update_max_xy_raw: 0.50
+  max_update_step_xy: 0.05
+  max_time_diff: 0.05
   two_anchor_sigma_scale: 5.0
+  single_anchor_corridor_1d_en: true
+  single_anchor_only_when_total_anchors_eq_2: true
+  single_anchor_requires_baseline_initialized: true
+  two_anchor_update_mode: "baseline_1d_direct" # dry_run / baseline_1d / baseline_1d_direct / weak_xy
+  two_anchor_alpha: 0.05
+  two_anchor_normal_max_step: 0.05
+  two_anchor_degraded_max_step: 0.10
+  two_anchor_strong_degraded_max_step: 0.15
+  two_anchor_hard_max_step: 0.20
+  two_anchor_max_residual: 2.0
+  baseline_1d_direct_alpha: 0.05
+  baseline_1d_direct_max_step_m: 0.03
+  two_anchor_baseline_consistency_threshold_m: 2.0
+  baseline_consistency_threshold: 2.0
+  two_anchor_max_residual_rms: 0.8
+  two_anchor_max_abs_residual: 1.5
+  single_anchor_alpha: 0.05
+  single_anchor_normal_max_step: 0.05
+  single_anchor_degraded_max_step: 0.10
+  single_anchor_strong_degraded_max_step: 0.15
+  single_anchor_hard_max_step: 0.20
+  single_anchor_max_residual: 2.0
+  single_anchor_confirm_count: 2
+  single_anchor_min_range: 1.0
+  single_anchor_max_range: 60.0
+  single_anchor_branch_margin: 0.5
+  single_anchor_near_anchor_disable_dist: 1.0
+  single_anchor_range_jump_threshold: 2.0
+  single_anchor_residual_jump_threshold: 1.0
+  single_anchor_speed_threshold: 2.0
+  corridor_direction_max_angle_deg: 30.0
+  disable_single_anchor_on_turn: true
+  enable_corridor_segments: false
+  degraded_mode_en: true
+  degraded_confirm_count: 3
+  strong_degraded_confirm_count: 5
+  multi_anchor_max_residual_rms: 0.8
+  multi_anchor_max_abs_residual: 1.5
+  limited_update_max_residual_rms: 2.0
+  limited_update_max_abs_residual: 3.0
+  limited_update_max_xy_raw: 3.0
+  limited_update_max_time_diff_s: 0.05
+  limited_update_require_consecutive_good: 2
+  relocalization_candidate_min_xy_raw: 1.5
+  relocalization_en: false
+  relocalization_threshold: 1.5
+  relocalization_confirm_count: 5
+  uwb_only_max_residual_rms: 0.5
+  uwb_only_max_abs_residual: 1.0
+  uwb_position_jump_threshold: 1.0
+  uwb_speed_threshold: 2.0
+  hard_reject_xy_raw: 3.0
   require_consecutive_good_updates: 3
   good_residual_rms: 0.30
   suspect_hold_en: false
@@ -161,7 +215,7 @@ uwb:
   # entry_exit_distance ：入口/出口各一个模块，只需要填写 entry_exit_distance_m
   # external_anchors ：多基站且已知外部坐标，填写下面 anchors 的 flag=1 和 position
   mode: "external_anchors"
-  anchor_frame_align_en: false # false: anchors.position就是FAST-LIVO world坐标；true: 估计外部UWB坐标到FAST-LIVO的变换。true且只有2个有效anchor时自动使用基线模式。
+  anchor_frame_align_en: true # false: anchors.position就是FAST-LIVO world坐标；true: 估计外部UWB坐标到FAST-LIVO的变换。true且只有2个有效anchor时自动使用基线模式。
 
   #两个基站时使用，从entry_anchor_id沿基线走向exit_anchor_id，单位米
   entry_anchor_id: 1
@@ -186,11 +240,17 @@ uwb:
   # 常用调参
   tag_offset_body: [0.0, 0.0, 0.0] # UWB天线相对IMU/body坐标系的位置
   init_min_motion_m: 30.0 # 估计入口-出口方向前至少运动的距离；有明显横移时可增大
-  position_cov_floor_m: 3.0 # UWB更新专用位置协方差下限；LIO/VIO过于自信导致UWB拉不动时增大，0表示关闭
+  position_cov_floor_m: 0.0 # 正常场景不固定抬高UWB权重；退化时使用下面的degraded floor
+  position_cov_floor_degraded_m: 3.0
+  position_cov_floor_degraded_only: true
   output_correction_en: false # debug-only；默认UWB直接更新内部EKF state的xy，不走output_offset轨迹修正
   output_smooth_en: true # true: UWB输出修正按帧平滑过渡，避免轨迹突然折线跳变
   output_smooth_alpha: 0.15 # 每帧向UWB目标修正量靠近的比例，越大越跟手，越小越平滑
   output_smooth_max_step_m: 0.05 # 每帧输出修正量最大变化，建议0.03~0.10；越小轨迹越平滑但收敛更慢
+  pause_map_update_threshold: 0.05
+  pause_map_update_frames_default: 3
+  pause_map_update_frames: 3
+  pause_map_update_min_correction_m: 0.05
   max_residual_m: 6.0
 
   # 高级参数：通常不需要修改

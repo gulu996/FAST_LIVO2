@@ -164,6 +164,22 @@ VIOManager::~VIOManager()
   feat_map.clear();
 }
 
+void VIOManager::clearVisualMap()
+{
+  for (auto &pair : warp_map) delete pair.second;
+  warp_map.clear();
+  for (auto &pair : feat_map) delete pair.second;
+  feat_map.clear();
+  sub_feat_map.clear();
+  protected_visual_points_.clear();
+  retrieve_voxel_points.clear();
+  append_voxel_points.clear();
+  if (visual_submap != nullptr) visual_submap->reset();
+  has_last_visual_guard_pos = false;
+  last_visual_guard_time = -1.0;
+  has_ref_patch_cache = false;
+}
+
 void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
 {
   Pli = -rot.transpose() * transl;
