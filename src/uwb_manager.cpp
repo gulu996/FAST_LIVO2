@@ -429,20 +429,41 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("uwb/replay_match_threshold_s", replay_match_threshold_param, -1.0);
   replay_match_threshold_s_ = replay_match_threshold_param >= 0.0 ? replay_match_threshold_param : max_age_s_;
   nh.param<int>("uwb/max_queue_size", max_queue_size_, 512);
-  nh.param<int>("uwb/min_anchors", min_update_anchors_, 2);
-  nh.param<int>("uwb/min_update_anchors", min_update_anchors_, min_update_anchors_);
-  nh.param<int>("uwb/min_anchors_for_update", min_anchors_for_update_, 3);
+  int legacy_min_anchors = min_anchors_for_update_;
+  int legacy_min_update_anchors = min_anchors_for_update_;
+  const bool has_legacy_min_anchors = nh.getParam("uwb/min_anchors", legacy_min_anchors);
+  const bool has_legacy_min_update_anchors = nh.getParam("uwb/min_update_anchors", legacy_min_update_anchors);
+  const bool has_canonical_min_anchors =
+      nh.getParam("uwb/min_anchors_for_update", min_anchors_for_update_);
+  if (has_canonical_min_anchors && (has_legacy_min_anchors || has_legacy_min_update_anchors))
+  {
+    ROS_WARN("[UWB] Deprecated uwb/min_anchors or uwb/min_update_anchors also present. Use canonical uwb/min_anchors_for_update=%d.",
+             min_anchors_for_update_);
+  }
+  else if (has_legacy_min_update_anchors)
+  {
+    min_anchors_for_update_ = legacy_min_update_anchors;
+    ROS_WARN("[UWB] uwb/min_update_anchors is deprecated. Please rename it to uwb/min_anchors_for_update.");
+  }
+  else if (has_legacy_min_anchors)
+  {
+    min_anchors_for_update_ = legacy_min_anchors;
+    ROS_WARN("[UWB] uwb/min_anchors is deprecated. Please rename it to uwb/min_anchors_for_update.");
+  }
+  min_update_anchors_ = min_anchors_for_update_;
   nh.param<int>("uwb/prefer_anchors", prefer_anchors_, 3);
   nh.param<double>("uwb/sigma", range_noise_m_, 0.10);
   nh.param<double>("uwb/range_noise_m", range_noise_m_, range_noise_m_);
   nh.param<double>("uwb/position_cov_floor_m", position_cov_floor_m_, 0.0);
-  nh.param<double>("uwb/max_residual_m", max_residual_m_, 3.0);
+  nh.param<double>("uwb/max_residual_m", max_residual_m_, 6.0);
   nh.param<double>("uwb/max_residual_rms", max_residual_rms_, 0.50);
   nh.param<double>("uwb/max_xy_correction_normal", max_xy_correction_normal_, 0.50);
   nh.param<double>("uwb/normal_update_max_xy_raw", normal_update_max_xy_raw_, max_xy_correction_normal_);
-  nh.param<double>("uwb/max_update_step_xy", max_update_step_xy_, 0.05);
+  nh.param<double>("uwb/max_update_step_xy", max_update_step_xy_, 0.10);
   nh.param<double>("uwb/two_anchor_sigma_scale", two_anchor_sigma_scale_, 5.0);
-  nh.param<std::string>("uwb/two_anchor_update_mode", two_anchor_update_mode_, "baseline_1d");
+  nh.param<std::string>("uwb/two_anchor_update_mode", two_anchor_update_mode_, "baseline_1d_direct");
+  nh.param<std::string>("uwb/two_anchor_policy_when_total_anchors_gt2",
+                        two_anchor_policy_when_total_anchors_gt2_, "dry_run");
   nh.param<double>("uwb/baseline_1d_direct_alpha", baseline_1d_direct_alpha_, 0.05);
   nh.param<double>("uwb/baseline_1d_direct_max_step_m", baseline_1d_direct_max_step_m_, 0.03);
   nh.param<double>("uwb/two_anchor_baseline_direct_alpha",
@@ -657,9 +678,9 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   max_age_s_ = std::max(0.0, max_age_s_);
   replay_match_threshold_s_ = std::max(0.0, replay_match_threshold_s_);
   max_queue_size_ = std::max(8, max_queue_size_);
-  min_update_anchors_ = std::max(2, min_update_anchors_);
-  min_anchors_for_update_ = std::max(min_update_anchors_, min_anchors_for_update_);
-  prefer_anchors_ = std::max(min_update_anchors_, prefer_anchors_);
+  min_anchors_for_update_ = std::max(1, min_anchors_for_update_);
+  min_update_anchors_ = min_anchors_for_update_;
+  prefer_anchors_ = std::max(0, prefer_anchors_);
   range_noise_m_ = std::max(1e-3, range_noise_m_);
   max_residual_rms_ = std::max(0.0, max_residual_rms_);
   max_xy_correction_normal_ = std::max(0.0, max_xy_correction_normal_);
@@ -667,6 +688,18 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   max_update_step_xy_ = std::max(0.0, max_update_step_xy_);
   two_anchor_sigma_scale_ = std::max(1.0, two_anchor_sigma_scale_);
   two_anchor_update_mode_ = toLower(two_anchor_update_mode_);
+  two_anchor_policy_when_total_anchors_gt2_ = toLower(two_anchor_policy_when_total_anchors_gt2_);
+  std::replace(two_anchor_policy_when_total_anchors_gt2_.begin(),
+               two_anchor_policy_when_total_anchors_gt2_.end(), '-', '_');
+  if (two_anchor_policy_when_total_anchors_gt2_ != "dry_run" &&
+      two_anchor_policy_when_total_anchors_gt2_ != "weak_xy" &&
+      two_anchor_policy_when_total_anchors_gt2_ != "baseline_1d_only_if_pair_matches_corridor" &&
+      two_anchor_policy_when_total_anchors_gt2_ != "disable")
+  {
+    ROS_WARN("[UWB] Unknown two_anchor_policy_when_total_anchors_gt2=%s. Use dry_run.",
+             two_anchor_policy_when_total_anchors_gt2_.c_str());
+    two_anchor_policy_when_total_anchors_gt2_ = "dry_run";
+  }
   if (two_anchor_update_mode_ == "baseline_1d_direct_update")
   {
     two_anchor_update_mode_ = "baseline_1d_direct";
@@ -884,12 +917,24 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
            static_cast<int>(anchor_frame_align_en_),
            coordinate_mode_log.c_str(),
            align_method_log.c_str());
-  ROS_INFO("[UWB] range_model=%s update_xy_only=%d update_z=%d update_orientation=%d min_anchors=%d prefer_anchors=%d sigma=%.3f",
+  ROS_INFO("[UWB] effective_config total_configured_anchors=%zu canonical_min_anchors_for_update=%d prefer_anchors=%d mode=%s anchor_frame_align_en=%d two_anchor_update_mode=%s two_anchor_policy_when_total_anchors_gt2=%s single_anchor_corridor_1d_en=%d single_anchor_only_when_total_anchors_eq_2=%d replay_match_threshold_s=%.3f replay_start_offset_s=%.3f",
+           enabled_configured_anchor_ids.size(),
+           min_anchors_for_update_,
+           prefer_anchors_,
+           mode_.c_str(),
+           static_cast<int>(anchor_frame_align_en_),
+           two_anchor_update_mode_.c_str(),
+           two_anchor_policy_when_total_anchors_gt2_.c_str(),
+           static_cast<int>(single_anchor_corridor_1d_en_),
+           static_cast<int>(single_anchor_only_when_total_anchors_eq_2_),
+           replay_match_threshold_s_,
+           replay_start_offset_s_);
+  ROS_INFO("[UWB] range_model=%s update_xy_only=%d update_z=%d update_orientation=%d canonical_min_anchors_for_update=%d prefer_anchors=%d sigma=%.3f",
            use_3d_range_model_ ? "3d" : "legacy_xy",
            static_cast<int>(update_xy_only_),
            static_cast<int>(update_z_),
            static_cast<int>(update_orientation_),
-           min_update_anchors_,
+           min_anchors_for_update_,
            prefer_anchors_,
            range_noise_m_);
   ROS_INFO("[UWB] update_strategy residual_debug_only=%d max_update_step_xy=%.3f min_anchors_for_update=%d two_anchor_mode=%s two_anchor_sigma_scale=%.3f baseline_direct_alpha=%.3f baseline_direct_max_step=%.3f require_good=%d good_rms=%.3f limited_good=%d normal_xy=%.3f limited_xy=%.3f relocalize_xy=%.3f hard_reject_xy=%.3f suspect_hold=%d lost_hold=%d",
@@ -2522,7 +2567,7 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
 {
   UwbUpdateResult result;
   const double now = ros::Time::now().toSec();
-  const int required_anchors = std::max(2, min_update_anchors_);
+  const int required_anchors = std::max(1, min_anchors_for_update_);
   int total_configured_anchors = 0;
   for (const auto &item : configured_anchors_)
   {
@@ -2538,7 +2583,13 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
       single_anchor_corridor_1d_en_ &&
       static_cast<int>(latest_by_anchor.size()) == 1 &&
       (!single_anchor_only_when_total_anchors_eq_2_ || total_configured_anchors == 2);
-  if (static_cast<int>(latest_by_anchor.size()) < required_anchors && !single_anchor_entry_allowed)
+  const bool two_anchor_gt2_policy_entry_allowed =
+      total_configured_anchors >= 3 &&
+      static_cast<int>(latest_by_anchor.size()) == 2 &&
+      two_anchor_policy_when_total_anchors_gt2_ != "disable";
+  if (static_cast<int>(latest_by_anchor.size()) < required_anchors &&
+      !single_anchor_entry_allowed &&
+      !two_anchor_gt2_policy_entry_allowed)
   {
     std::ostringstream oss;
     oss << "UWB_UPDATE action=skip_not_enough_anchors used=" << latest_by_anchor.size()
@@ -2661,7 +2712,9 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
   }
 
   const bool single_anchor_row_allowed = single_anchor_entry_allowed && row == 1;
-  if (row < required_anchors && !single_anchor_row_allowed)
+  const bool two_anchor_gt2_policy_row_allowed =
+      two_anchor_gt2_policy_entry_allowed && row == 2;
+  if (row < required_anchors && !single_anchor_row_allowed && !two_anchor_gt2_policy_row_allowed)
   {
     std::ostringstream oss;
     oss << "UWB_UPDATE action=skip_not_enough_anchors used=" << row
@@ -2733,6 +2786,8 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
                                              baseline_length);
 
       const bool baseline_1d_mode =
+          (total_configured_anchors == 2 ||
+           two_anchor_policy_when_total_anchors_gt2_ == "baseline_1d_only_if_pair_matches_corridor") &&
           (two_anchor_update_mode_ == "baseline_1d" ||
            two_anchor_update_mode_ == "baseline_1d_direct");
       if (baseline_1d_mode)
@@ -2838,6 +2893,7 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
     const bool baseline_direction_valid = std::hypot(baseline_direction.x(), baseline_direction.y()) > 1e-6;
     const bool baseline_projection_mode =
         two_anchor_case &&
+        row == 1 &&
         baseline_direction_valid &&
         (two_anchor_update_mode_ == "baseline_1d" ||
          two_anchor_update_mode_ == "baseline_1d_direct");
@@ -2899,6 +2955,9 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
     VD(DIM_STATE) dx_after_clamp = VD(DIM_STATE)::Zero();
     std::string update_mode_for_log = two_anchor_case ? two_anchor_update_mode_ :
                                       (single_anchor_case ? "single_anchor_corridor_1d" : "multi_anchor");
+    std::string selected_update_policy = update_mode_for_log;
+    bool whether_single_anchor_allowed = single_anchor_case && single_anchor_entry_allowed;
+    bool whether_pair_matches_corridor = two_anchor_case && two_anchor_uses_baseline_pair;
     int single_anchor_id = single_anchor_case ? used_anchor_ids.front() : -1;
     double single_anchor_s_anchor = 0.0;
     double single_anchor_measured_range = 0.0;
@@ -2962,6 +3021,9 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
           << " baseline_initialized=" << static_cast<int>(baseline_initialized_for_update)
           << " total_configured_anchors=" << total_configured_anchors
           << " update_mode=" << update_mode_for_log
+          << " selected_update_policy=" << selected_update_policy
+          << " whether_single_anchor_allowed=" << static_cast<int>(whether_single_anchor_allowed)
+          << " whether_pair_matches_corridor=" << static_cast<int>(whether_pair_matches_corridor)
           << " slam_uwb_residual_rms=" << residual_rms
           << " slam_uwb_max_abs_residual=" << max_abs_residual
           << " residual_rms=" << residual_rms
@@ -3088,44 +3150,83 @@ UwbUpdateResult UwbManager::applyLatestMeasurements(StatesGroup &state, const st
     std::string state_machine_update_action;
     if (two_anchor_case)
     {
-      if (two_anchor_update_disabled || two_anchor_update_mode_ == "dry_run")
+      if (total_configured_anchors >= 3)
+      {
+        selected_update_policy = two_anchor_policy_when_total_anchors_gt2_;
+        update_mode_for_log = "two_anchor_gt2_policy";
+        if (two_anchor_policy_when_total_anchors_gt2_ == "disable")
+        {
+          skip_reason = "two_anchor_policy_disable";
+          log_action("WARN", "skip_not_enough_anchors", 0.0, 1.0, V3D::Zero());
+          return finalize_result("skip_not_enough_anchors", false, 0.0, V3D::Zero());
+        }
+        if (two_anchor_policy_when_total_anchors_gt2_ == "dry_run")
+        {
+          skip_reason = "two_anchor_policy_dry_run";
+          log_action("INFO", "two_anchor_dry_run", 0.0, 1.0, V3D::Zero());
+          return finalize_result("two_anchor_dry_run", false, 0.0, V3D::Zero());
+        }
+        if (two_anchor_policy_when_total_anchors_gt2_ == "weak_xy")
+        {
+          state_machine_update_action = "two_anchor_weak_xy_update";
+        }
+        else if (two_anchor_policy_when_total_anchors_gt2_ == "baseline_1d_only_if_pair_matches_corridor")
+        {
+          if (!baseline_initialized_for_update || !baseline_direction_valid || !two_anchor_uses_baseline_pair)
+          {
+            skip_reason = !baseline_initialized_for_update ? "baseline_not_initialized" : "anchor_not_on_baseline";
+            baseline_residual_after_gate = 0.0;
+            log_action("WARN", "reject_uwb_outlier", 0.0, 1.0, V3D::Zero());
+            return finalize_result("reject_uwb_outlier", false, 0.0, V3D::Zero());
+          }
+        }
+      }
+
+      if (state_machine_update_action.empty() &&
+          (two_anchor_update_disabled || two_anchor_update_mode_ == "dry_run"))
       {
         log_action("INFO", "two_anchor_dry_run", 0.0, 1.0, V3D::Zero());
         return finalize_result("two_anchor_dry_run", false, 0.0, V3D::Zero());
       }
-      if (!baseline_initialized_for_update || !baseline_direction_valid || !two_anchor_uses_baseline_pair)
+      if (state_machine_update_action.empty() &&
+          (!baseline_initialized_for_update || !baseline_direction_valid || !two_anchor_uses_baseline_pair))
       {
         skip_reason = !baseline_initialized_for_update ? "baseline_not_initialized" : "anchor_not_on_baseline";
         baseline_residual_after_gate = 0.0;
         log_action("WARN", "reject_uwb_outlier", 0.0, 1.0, V3D::Zero());
         return finalize_result("reject_uwb_outlier", false, 0.0, V3D::Zero());
       }
-      if (two_anchor_baseline_consistency_threshold_m_ > 0.0 &&
+      if (state_machine_update_action.empty() &&
+          two_anchor_baseline_consistency_threshold_m_ > 0.0 &&
           baseline_consistency_error > two_anchor_baseline_consistency_threshold_m_)
       {
         baseline_residual_after_gate = 0.0;
         log_action("WARN", "reject_uwb_outlier", 0.0, 1.0, V3D::Zero());
         return finalize_result("reject_uwb_outlier", false, 0.0, V3D::Zero());
       }
-      if ((two_anchor_max_residual_rms_ > 0.0 && residual_rms > two_anchor_max_residual_rms_) ||
-          (two_anchor_max_abs_residual_ > 0.0 && max_abs_residual > two_anchor_max_abs_residual_))
+      if (state_machine_update_action.empty() &&
+          ((two_anchor_max_residual_rms_ > 0.0 && residual_rms > two_anchor_max_residual_rms_) ||
+           (two_anchor_max_abs_residual_ > 0.0 && max_abs_residual > two_anchor_max_abs_residual_)))
       {
         baseline_residual_after_gate = 0.0;
         log_action("WARN", "reject_uwb_outlier", 0.0, 1.0, V3D::Zero());
         return finalize_result("reject_uwb_outlier", false, 0.0, V3D::Zero());
       }
-      baseline_residual_after_gate = baseline_residual;
-      if (two_anchor_update_mode_ == "baseline_1d")
+      if (state_machine_update_action.empty())
       {
-        state_machine_update_action = "two_anchor_baseline_1d_update";
-      }
-      else if (two_anchor_update_mode_ == "baseline_1d_direct")
-      {
-        state_machine_update_action = "two_anchor_baseline_1d_direct_update";
-      }
-      else
-      {
-        state_machine_update_action = "two_anchor_weak_xy_update";
+        baseline_residual_after_gate = baseline_residual;
+        if (two_anchor_update_mode_ == "baseline_1d")
+        {
+          state_machine_update_action = "two_anchor_baseline_1d_update";
+        }
+        else if (two_anchor_update_mode_ == "baseline_1d_direct")
+        {
+          state_machine_update_action = "two_anchor_baseline_1d_direct_update";
+        }
+        else
+        {
+          state_machine_update_action = "two_anchor_weak_xy_update";
+        }
       }
     }
     else if (single_anchor_case)

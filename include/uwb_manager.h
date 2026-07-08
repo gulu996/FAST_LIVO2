@@ -190,9 +190,10 @@ private:
   bool update_orientation_ = false;
   double max_residual_rms_ = 0.50;
   double max_xy_correction_normal_ = 0.50;
-  double max_update_step_xy_ = 0.05;
+  double max_update_step_xy_ = 0.10;
   double two_anchor_sigma_scale_ = 5.0;
-  std::string two_anchor_update_mode_ = "baseline_1d";
+  std::string two_anchor_update_mode_ = "baseline_1d_direct";
+  std::string two_anchor_policy_when_total_anchors_gt2_ = "dry_run";
   double baseline_1d_direct_alpha_ = 0.05;
   double baseline_1d_direct_max_step_m_ = 0.03;
   double two_anchor_normal_max_step_m_ = 0.05;
@@ -274,7 +275,7 @@ private:
   double position_cov_floor_degraded_m_ = 3.0;
   bool position_cov_floor_degraded_only_ = true;
   bool degraded_mode_ = false;
-  double max_residual_m_ = 3.0;
+  double max_residual_m_ = 6.0;
   bool stale_repeat_filter_en_ = true;
   double stale_repeat_epsilon_m_ = 0.001;
   int stale_repeat_max_count_ = 3;

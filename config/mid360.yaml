@@ -131,171 +131,27 @@ imu:
 uwb:
   enable: true
   update_en: true
-  residual_debug_only: false
-  update_xy_only: true
-  use_3d_range_model: true
-  update_z: false
-  update_orientation: false
-  min_anchors: 2
+  source: "file"
+  replay_file: "/home/gulu/Downloads/uwb/uwb_ranges3.txt"
+  replay_start_offset_s: -85.0
+  replay_match_threshold_s: 0.05
+  mode: "external_anchors"
+  anchor_frame_align_en: false
   min_anchors_for_update: 2
-  prefer_anchors: 3
-  range_noise_m: 0.10
-  max_residual_rms: 0.50
-  max_xy_correction_normal: 0.50
-  normal_update_max_xy_raw: 0.50
-  max_update_step_xy: 0.05
-  max_time_diff: 0.05
-  two_anchor_sigma_scale: 5.0
+  prefer_anchors: 2
+  two_anchor_update_mode: "baseline_1d_direct"
   single_anchor_corridor_1d_en: true
   single_anchor_only_when_total_anchors_eq_2: true
-  single_anchor_requires_baseline_initialized: true
-  two_anchor_update_mode: "baseline_1d_direct" # dry_run / baseline_1d / baseline_1d_direct / weak_xy
-  two_anchor_alpha: 0.05
-  two_anchor_normal_max_step: 0.05
-  two_anchor_degraded_max_step: 0.10
-  two_anchor_strong_degraded_max_step: 0.15
-  two_anchor_hard_max_step: 0.20
-  two_anchor_max_residual: 2.0
-  baseline_1d_direct_alpha: 0.05
-  baseline_1d_direct_max_step_m: 0.03
-  two_anchor_baseline_consistency_threshold_m: 2.0
-  baseline_consistency_threshold: 2.0
-  two_anchor_max_residual_rms: 0.8
-  two_anchor_max_abs_residual: 1.5
-  single_anchor_alpha: 0.05
-  single_anchor_normal_max_step: 0.05
-  single_anchor_degraded_max_step: 0.10
-  single_anchor_strong_degraded_max_step: 0.15
-  single_anchor_hard_max_step: 0.20
-  single_anchor_max_residual: 2.0
-  single_anchor_confirm_count: 2
-  single_anchor_min_range: 1.0
-  single_anchor_max_range: 60.0
-  single_anchor_branch_margin: 0.5
-  single_anchor_near_anchor_disable_dist: 1.0
-  single_anchor_range_jump_threshold: 2.0
-  single_anchor_residual_jump_threshold: 1.0
-  single_anchor_speed_threshold: 2.0
-  corridor_direction_max_angle_deg: 30.0
-  disable_single_anchor_on_turn: true
-  enable_corridor_segments: false
-  degraded_mode_en: true
-  degraded_confirm_count: 3
-  strong_degraded_confirm_count: 5
-  multi_anchor_max_residual_rms: 0.8
-  multi_anchor_max_abs_residual: 1.5
-  limited_update_max_residual_rms: 2.0
-  limited_update_max_abs_residual: 3.0
-  limited_update_max_xy_raw: 3.0
-  limited_update_max_time_diff_s: 0.05
-  limited_update_require_consecutive_good: 2
-  relocalization_candidate_min_xy_raw: 1.5
-  relocalization_en: false
-  relocalization_threshold: 1.5
-  relocalization_confirm_count: 5
-  uwb_only_max_residual_rms: 0.5
-  uwb_only_max_abs_residual: 1.0
-  uwb_position_jump_threshold: 1.0
-  uwb_speed_threshold: 2.0
-  hard_reject_xy_raw: 3.0
-  require_consecutive_good_updates: 3
-  good_residual_rms: 0.30
-  suspect_hold_en: false
-  lost_hold_en: false
-  large_correction_warn_threshold: 0.50
-  large_correction_reject_threshold: 3.0
-
-  # 数据来源：serial在线读串口；file离线从replay_file回放之前保存的uwb_ranges.txt
-  source: "file" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
-  replay_file: "/home/gulu/Downloads/uwb/uwb_ranges3.txt"
-  replay_start_offset_s: -85.0 # file模式: +x表示rosbag播放x秒后开始UWB；-x表示跳过UWB开头x秒并把UWB的x秒处对齐rosbag开头
-  replay_match_threshold_s: 0.05 # file模式: 按LiDAR/SLAM相对时间匹配UWB，abs(slam_relative-uwb_relative)小于该值才使用
-
-  # 模式选择：
-  # entry_exit_distance ：入口/出口各一个模块，只需要填写 entry_exit_distance_m
-  # external_anchors ：多基站且已知外部坐标，填写下面 anchors 的 flag=1 和 position
-  mode: "external_anchors"
-  anchor_frame_align_en: true # false: anchors.position就是FAST-LIVO world坐标；true: 估计外部UWB坐标到FAST-LIVO的变换。true且只有2个有效anchor时自动使用基线模式。
-
-  #两个基站时使用，从entry_anchor_id沿基线走向exit_anchor_id，单位米
   entry_anchor_id: 1
   exit_anchor_id: 0
-  # mode=external_anchors时使用。anchor_frame_align_en=false时，position就是FAST-LIVO坐标系下的坐标；
-  # anchor_frame_align_en=true且有效anchor>=3时，position是外部UWB坐标，程序会用多时刻/多anchor range residual估计yaw+tx+ty。
-  # anchor_frame_align_en=true且只有2个有效anchor时，程序使用两基站基线模式：你需要从entry_anchor_id沿基线走向exit_anchor_id。
   anchors:
     - id: 0
-      flag: 1 # external_anchors模式设为1，并填写外部坐标；entry_exit_distance模式保持0即可
+      flag: 1
       position: [44.2, 5.8, 0.285]
     - id: 1
       flag: 1
       position: [-0.52, -0.64, 0.2]
-    - id: 2
-      flag: 0
-      position: [57.76, 44.2927, 0.0]
-    - id: 3
-      flag: 0
-      position: [0.161242, 42.1851, 0.0]
-
-  # 常用调参
-  tag_offset_body: [0.0, 0.0, 0.0] # UWB天线相对IMU/body坐标系的位置
-  init_min_motion_m: 30.0 # 估计入口-出口方向前至少运动的距离；有明显横移时可增大
-  position_cov_floor_m: 0.0 # 正常场景不固定抬高UWB权重；退化时使用下面的degraded floor
-  position_cov_floor_degraded_m: 3.0
-  position_cov_floor_degraded_only: true
-  output_correction_en: false # debug-only；默认UWB直接更新内部EKF state的xy，不走output_offset轨迹修正
-  output_smooth_en: true # true: UWB输出修正按帧平滑过渡，避免轨迹突然折线跳变
-  output_smooth_alpha: 0.15 # 每帧向UWB目标修正量靠近的比例，越大越跟手，越小越平滑
-  output_smooth_max_step_m: 0.05 # 每帧输出修正量最大变化，建议0.03~0.10；越小轨迹越平滑但收敛更慢
-  pause_map_update_threshold: 0.05
-  pause_map_update_frames_default: 3
-  pause_map_update_frames: 3
-  pause_map_update_min_correction_m: 0.05
-  max_residual_m: 6.0
-
-  # 高级参数：通常不需要修改
-  serial_port: "/dev/ttyUSB0"
-  baudrate: 115200
-  dtr: true
-  rts: false
-  log_filename: "uwb_ranges.txt" # 保存到当前save_path时间戳目录下
-  log_flush_stride: 1 # 每几行刷新一次，1表示便于tail -f实时观察
-  parser_mode: "distance" # 只识别distance[id],dist；UWBDBG可能重复打印上一次成功结果，默认不参与回放
-  range_scale: 1.0 # 串口里若是cm填0.01，若是mm填0.001
-  min_range_m: 0.05
-  max_range_m: 250.0 # 入口/出口基站相距178m，远端测距不能用100m门限提前丢弃
-  max_age_s: 5.0 # 离线relative倍速回放时允许少量调度滞后，避免误丢UWB replay数据
-  max_queue_size: 512
-  stale_repeat_filter_en: true # 同一anchor距离长时间完全不变时视为失联后缓存值，不参与更新
-  stale_repeat_epsilon_m: 0.001 # 距离相差小于该值认为重复；当前UWB输出到毫米，0.001较合适
-  stale_repeat_max_count: 3 # 允许UWBDBG和distance行造成的少量重复
-  stale_repeat_max_duration_s: 2.0 # 重复持续超过该时间后开始丢弃
-  update_max_rot_step_deg: 1.0
-  update_max_trans_step_m: 0.20 # output_correction_en=true时可适当增大；只修正输出轨迹，不会直接破坏局部地图
-  tag_offset_estimate_en: false # 可选在线估计UWB天线杆臂；需要anchor世界坐标有效且运动/观测充分
-  tag_offset_estimate_min_anchors: 2
-  tag_offset_init_cov_m: 0.10
-  tag_offset_process_noise_m: 0.0 # 刚性安装建议为0；非0会允许杆臂缓慢变化
-  tag_offset_update_max_step_m: 0.01
-  tag_offset_max_norm_m: 1.0
-  anchor_frame_align_min_motion_m: 20.0 # 自动对齐要求轨迹运动距离，少于该值不估计T_world_uwb
-  anchor_frame_align_min_duration_s: 30.0 # 自动对齐至少累计多少秒range数据
-  anchor_frame_align_min_ranges: 30 # 自动对齐至少累计多少条有效range
-  anchor_frame_align_min_anchors: 3 # 少于3个anchor不允许自动对齐
-  anchor_frame_align_success_rms_m: 0.50 # 优化/验证 residual RMS 小于该值才允许成功
-  anchor_frame_align_success_max_residual_m: 1.50 # 单条最大残差门限
-  anchor_frame_align_validation_duration_s: 5.0 # 自动对齐后继续dry-run验证这么久，验证通过才启用UWB更新
-  anchor_frame_align_use_start_range_offset: false # deprecated: 不再用单个start_range确定anchor0位置
-  anchor_frame_align_yaw_only: true # 自动对齐只估计yaw+tx+ty，scale=1，z不优化
-  anchor_position_estimate_en: false # baseline模式下不再做自由3D anchor估计，避免隧道直线/饱和range导致RMSE爆炸
-  anchor_estimate_use_for_update: true
-  anchor_estimate_freeze_after_init: true
-  anchor_estimate_min_samples: 30
-  anchor_estimate_max_samples: 300
-  anchor_estimate_min_rank: 1 # 3D充分运动建议3；隧道近似直线可降到1/2，但3D位置会有歧义
-  anchor_estimate_min_motion_m: 1.0
-  anchor_estimate_max_rmse_m: 2.0
-  anchor_estimate_max_step_m: 0.0 # 0表示不限制GN单步，避免几十米外的anchor被2m步长卡住
+  tag_offset_body: [0.0, 0.0, 0.0]
 
 lio:
   max_iterations: 3
