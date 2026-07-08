@@ -13,6 +13,7 @@ which is included as part of this source code package.
 #include "LIVMapper.h"
 #include <algorithm>
 #include <arpa/inet.h>
+#include <cctype>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -202,12 +203,37 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("time_offset/lidar_time_offset", lidar_time_offset, 0.0);
   nh.param<bool>("uav/imu_rate_odom", imu_prop_enable, false);
   nh.param<bool>("uav/gravity_align_en", gravity_align_en, false);
-  nh.param<bool>("uwb/output_correction_en", uwb_output_correction_en_, true);
+  nh.param<bool>("uwb/output_correction_en", uwb_output_correction_en_, false);
   nh.param<bool>("uwb/output_smooth_en", uwb_output_smooth_en_, true);
   nh.param<double>("uwb/output_smooth_alpha", uwb_output_smooth_alpha_, 0.15);
   nh.param<double>("uwb/output_smooth_max_step_m", uwb_output_smooth_max_step_m_, 0.05);
   uwb_output_smooth_alpha_ = std::max(0.0, std::min(1.0, uwb_output_smooth_alpha_));
   uwb_output_smooth_max_step_m_ = std::max(0.0, uwb_output_smooth_max_step_m_);
+  if (uwb_output_correction_en_)
+  {
+    ROS_WARN("[UWB] uwb/output_correction_en is debug-only. Default UWB fusion updates the internal EKF state xy instead of output_offset.");
+  }
+  nh.param<bool>("pos_output/enable_timestamp", pos_output_enable_timestamp_, true);
+  nh.param<string>("pos_output/format", pos_output_format_, "timestamp_xyz_quat");
+  std::string pos_output_format_lower = pos_output_format_;
+  std::transform(pos_output_format_lower.begin(), pos_output_format_lower.end(), pos_output_format_lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (pos_output_format_lower == "timestamp_xyz_quat")
+  {
+    pos_output_enable_timestamp_ = true;
+  }
+  else if (pos_output_format_lower == "legacy_xyz_quat" || pos_output_format_lower == "xyz_quat")
+  {
+    pos_output_enable_timestamp_ = false;
+  }
+  if (pos_output_enable_timestamp_)
+  {
+    ROS_INFO("[POS] output format: timestamp x y z qx qy qz qw");
+  }
+  else
+  {
+    ROS_WARN("[POS] legacy output format enabled: x y z qw qx qy qz");
+  }
 
   nh.param<string>("evo/seq_name", seq_name, "01");
   nh.param<bool>("evo/pose_output_en", pose_output_en, false);
@@ -695,12 +721,14 @@ void LIVMapper::applyUwbUpdate(const char *stage)
 
   V3D output_delta = V3D::Zero();
   int used_count = 0;
+  const double current_lidar_stamp = LidarMeasures.last_lio_update_time;
+  const double lidar_start_stamp = _first_lidar_time > 0.0 ? _first_lidar_time : current_lidar_stamp;
   if (uwb_output_correction_en_)
   {
     StatesGroup corrected_state = _state;
     corrected_state.pos_end += uwb_output_target_offset_;
     const V3D pos_before = corrected_state.pos_end;
-    used_count = uwb_manager->applyRangeUpdate(corrected_state);
+    used_count = uwb_manager->applyRangeUpdateAt(corrected_state, current_lidar_stamp, lidar_start_stamp);
     if (used_count <= 0) return;
 
     output_delta = corrected_state.pos_end - pos_before;
@@ -713,7 +741,7 @@ void LIVMapper::applyUwbUpdate(const char *stage)
   else
   {
     const V3D pos_before = _state.pos_end;
-    used_count = uwb_manager->applyRangeUpdate(_state);
+    used_count = uwb_manager->applyRangeUpdateAt(_state, current_lidar_stamp, lidar_start_stamp);
     if (used_count <= 0) return;
     output_delta = _state.pos_end - pos_before;
 
@@ -1107,7 +1135,7 @@ void LIVMapper::handleLIO()
     }
     Eigen::Matrix4d outT;
     Eigen::Quaterniond q(_state.rot_end);
-    evoFile << std::fixed;
+    evoFile << std::fixed << std::setprecision(9);
     const V3D out_pos = outputPosition();
     evoFile << LidarMeasures.last_lio_update_time << " " << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " "
             << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
@@ -2353,8 +2381,17 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
   {
     Eigen::Quaterniond q(_state.rot_end);
     const V3D out_pos = outputPosition();
-    fout_pcd_pos << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " " << q.w() << " " << q.x() << " " << q.y()
-                  << " " << q.z() << " " << endl;
+    fout_pcd_pos << std::fixed << std::setprecision(9);
+    if (pos_output_enable_timestamp_)
+    {
+      fout_pcd_pos << LidarMeasures.last_lio_update_time << " " << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " "
+                   << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " " << endl;
+    }
+    else
+    {
+      fout_pcd_pos << out_pos[0] << " " << out_pos[1] << " " << out_pos[2] << " " << q.w() << " " << q.x() << " " << q.y()
+                   << " " << q.z() << " " << endl;
+    }
   }
   
   if (need_rgb_cloud && laserCloudWorldRGB->size() > 0) PointCloudXYZI().swap(*pcl_wait_pub);

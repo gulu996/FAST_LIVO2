@@ -1,7 +1,7 @@
 common:
-  img_topic: "/left_camera/image"
-  lid_topic: "/livox/lidar"
-  imu_topic: "/livox/imu"
+  img_topic: "/camera/color/image_raw"
+  lid_topic: "/livox/mid360/lidar"
+  imu_topic: "/livox/mid360/imu"
   img_en: 1
   lidar_en: 1
   ros_driver_bug_fix: false
@@ -36,34 +36,14 @@ deterministic_debug:
   image_buffer_sort_en: true
 
 extrin_calib:
-  #extrinsic_T: [-0.011, -0.02329, 0.04412]
-  #extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  #Rcl: [ -0.011008,  -0.999940,   0.000187,
-  #        0.539054,  -0.006092,  -0.842250,
-  #        0.842200,  -0.009171,   0.539089]
-  #Pcl: [  0.086367,  -0.365243,  -0.070319]
-
-
-  #extrinsic_T: [0.08809, 0.01329, -0.25733]
-  #extrinsic_R: [-0.8090170, 0.0000, -0.5877852, 0.0000, -1.0000, 0.0000, -0.5877852, 0.0000, 0.8090170]
-  #Rcl: [ -0.023487,  -0.999710,   0.005250,
-  #     -0.013503,  -0.004934,  -0.999897,
-  #      0.999633,  -0.023556,  -0.013383]
-  #Pcl: [ -0.001139,  -0.161932,   0.001251]
-
-  #2600*2160
   extrinsic_T: [-0.011, -0.02329, 0.04412]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
-  Rcl: [-0.020181 , -0.999125 ,  0.036652 ,
-         0.396389 , -0.041651 , -0.917137 ,
-         0.917861 , -0.003980 ,  0.396882]
-  Pcl: [ 0.051922 , -0.205230 , -0.018727]
   # M3DGR Outdoor01: mid360 -> D435i color camera.
-  #Rcl: [ 0.0722207, -0.9973870, -0.0020542,
-  #       0.5210050,  0.0394820, -0.8526402,
-  #       0.8504930,  0.0605080,  0.5224945]
-  #Pcl: [-0.0442358, -0.4117120, 0.1685680]
+  Rcl: [ 0.0722207, -0.9973870, -0.0020542,
+         0.5210050,  0.0394820, -0.8526402,
+         0.8504930,  0.0605080,  0.5224945]
+  Pcl: [-0.0442358, -0.4117120, 0.1685680]
 
  
 time_offset: 
@@ -137,12 +117,12 @@ uwb:
   update_z: false
   update_orientation: false
   min_anchors: 2
-  min_anchors_for_update: 2
+  min_anchors_for_update: 3
   prefer_anchors: 3
   range_noise_m: 0.10
   max_residual_rms: 0.50
   max_xy_correction_normal: 0.50
-  max_update_step_xy: 0.10
+  max_update_step_xy: 0.20
   two_anchor_sigma_scale: 5.0
   require_consecutive_good_updates: 3
   good_residual_rms: 0.30
@@ -153,39 +133,35 @@ uwb:
 
   # 数据来源：serial在线读串口；file离线从replay_file回放之前保存的uwb_ranges.txt
   source: "file" # serial在线读串口；file离线从replay_file读之前保存的uwb_ranges.txt
-  replay_file: "/home/gulu/Downloads/uwb/uwb_ranges3.txt"
-  replay_start_offset_s: -85.0 # file模式: +x表示rosbag播放x秒后开始UWB；-x表示跳过UWB开头x秒并把UWB的x秒处对齐rosbag开头
-  replay_match_threshold_s: 0.05 # file模式: 按LiDAR/SLAM相对时间匹配UWB，abs(slam_relative-uwb_relative)小于该值才使用
+  replay_file: "/home/gulu/Downloads/uwb/m3/uwb_synthetic_from_scans_pos39_start203_accurate_time_2or3anchors.txt"
+  replay_start_offset_s: 203.0 # file模式下，UWB文件首条有效测距默认对齐rosbag起点；设203表示rosbag播放203秒后开始读取UWB文件
 
   # 模式选择：
   # entry_exit_distance ：入口/出口各一个模块，只需要填写 entry_exit_distance_m
   # external_anchors ：多基站且已知外部坐标，填写下面 anchors 的 flag=1 和 position
   mode: "external_anchors"
-  anchor_frame_align_en: false # false: anchors.position就是FAST-LIVO world坐标；true: 估计外部UWB坐标到FAST-LIVO的变换。true且只有2个有效anchor时自动使用基线模式。
+  anchor_frame_align_en: true # false: anchors.position就是FAST-LIVO world坐标；true: 估计外部UWB坐标到FAST-LIVO的变换。true且只有2个有效anchor时自动使用基线模式。
 
-  #两个基站时使用，从entry_anchor_id沿基线走向exit_anchor_id，单位米
-  entry_anchor_id: 1
-  exit_anchor_id: 0
   # mode=external_anchors时使用。anchor_frame_align_en=false时，position就是FAST-LIVO坐标系下的坐标；
   # anchor_frame_align_en=true且有效anchor>=3时，position是外部UWB坐标，程序会用多时刻/多anchor range residual估计yaw+tx+ty。
   # anchor_frame_align_en=true且只有2个有效anchor时，程序使用两基站基线模式：你需要从entry_anchor_id沿基线走向exit_anchor_id。
   anchors:
     - id: 0
       flag: 1 # external_anchors模式设为1，并填写外部坐标；entry_exit_distance模式保持0即可
-      position: [44.2, 5.8, 0.285]
+      position: [1.94292, -8.03734, 0.0]
     - id: 1
       flag: 1
-      position: [-0.52, -0.64, 0.2]
+      position: [62.0403, -4.8435, 0.0]
     - id: 2
-      flag: 0
+      flag: 1
       position: [57.76, 44.2927, 0.0]
     - id: 3
-      flag: 0
+      flag: 1
       position: [0.161242, 42.1851, 0.0]
 
   # 常用调参
   tag_offset_body: [0.0, 0.0, 0.0] # UWB天线相对IMU/body坐标系的位置
-  init_min_motion_m: 30.0 # 估计入口-出口方向前至少运动的距离；有明显横移时可增大
+  init_min_motion_m: 60.0 # 估计入口-出口方向前至少运动的距离；有明显横移时可增大
   position_cov_floor_m: 3.0 # UWB更新专用位置协方差下限；LIO/VIO过于自信导致UWB拉不动时增大，0表示关闭
   output_correction_en: false # debug-only；默认UWB直接更新内部EKF state的xy，不走output_offset轨迹修正
   output_smooth_en: true # true: UWB输出修正按帧平滑过渡，避免轨迹突然折线跳变

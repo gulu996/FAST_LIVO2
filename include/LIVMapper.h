@@ -98,12 +98,14 @@ public:
 
   bool lidar_map_inited = false, pcd_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false, hilti_en = false;
   bool save_log_en = true;
-  bool uwb_output_correction_en_ = true;
+  bool uwb_output_correction_en_ = false;
   bool uwb_output_smooth_en_ = true;
   double uwb_output_smooth_alpha_ = 0.15;
   double uwb_output_smooth_max_step_m_ = 0.05;
   V3D uwb_output_pos_offset_ = V3D::Zero();
   V3D uwb_output_target_offset_ = V3D::Zero();
+  bool pos_output_enable_timestamp_ = true;
+  std::string pos_output_format_ = "timestamp_xyz_quat";
   int pcd_save_interval = -1, pcd_index = 0;
   int pub_scan_num = 1;
   int pub_scan_num_nominal_ = 1;
