@@ -129,14 +129,14 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 uwb:
-  enable: true
-  update_en: true
+  enable: false
+  update_en: false
   source: "file"
-  replay_file: "/home/gulu/Downloads/uwb/uwb_ranges3.txt"
-  replay_start_offset_s: -85.0
+  replay_file: "/home/gulu/Downloads/uwb/0709b.txt"
+  replay_start_offset_s: 0.0
   replay_match_threshold_s: 0.05
   mode: "external_anchors"
-  anchor_frame_align_en: false
+  anchor_frame_align_en: true  #开启坐标估计
   min_anchors_for_update: 2
   prefer_anchors: 2
   two_anchor_update_mode: "baseline_1d_direct"
@@ -147,10 +147,10 @@ uwb:
   anchors:
     - id: 0
       flag: 1
-      position: [44.2, 5.8, 0.285]
+      position: [0.0,0.0,0.0]
     - id: 1
       flag: 1
-      position: [-0.52, -0.64, 0.2]
+      position: [69.5, 0.0, 0.0]
   tag_offset_body: [0.0, 0.0, 0.0]
 
 lio:
