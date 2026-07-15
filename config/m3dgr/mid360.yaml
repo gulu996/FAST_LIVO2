@@ -3,7 +3,7 @@ common:
   lid_topic: "/livox/mid360/lidar"
   imu_topic: "/livox/mid360/imu"
   img_en: 1
-  lidar_en: 1
+  lidar_en: 0
   ros_driver_bug_fix: false
   sub_lidar_queue_size: 1000
   sub_imu_queue_size: 10000
@@ -109,8 +109,8 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 uwb:
-  enable: true
-  update_en: true
+  enable: false
+  update_en: false
   source: "file"
   replay_file: "/home/gulu/Downloads/uwb/m3/uwb_synthetic_from_scans_pos39_start203_accurate_time_2or3anchors.txt"
   replay_start_offset_s: 0.0
@@ -175,11 +175,97 @@ uav:
   gravity_align_en: true
 
 gps:
-  enable: false
-  use_gps_position: false
-  use_gps_imu: false
-  gps_imu_auxiliary_only: true
-  primary_imu: "lidar_imu" # LiDAR/雷达IMU是FAST-LIVO2高频传播主IMU；GPS IMU未完成外参、时间同步、噪声和bias模型前仅作辅助检查。
+  # Set true only after confirming the real GNSS serial device and protocol below.
+  enable: true
+  update_en: false
+
+  source: "serial"
+  # TODO(confirm): actual GNSS serial port on the target computer.
+  serial_port: "/dev/ttyUSB0"
+  # TODO(confirm): actual baudrate. 921600 is only the current candidate.
+  baudrate: 921600
+  dtr: true
+  rts: false
+
+  parser_mode: "auto"
+  primary_position_message: "KSXT"
+  fallback_position_message: "GGA"
+  time_offset_s: 0.0
+  # TODO(confirm): actual GNSS output rate; tune match_threshold_s/stale_timeout_s after measuring it.
+  match_threshold_s: 0.10
+  stale_timeout_s: 0.50
+
+  startup_convergence_s: 30.0
+  fixed_confirm_count: 10
+  reacquire_confirm_count: 5
+
+  # TODO(confirm): quality/state values are message-specific; do not mix KSXT Float=2 with GGA/AGRICA Float=5.
+  ksxt:
+    invalid_quality_values: [0]
+    single_quality_values: [1]
+    float_quality_values: [2]
+    fixed_quality_values: [4]
+
+  gga:
+    invalid_quality_values: [0]
+    single_quality_values: [1]
+    differential_quality_values: [2]
+    fixed_quality_values: [4]
+    float_quality_values: [5]
+
+  agrica:
+    invalid_position_types: [0]
+    single_position_types: [1]
+    differential_position_types: [2]
+    fixed_position_types: [4]
+    float_position_types: [5]
+    manual_fixed_position_types: [7]
+    crc_check_en: false
+
+  fixed_only: true
+
+  origin_mode: "first_fixed"
+  origin_latitude_deg: 0.0
+  origin_longitude_deg: 0.0
+  origin_altitude_m: 0.0
+
+  # TODO(confirm): whether alt is ellipsoid height or orthometric height.
+  altitude_type: "ellipsoid"
+  geoid_separation_m: 0.0
+
+  frame_align_en: true
+  frame_align_mode: "trajectory_2d"
+  frame_align_min_samples: 20
+  frame_align_min_motion_m: 10.0
+  frame_align_max_rms_m: 0.50
+  frame_align_max_error_m: 1.50
+  frame_align_freeze_after_success: true
+
+  frame_align_yaw_deg: 0.0
+  frame_align_translation: [0.0, 0.0, 0.0]
+
+  update_xy_only: true
+  update_z: false
+  update_orientation: false
+
+  sigma_xy_fixed_m: 0.10
+  sigma_z_fixed_m: 0.30
+  position_cov_floor_m: 0.20
+
+  chi2_gate_2d: 9.21
+  max_residual_m: 3.0
+  max_update_step_m: 0.20
+
+  # TODO(confirm): GNSS antenna lever arm in FAST-LIVO body frame, meters.
+  lever_arm_body_to_gnss: [0.0, 0.0, 0.0]
+
+  pause_map_update_frames: 3
+  pause_map_update_min_correction_m: 0.05
+
+  raw_log_filename: "gnss_raw.txt"
+  parsed_log_filename: "gnss_parsed.txt"
+  update_log_filename: "gnss_updates.txt"
+  log_flush_stride: 1
 
 publish:
   dense_map_en: true

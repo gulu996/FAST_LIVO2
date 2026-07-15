@@ -129,29 +129,37 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 uwb:
-  enable: false
-  update_en: false
-  source: "file"
-  replay_file: "/home/gulu/Downloads/uwb/0709b.txt"
-  replay_start_offset_s: 0.0
-  replay_match_threshold_s: 0.05
-  mode: "external_anchors"
-  anchor_frame_align_en: true  #开启坐标估计
-  min_anchors_for_update: 2
-  prefer_anchors: 2
-  two_anchor_update_mode: "baseline_1d_direct"
-  single_anchor_corridor_1d_en: true
-  single_anchor_only_when_total_anchors_eq_2: true
-  entry_anchor_id: 1
-  exit_anchor_id: 0
+  enable: false # UWB总开关；true才启动串口/文件读取。
+  update_en: false # UWB融合开关；true会用测距修正FAST-LIVO状态，调参/看日志时可先关。
+  source: "file" # file/replay走replay_file；实机串口改成serial并配置serial_port、baudrate。
+  serial_port: "/dev/ttyUSB0" # UWB串口设备名；source=file时不使用。
+  baudrate: 115200 # UWB串口波特率；source=file时不使用。
+  replay_file: "/home/gulu/Downloads/uwb/0709b.txt" # 离线UWB测距文件。
+  replay_start_offset_s: 0.0 # 回放时间整体平移；正数=延后，负数=跳过前段。
+  replay_match_threshold_s: 0.05 # 回放量测与LiDAR帧的最大匹配时间差。
+  mode: "external_anchors" # external_anchors=使用anchors坐标；entry_exit_distance=只用出入口基线距离。
+  anchor_frame_align_en: true # anchors不在FAST-LIVO世界系时打开，系统会估计UWB锚点坐标系到LIVO系的对齐。
+  min_anchors_for_update: 2 # 每次融合至少需要的有效锚点数；2锚只能约束基线方向，3+锚更稳。
+  prefer_anchors: 2 # 每次优先选用的锚点数；两锚场景填2，多锚场景可调到3或4。
+  range_noise_m: 0.10 # UWB单次测距标准差；测距抖动大就调大，系统会更少相信UWB。
+  position_cov_floor_m: 0.30 # UWB位置协方差下限；调大等于降低UWB更新权重。
+  max_residual_m: 6.0 # 单个测距残差硬门限，超过直接拒绝。
+  max_residual_rms: 0.50 # 多锚残差RMS门限；误差大但仍想跟随时可放宽。
+  max_update_step_xy: 0.05 # 单帧XY最大修正量；调大响应快但更容易跳。
+  max_time_diff_s: 0.05 # 实时量测与当前LiDAR帧的最大时间差。
+  two_anchor_update_mode: "baseline_1d_direct" # 两锚退化场景沿基线做一维直接修正。
+  single_anchor_corridor_1d_en: true # 只剩单锚时尝试沿走廊/基线做一维约束。
+  single_anchor_only_when_total_anchors_eq_2: true # 仅总锚点数为2时启用单锚退化逻辑。
+  entry_anchor_id: 1 # 基线起点锚点ID；两锚/单锚退化逻辑使用。
+  exit_anchor_id: 0 # 基线终点锚点ID；两锚/单锚退化逻辑使用。
   anchors:
     - id: 0
-      flag: 1
-      position: [0.0,0.0,0.0]
+      flag: 1 # 1=启用该锚点，0=忽略。
+      position: [0.0, 0.0, 0.0] # 锚点坐标；anchor_frame_align_en=true时可填UWB局部坐标。
     - id: 1
       flag: 1
       position: [69.5, 0.0, 0.0]
-  tag_offset_body: [0.0, 0.0, 0.0]
+  tag_offset_body: [0.0, 0.0, 0.0] # UWB标签相对FAST-LIVO body原点的杆臂，按body坐标轴填写，单位米。
 
 lio:
   max_iterations: 3
@@ -193,11 +201,91 @@ uav:
   gravity_align_en: true
 
 gps:
-  enable: false
-  use_gps_position: false
-  use_gps_imu: false
-  gps_imu_auxiliary_only: true
-  primary_imu: "lidar_imu" # LiDAR/雷达IMU是FAST-LIVO2高频传播主IMU；GPS IMU未完成外参、时间同步、噪声和bias模型前仅作辅助检查。
+  enable: true # GNSS总开关；true才启动GNSS串口读取。
+  update_en: false # GNSS位置融合开关；实机确认串口、时间、坐标对齐和杆臂后再打开。
+
+  source: "serial" # 当前实现走serial。
+  serial_port: "/dev/ttyUSB0" # GNSS串口设备名，按目标电脑实际枚举修改。
+  baudrate: 921600 # GNSS输出波特率，必须和设备配置一致。
+  dtr: true # 部分USB串口需要拉高DTR才输出数据。
+  rts: false # 部分USB串口硬件流控相关；无要求时保持false。
+
+  parser_mode: "auto" # 自动解析KSXT、NMEA、AGRICA；legacy_imugnss_json仅兼容旧设备。
+  primary_position_message: "KSXT" # KSXT有效时作为唯一主位置源。
+  fallback_position_message: "GGA" # KSXT无可用位置时才允许GGA后备。
+  time_offset_s: 0.0 # GNSS时间戳加到FAST-LIVO时间轴的偏移；GNSS滞后时通常需要调。
+  # TODO(confirm): 实测GNSS输出频率后，再调match_threshold_s和stale_timeout_s。
+  match_threshold_s: 0.10 # GNSS量测与LiDAR帧允许的最大时间差。
+  stale_timeout_s: 0.50 # 超过该时间无新GNSS数据就认为数据过期。
+
+  startup_convergence_s: 30.0 # 启动后等待GNSS收敛的最短时间。
+  fixed_confirm_count: 10 # 连续固定解次数达到后才进入可用状态。
+  reacquire_confirm_count: 5 # 失锁后重新确认固定解的连续次数。
+
+  ksxt: # KSXT position_quality：0 invalid, 1 single, 2 RTK float, 4 RTK fixed。
+    invalid_quality_values: [0]
+    single_quality_values: [1]
+    float_quality_values: [2]
+    fixed_quality_values: [4]
+
+  gga: # GGA quality：0 invalid, 1 single, 2 differential, 4 fixed, 5 float。
+    invalid_quality_values: [0]
+    single_quality_values: [1]
+    differential_quality_values: [2]
+    fixed_quality_values: [4]
+    float_quality_values: [5]
+
+  agrica: # AGRICA position_type：0 invalid, 1 single, 2 differential, 4 fixed, 5 float, 7 manual fixed。
+    invalid_position_types: [0]
+    single_position_types: [1]
+    differential_position_types: [2]
+    fixed_position_types: [4]
+    float_position_types: [5]
+    manual_fixed_position_types: [7]
+    crc_check_en: false # 当前只记录AGRICA；CRC算法确认前不把它当NMEA两位XOR。
+
+  fixed_only: true # true=只接受固定解；测试浮点解时才改false。
+
+  origin_mode: "first_fixed" # first_fixed=第一帧固定解作ENU原点；manual=使用下面手填原点。
+  origin_latitude_deg: 0.0 # manual模式下的原点纬度。
+  origin_longitude_deg: 0.0 # manual模式下的原点经度。
+  origin_altitude_m: 0.0 # manual模式下的原点高程。
+
+  altitude_type: "ellipsoid" # ellipsoid=椭球高；orthometric=正常高，会加geoid_separation_m转椭球高。
+  geoid_separation_m: 0.0 # 正常高到椭球高的改正量，仅altitude_type=orthometric时使用。
+
+  frame_align_en: true # 自动估计GNSS ENU到FAST-LIVO世界系的2D yaw和平移。
+  frame_align_mode: "trajectory_2d" # trajectory_2d=用运动轨迹自动对齐；manual=使用下面yaw/translation。
+  frame_align_min_samples: 20 # 自动对齐至少需要的GNSS样本数。
+  frame_align_min_motion_m: 10.0 # 自动对齐前轨迹至少要移动的距离。
+  frame_align_max_rms_m: 0.50 # 自动对齐成功的RMS残差上限。
+  frame_align_max_error_m: 1.50 # 自动对齐成功的最大单点误差上限。
+  frame_align_freeze_after_success: true # 成功对齐后冻结外参，避免运行中漂移。
+
+  frame_align_yaw_deg: 0.0 # manual模式下ENU到FAST-LIVO世界系的yaw角。
+  frame_align_translation: [0.0, 0.0, 0.0] # manual模式下ENU到FAST-LIVO世界系的平移。
+
+  update_xy_only: true # 默认只用GNSS约束水平位置。
+  update_z: false # true会融合高度；高度源可靠且高程类型确认后再打开。
+  update_orientation: false # 当前主流程不使用GNSS姿态更新，保持false。
+
+  sigma_xy_fixed_m: 0.10 # 固定解水平标准差；越小越相信GNSS。
+  sigma_z_fixed_m: 0.30 # 固定解高程标准差；仅update_z=true时明显影响。
+  position_cov_floor_m: 0.20 # GNSS位置协方差下限，防止权重过大。
+
+  chi2_gate_2d: 9.21 # 2D卡方门限；9.21约等于99%置信门。
+  max_residual_m: 3.0 # GNSS残差硬门限，超过直接拒绝。
+  max_update_step_m: 0.20 # 单次GNSS融合允许的最大位置修正。
+
+  lever_arm_body_to_gnss: [0.0, 0.0, 0.0] # GNSS天线相位中心相对FAST-LIVO body原点的杆臂，单位米。
+
+  pause_map_update_frames: 3 # GNSS大修正后暂停插入局部地图的帧数，减少错误地图写入。
+  pause_map_update_min_correction_m: 0.05 # 修正量超过该值才触发暂停建图。
+
+  raw_log_filename: "gnss_raw.txt" # 原始串口行日志，写到pcd_save/save_path。
+  parsed_log_filename: "gnss_parsed.txt" # 解析后的GNSS量测日志。
+  update_log_filename: "gnss_updates.txt" # 融合/拒绝结果日志。
+  log_flush_stride: 1 # 每多少条日志flush一次；调大可减少IO但断电时更易丢尾部日志。
 
 publish:
   dense_map_en: true

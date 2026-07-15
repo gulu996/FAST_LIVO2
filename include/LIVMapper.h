@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define LIV_MAPPER_H
 
 #include "IMU_Processing.h"
+#include "gnss_manager.h"
 #include "vio.h"
 #include "preprocess.h"
 #include "uwb_manager.h"
@@ -38,6 +39,7 @@ public:
   void handleVIO();
   void handleLIO();
   void applyUwbUpdate(const char *stage);
+  void applyGnssUpdate(const char *stage);
   void handleUwbRelocalizationConfirmed(UwbUpdateResult &result, const char *stage);
   void advanceUwbOutputCorrection();
   V3D outputPosition() const;
@@ -103,9 +105,9 @@ public:
   bool uwb_output_smooth_en_ = true;
   double uwb_output_smooth_alpha_ = 0.15;
   double uwb_output_smooth_max_step_m_ = 0.05;
-  int uwb_pause_map_update_frames_ = 0;
-  int uwb_pause_map_update_frames_after_correction_ = 3;
-  double uwb_pause_map_update_min_correction_m_ = 0.05;
+  int external_update_pause_map_frames_ = 0;
+  int external_update_pause_map_frames_after_correction_ = 3;
+  double external_update_pause_map_min_correction_m_ = 0.05;
   V3D uwb_output_pos_offset_ = V3D::Zero();
   V3D uwb_output_target_offset_ = V3D::Zero();
   bool pos_output_enable_timestamp_ = true;
@@ -254,6 +256,7 @@ public:
   VoxelMapManagerPtr voxelmap_manager;
   VIOManagerPtr vio_manager;
   UwbManagerPtr uwb_manager;
+  GnssManagerPtr gnss_manager;
 
   ros::Publisher plane_pub;
   ros::Publisher voxel_pub;

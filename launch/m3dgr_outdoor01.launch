@@ -2,8 +2,8 @@
   <arg name="cmd_name" default="" />
   <arg name="rviz" default="true" />
   <arg name="play_bag" default="true" />
-  <arg name="bag" default="/media/gulu/一只沙糖桔/数据集/数据集/Elevator01.bag" />
-  <arg name="bag_start" default="203.0" />
+  <arg name="bag" default="/media/gulu/一只沙糖桔/Outdoor01/Outdoor01.bag" />
+  <arg name="bag_start" default="0.0" />
   <arg name="bag_rate" default="3.0" />
   <arg name="bag_delay" default="2.0" />
   <arg name="bag_queue" default="10000" />
@@ -14,7 +14,7 @@
   <rosparam command="load" file="$(find fast_livo)/config/m3dgr/mid360.yaml" />
   <param name="/bag_start_offset" value="$(arg bag_start)" />
 
-  <node if="$(arg play_bag)" pkg="rosbag" type="play" name="elevator01_bag" output="screen"
+  <node if="$(arg play_bag)" pkg="rosbag" type="play" name="outdoor01_bag" output="screen"
         args="--clock --wait-for-subscribers --delay=$(arg bag_delay) --queue=$(arg bag_queue) -r $(arg bag_rate) -s $(arg bag_start) $(arg bag) --topics /camera/color/image_raw/compressed /livox/mid360/lidar /livox/mid360/imu" />
 
   <node pkg="image_transport" type="republish" name="republish_color_compressed_to_raw"

@@ -127,14 +127,17 @@ add_library(lio src/voxel_map.cpp)
 add_library(pre src/preprocess.cpp)
 add_library(imu_proc src/IMU_Processing.cpp)
 add_library(uwb src/uwb_manager.cpp)
+add_library(gnss src/gnss_manager.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 
 # Add the main executable
 add_executable(fastlivo_mapping src/main.cpp)
+add_executable(gnss_manager_self_test src/gnss_manager_self_test.cpp)
 
 # Link libraries to the executable
 target_link_libraries(fastlivo_mapping
   laser_mapping
+  gnss
   uwb
   vio
   lio
@@ -146,6 +149,20 @@ target_link_libraries(fastlivo_mapping
   ${Sophus_LIBRARIES}
   ${Boost_LIBRARIES}
 )
+
+target_link_libraries(gnss_manager_self_test
+  gnss
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
+
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(gnss ${OpenMP_CXX_FLAGS})
+  target_link_libraries(gnss_manager_self_test ${OpenMP_CXX_FLAGS})
+endif()
 
 # Link mimalloc if found
 if(mimalloc_FOUND)
