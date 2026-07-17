@@ -111,6 +111,15 @@ imu:
 uwb:
   enable: false
   update_en: false
+  summary_log_en: true
+  debug_log_en: true
+  range_debug_log_en: true
+  summary_to_console: true
+  debug_to_console: false
+  summary_to_file: true
+  debug_to_file: true
+  statistics_log_interval: 20
+  update_epsilon: 1.0e-8
   source: "file"
   replay_file: "/home/gulu/Downloads/uwb/m3/uwb_synthetic_from_scans_pos39_start203_accurate_time_2or3anchors.txt"
   replay_start_offset_s: 0.0
@@ -134,6 +143,8 @@ uwb:
       flag: 1
       position: [0.161242, 42.1851, 0.0]
   tag_offset_body: [0.0, 0.0, 0.0]
+  tag_offset_convergence_step_m: 1.0e-4
+  tag_offset_convergence_count: 20
 
 lio:
   max_iterations: 3

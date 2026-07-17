@@ -8,6 +8,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 #include "common_lib.h"
 
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -17,20 +18,152 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 #include <thread>
 #include <vector>
 
+enum class UwbUpdateStatus
+{
+  UPDATED,
+  NOT_UPDATED,
+  WAITING_INITIALIZATION,
+  DEBUG_ONLY
+};
+
+enum class UwbUpdateOutcome
+{
+  ACCEPTED,
+  REJECTED,
+  SKIPPED,
+  WAITING
+};
+
+enum class UwbRejectReason
+{
+  NONE,
+  UPDATE_DISABLED,
+  DEBUG_ONLY,
+  BASELINE_NOT_INITIALIZED,
+  ANCHORS_NOT_READY,
+  NOT_ENOUGH_VALID_ANCHORS,
+  INVALID_RANGE_STATUS,
+  INVALID_RAW_RANGE,
+  INVALID_CORRECTED_RANGE,
+  UNKNOWN_ANCHOR,
+  TIMESTAMP_INVALID,
+  PAIR_TIME_MISMATCH,
+  RANGE_LIMIT,
+  RANGE_RESIDUAL_GATE,
+  RANGE_JUMP,
+  RESIDUAL_JUMP,
+  NIS_GATE,
+  LOW_GEOMETRY,
+  TWO_ANCHOR_RESIDUAL_GATE,
+  BASELINE_CONSISTENCY_GATE,
+  SINGLE_ANCHOR_NOT_CONFIRMED,
+  NEAR_ANCHOR_DISABLED,
+  CORRIDOR_DIRECTION_GATE,
+  CORRECTION_TOO_SMALL,
+  CORRECTION_CLAMPED,
+  COVARIANCE_INVALID,
+  NON_FINITE_CORRECTION
+};
+
 struct UwbRangeMeasurement
 {
   int anchor_id = -1;
+  double raw_range_m = 0.0;
+  double range_bias_m = 0.0;
+  // ponytail: range_m remains the canonical downstream value to keep every existing consumer on one path.
   double range_m = 0.0;
+  bool range_valid = false;
+  UwbRejectReason range_reject_reason = UwbRejectReason::INVALID_RANGE_STATUS;
+  int64_t diag = -1;
+  uint64_t measurement_uid = 0;
+  size_t source_line = 0;
+  std::string source_format = "unknown";
   double stamp = 0.0;
   double time_diff_s = 0.0;
   std::string raw_line;
 };
+
+struct UwbRangeDebugInfo
+{
+  int anchor_id = -1;
+  double raw_range_m = 0.0;
+  double range_bias_m = 0.0;
+  double corrected_range_m = 0.0;
+  double predicted_range_m = 0.0;
+  double residual_m = 0.0;
+  double time_diff_s = 0.0;
+  int64_t diag = -1;
+  uint64_t measurement_uid = 0;
+  size_t source_line = 0;
+  std::string source_format = "unknown";
+  V3D anchor_position_w = V3D::Zero();
+  V3D tag_position_w = V3D::Zero();
+  bool accepted = false;
+  UwbRejectReason reject_reason = UwbRejectReason::NONE;
+};
+
+struct UwbUpdateReport
+{
+  uint64_t attempt_id = 0;
+  double slam_stamp = 0.0;
+  UwbUpdateStatus status = UwbUpdateStatus::NOT_UPDATED;
+  UwbUpdateOutcome outcome = UwbUpdateOutcome::SKIPPED;
+  UwbRejectReason primary_reason = UwbRejectReason::NONE;
+  std::string action = "none";
+  std::string mode = "unknown";
+  std::vector<int> received_anchor_ids;
+  std::vector<int> used_anchor_ids;
+  std::vector<int> rejected_anchor_ids;
+  V3D system_position_before = V3D::Zero();
+  V3D system_position_after = V3D::Zero();
+  V3D raw_position_correction = V3D::Zero();
+  V3D applied_position_correction = V3D::Zero();
+  double correction_norm = 0.0;
+  double residual_rms = 0.0;
+  double max_abs_residual = 0.0;
+  double current_motion_m = 0.0;
+  double required_motion_m = 0.0;
+  int required_anchor_count = 0;
+  int valid_anchor_count = 0;
+  bool state_updated = false;
+  bool covariance_updated = false;
+  bool correction_clamped = false;
+  MD(DIM_STATE, DIM_STATE) covariance_before = MD(DIM_STATE, DIM_STATE)::Zero();
+  std::vector<UwbRangeDebugInfo> range_debug;
+  std::vector<std::string> deferred_debug_lines;
+  std::vector<std::string> deferred_result_lines;
+};
+
+const char *uwbUpdateStatusName(UwbUpdateStatus status);
+const char *uwbUpdateOutcomeName(UwbUpdateOutcome outcome);
+const char *uwbRejectReasonName(UwbRejectReason reason);
+std::string formatUwbResultLine(const UwbUpdateReport &report);
+Eigen::MatrixXd applyUwbUpdateMaskAndProjection(const Eigen::MatrixXd &gain,
+                                                bool allow_z,
+                                                bool allow_orientation,
+                                                const V3D *position_projection_direction = nullptr);
+bool computeUwbJosephCovariance(const Eigen::MatrixXd &prior_covariance,
+                                const Eigen::MatrixXd &measurement_jacobian,
+                                const Eigen::MatrixXd &measurement_covariance,
+                                const Eigen::MatrixXd &used_gain,
+                                Eigen::MatrixXd &updated_covariance,
+                                double &max_asymmetry,
+                                double &min_diagonal);
+bool correctUwbRangeValue(double raw_range_m, double range_bias_m,
+                          double &corrected_range_m, UwbRejectReason &reject_reason);
+double selectUwbPositionCovFloor(double normal_floor_m, double degraded_floor_m,
+                                 bool degraded_only, bool is_degraded);
+bool isUwbReplayCrossFormatDuplicate(const UwbRangeMeasurement &debug_measurement,
+                                     const UwbRangeMeasurement &distance_measurement,
+                                     double max_time_difference_s);
 
 struct UwbAnchor
 {
   int id = -1;
   bool enabled = false;
   bool estimated = false;
+  std::string role;
+  double range_bias_m = 0.0;
   V3D position_w = V3D::Zero();
 };
 
@@ -67,6 +200,7 @@ struct UwbAnchorFrameAlignSample
 
 struct UwbUpdateResult
 {
+  uint64_t attempt_id = 0;
   int used_count = 0;
   std::string action = "none";
   double residual_rms = 0.0;
@@ -86,6 +220,8 @@ struct UwbUpdateResult
   int limited_update_consecutive_good_count = 0;
   int relocalization_candidate_count = 0;
   bool state_updated = false;
+  bool covariance_updated = false;
+  bool correction_clamped = false;
   bool request_pause_map_insert = false;
   bool request_relocalization = false;
   bool relocalization_confirmed = false;
@@ -131,9 +267,19 @@ private:
   void logEvent(double stamp, const std::string &level, const std::string &message);
   void logEventThrottled(double stamp, const std::string &key, double period_s,
                          const std::string &level, const std::string &message);
-  void logUpdate(double stamp, int used_count, double residual_norm, const V3D &rot_add,
-                 const V3D &trans_add, const V3D &tag_offset_add);
-  UwbUpdateResult applyLatestMeasurements(StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
+  UwbUpdateResult applyLatestMeasurements(StatesGroup &state,
+                                          const std::vector<UwbRangeMeasurement> &measurements,
+                                          UwbUpdateReport &report);
+  void finalizeUwbUpdateAttempt(UwbUpdateReport &report, const StatesGroup &state,
+                                UwbUpdateResult &result);
+  void logAnchorConfiguration();
+  void logFinalAnchorLayout(const std::string &source, const std::string &frame_name,
+                            UwbUpdateReport *report = nullptr);
+  void logFinalTagOffset(const std::string &source, UwbUpdateReport *report = nullptr);
+  void emitUwbLine(double stamp, const std::string &level, const std::string &line,
+                   bool console, bool file);
+  bool correctUwbRange(int anchor_id, double raw_range_m, double &corrected_range_m,
+                       double &range_bias_m, UwbRejectReason &reject_reason) const;
   double effectivePositionCovFloor() const;
   bool solveUwbOnlyPosition2D(const std::vector<UwbRangeMeasurement> &measurements,
                               double z_world, const V3D &initial_position,
@@ -142,11 +288,15 @@ private:
   V3D updateFilteredUwbOnlyPosition(const V3D &position, double stamp,
                                     double &position_jump, double &speed);
   bool tryAlignAnchorFrame(const StatesGroup &state,
-                           const std::vector<UwbRangeMeasurement> &measurements);
+                           const std::vector<UwbRangeMeasurement> &measurements,
+                           UwbUpdateReport *report);
   bool tryInitializeBaselineAnchors(const StatesGroup &state,
-                                    const std::vector<UwbRangeMeasurement> &measurements);
+                                    const std::vector<UwbRangeMeasurement> &measurements,
+                                    UwbUpdateReport *report);
   double configuredBaselineDistance() const;
-  void collectAnchorEstimateSamples(const StatesGroup &state, const std::vector<UwbRangeMeasurement> &measurements);
+  void collectAnchorEstimateSamples(const StatesGroup &state,
+                                    const std::vector<UwbRangeMeasurement> &measurements,
+                                    UwbUpdateReport *report);
   bool estimateAnchorPosition(int anchor_id, UwbAnchor &anchor, double &rmse, int &rank,
                               std::string *failure_reason = nullptr) const;
   void applyAnchorDistanceConstraints();
@@ -172,6 +322,15 @@ private:
   std::string log_filename_ = "uwb_ranges.txt";
   std::string update_log_filename_ = "uwb_updates.txt";
   int log_flush_stride_ = 1;
+  bool summary_log_en_ = true;
+  bool debug_log_en_ = true;
+  bool range_debug_log_en_ = true;
+  bool summary_to_console_ = true;
+  bool debug_to_console_ = false;
+  bool summary_to_file_ = true;
+  bool debug_to_file_ = true;
+  int statistics_log_interval_ = 20;
+  double update_epsilon_ = 1e-8;
   std::string replay_file_;
   double replay_start_offset_s_ = 0.0;
   double replay_match_threshold_s_ = 0.05;
@@ -287,8 +446,8 @@ private:
   double large_correction_reject_threshold_ = 3.0;
   std::string anchor_file_;
   double position_cov_floor_m_ = 0.0;
-  double position_cov_floor_degraded_m_ = 3.0;
-  bool position_cov_floor_degraded_only_ = false;
+  double position_cov_floor_degraded_m_ = 0.0;
+  bool position_cov_floor_degraded_only_ = true;
   bool degraded_mode_ = false;
   double max_residual_m_ = 6.0;
   bool stale_repeat_filter_en_ = true;
@@ -306,6 +465,11 @@ private:
   double tag_offset_max_norm_m_ = 1.0;
   V3D tag_offset_est_body_ = V3D::Zero();
   M3D tag_offset_cov_ = M3D::Identity() * 0.01;
+  double tag_offset_convergence_step_m_ = 1e-4;
+  int tag_offset_convergence_count_ = 20;
+  int tag_offset_convergence_counter_ = 0;
+  bool tag_offset_estimation_ready_ = false;
+  uint64_t tag_offset_estimate_version_ = 0;
   bool anchor_position_estimate_en_ = false;
   bool anchor_estimate_use_for_update_ = true;
   bool anchor_estimate_freeze_after_init_ = true;
@@ -327,6 +491,9 @@ private:
   V3D baseline_start_tag_position_w_ = V3D::Zero();
   double baseline_start_range_m_ = 0.0;
   bool two_anchor_baseline_mode_ = false;
+  uint64_t anchor_layout_version_ = 0;
+  bool final_anchor_layout_logged_ = false;
+  std::string final_anchor_layout_signature_;
   bool anchor_frame_align_en_ = false;
   int anchor_frame_align_start_id_ = 0;
   int anchor_frame_align_end_id_ = 1;
@@ -363,6 +530,13 @@ private:
   std::ofstream update_log_file_;
   int raw_log_pending_lines_ = 0;
   std::map<std::string, double> event_log_last_stamp_;
+  uint64_t uwb_update_attempt_id_ = 0;
+  uint64_t uwb_attempt_count_ = 0;
+  uint64_t uwb_update_count_ = 0;
+  uint64_t uwb_reject_count_ = 0;
+  uint64_t uwb_skip_count_ = 0;
+  double uwb_correction_sum_m_ = 0.0;
+  double uwb_correction_max_m_ = 0.0;
 
   std::map<int, UwbAnchor> anchors_;
   std::map<int, UwbAnchor> configured_anchors_;
@@ -376,6 +550,8 @@ private:
   double replay_last_slam_relative_time_ = -1.0;
   double replay_file_start_stamp_ = 0.0;
   bool replay_file_start_stamp_ready_ = false;
+  uint64_t replay_consumed_measurement_count_ = 0;
+  uint64_t replay_stale_measurement_count_ = 0;
   std::deque<UwbOnlyPositionSample> uwb_only_position_history_;
 };
 

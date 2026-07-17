@@ -130,36 +130,53 @@ imu:
 
 uwb:
   enable: false # UWB总开关；true才启动串口/文件读取。
-  update_en: false # UWB融合开关；true会用测距修正FAST-LIVO状态，调参/看日志时可先关。
+  update_en: true # UWB融合开关；true会用测距修正FAST-LIVO状态，调参/看日志时可先关。
+  summary_log_en: true # 每次处理先输出一条UWB_RESULT结论。
+  debug_log_en: true # 保留门限、更新量和协方差等分类调试日志。
+  range_debug_log_en: true # 输出每个基站的UWB_RANGE明细。
+  summary_to_console: true # 终端默认只看简洁结论。
+  debug_to_console: false # 详细日志默认不刷终端。
+  summary_to_file: true # UWB_RESULT写入uwb_updates.txt。
+  debug_to_file: true # 即使终端关闭详细日志，文件仍完整保存。
+  statistics_log_interval: 20 # 每20次处理输出一次累计统计。
+  update_epsilon: 1.0e-8 # 实际位置修正超过该值才算UPDATED。
   source: "file" # file/replay走replay_file；实机串口改成serial并配置serial_port、baudrate。
   serial_port: "/dev/ttyUSB0" # UWB串口设备名；source=file时不使用。
   baudrate: 115200 # UWB串口波特率；source=file时不使用。
-  replay_file: "/home/gulu/Downloads/uwb/0709b.txt" # 离线UWB测距文件。
-  replay_start_offset_s: 0.0 # 回放时间整体平移；正数=延后，负数=跳过前段。
+  replay_file: "/home/gulu/Downloads/uwb/0709.txt" # 离线UWB测距文件。
+  replay_start_offset_s: 1.14 # 回放时间整体平移；正数=延后，负数=跳过前段。
   replay_match_threshold_s: 0.05 # 回放量测与LiDAR帧的最大匹配时间差。
   mode: "external_anchors" # external_anchors=使用anchors坐标；entry_exit_distance=只用出入口基线距离。
   anchor_frame_align_en: true # anchors不在FAST-LIVO世界系时打开，系统会估计UWB锚点坐标系到LIVO系的对齐。
   min_anchors_for_update: 2 # 每次融合至少需要的有效锚点数；2锚只能约束基线方向，3+锚更稳。
   prefer_anchors: 2 # 每次优先选用的锚点数；两锚场景填2，多锚场景可调到3或4。
   range_noise_m: 0.10 # UWB单次测距标准差；测距抖动大就调大，系统会更少相信UWB。
-  position_cov_floor_m: 0.30 # UWB位置协方差下限；调大等于降低UWB更新权重。
+  position_cov_floor_m: 0.0 # 正常模式UWB位置协方差下限；0表示不人为放大。
+  position_cov_floor_degraded_m: 0.0 # 明确退化模式下的位置协方差下限；当前诊断阶段保持0。
+  position_cov_floor_degraded_only: true # 退化下限只允许在degradation_level非normal时使用。
   max_residual_m: 6.0 # 单个测距残差硬门限，超过直接拒绝。
   max_residual_rms: 0.50 # 多锚残差RMS门限；误差大但仍想跟随时可放宽。
   max_update_step_xy: 0.05 # 单帧XY最大修正量；调大响应快但更容易跳。
   max_time_diff_s: 0.05 # 实时量测与当前LiDAR帧的最大时间差。
   two_anchor_update_mode: "baseline_1d_direct" # 两锚退化场景沿基线做一维直接修正。
-  single_anchor_corridor_1d_en: true # 只剩单锚时尝试沿走廊/基线做一维约束。
+  single_anchor_corridor_1d_en: false # 只剩单锚时尝试沿走廊/基线做一维约束。
   single_anchor_only_when_total_anchors_eq_2: true # 仅总锚点数为2时启用单锚退化逻辑。
   entry_anchor_id: 1 # 基线起点锚点ID；两锚/单锚退化逻辑使用。
   exit_anchor_id: 0 # 基线终点锚点ID；两锚/单锚退化逻辑使用。
   anchors:
-    - id: 0
+    - id: 1
+      role: entry
       flag: 1 # 1=启用该锚点，0=忽略。
       position: [0.0, 0.0, 0.0] # 锚点坐标；anchor_frame_align_en=true时可填UWB局部坐标。
-    - id: 1
+      range_bias_m: 0.81 # 移动标签—入口基站固定设备对的测距正偏差，校正公式为raw-bias。
+    - id: 0
+      role: exit
       flag: 1
-      position: [69.5, 0.0, 0.0]
-  tag_offset_body: [0.0, 0.0, 0.0] # UWB标签相对FAST-LIVO body原点的杆臂，按body坐标轴填写，单位米。
+      position: [68.35, 0.0, 0.0]
+      range_bias_m: 0.33 # 移动标签—出口基站固定设备对的测距正偏差，待独立标定后填写。
+  tag_offset_body: [-0.12, 0.0, 0.12] # UWB标签相对FAST-LIVO body原点的杆臂，按body坐标轴填写，单位米。
+  tag_offset_convergence_step_m: 1.0e-4 # 在线杆臂单步变化低于该值视为稳定样本。
+  tag_offset_convergence_count: 20 # 连续稳定样本达到该数后输出最终杆臂。
 
 lio:
   max_iterations: 3
@@ -178,7 +195,7 @@ lio:
 
 local_map:  
   map_sliding_en: true
-  half_map_size: 100
+  half_map_size: 10
   sliding_thresh: 4
   long_term_visual_map_en: false # 关闭长期视觉地图，降低长期运行计算开销
   long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
@@ -201,7 +218,7 @@ uav:
   gravity_align_en: true
 
 gps:
-  enable: true # GNSS总开关；true才启动GNSS串口读取。
+  enable: false # GNSS总开关；true才启动GNSS串口读取。
   update_en: false # GNSS位置融合开关；实机确认串口、时间、坐标对齐和杆臂后再打开。
 
   source: "serial" # 当前实现走serial。

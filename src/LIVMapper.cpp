@@ -762,10 +762,10 @@ void LIVMapper::applyUwbUpdate(const char *stage)
     const V3D pos_before = _state.pos_end;
     result = uwb_manager->applyRangeUpdateAt(_state, current_lidar_stamp, lidar_start_stamp);
     if (result.used_count <= 0 && !result.request_relocalization) return;
-    if (!result.state_updated && !result.request_relocalization) return;
+    if (!result.state_updated && !result.covariance_updated && !result.request_relocalization) return;
     output_delta = _state.pos_end - pos_before;
 
-    if (result.state_updated)
+    if (result.state_updated || result.covariance_updated)
     {
       snapStateForDeterminism(_state);
       voxelmap_manager->state_ = _state;
@@ -791,27 +791,20 @@ void LIVMapper::applyUwbUpdate(const char *stage)
     external_update_pause_map_frames_ = std::max(external_update_pause_map_frames_,
                                                  external_update_pause_map_frames_after_correction_);
     ROS_INFO_THROTTLE(1.0,
-                      "[UWB] action=pause_map_insert_after_uwb_correction correction_norm=%.3f xy_correction_applied=%.3f external_pause_map_update_frames=%d",
+                      "[UWB_DEBUG_INJECTION] attempt=%lu action=pause_map_insert correction_norm=%.3f xy_correction_applied=%.3f external_pause_map_update_frames=%d",
+                      static_cast<unsigned long>(result.attempt_id),
                       result.correction_norm, result.xy_correction_applied, external_update_pause_map_frames_);
   }
 
-  ROS_INFO_THROTTLE(1.0,
-                    "[UWB] action=%s used=%d state_updated=%d residual_rms=%.3f raw_xy=%.3f applied_xy=%.3f correction_norm=%.3f external_pause_map_update_frames=%d relocalization_request=%d relocalization_confirmed=%d local_map_reset=%d visual_cache_reset=%d covariance_inflated=%d after %s update.",
-                    result.action.c_str(), result.used_count, static_cast<int>(result.state_updated),
-                    result.residual_rms, result.xy_correction_raw, result.xy_correction_applied,
-                    result.correction_norm, external_update_pause_map_frames_,
-                    static_cast<int>(result.request_relocalization),
-                    static_cast<int>(result.relocalization_confirmed),
-                    static_cast<int>(result.local_map_reset),
-                    static_cast<int>(result.visual_cache_reset),
-                    static_cast<int>(result.covariance_inflated),
-                    stage ? stage : "state");
   if (vio_manager)
   {
     std::vector<std::string> lines;
     std::ostringstream oss;
-    oss << "[ UWB ] action=" << result.action
+    oss << "[UWB_DEBUG_INJECTION] attempt=" << result.attempt_id
+        << " action=" << result.action
         << " used=" << result.used_count
+        << " state_updated=" << static_cast<int>(result.state_updated)
+        << " covariance_updated=" << static_cast<int>(result.covariance_updated)
         << " residual_rms=" << result.residual_rms
         << " max_abs_residual=" << result.max_abs_residual
         << " xy_raw=" << result.xy_correction_raw
@@ -829,7 +822,8 @@ void LIVMapper::applyUwbUpdate(const char *stage)
     if (uwb_output_correction_en_)
     {
       std::ostringstream offset_oss;
-      offset_oss << "[ UWB ] output_delta=" << output_delta.transpose()
+      offset_oss << "[UWB_DEBUG_INJECTION] attempt=" << result.attempt_id
+                 << " output_delta=" << output_delta.transpose()
                  << " output_offset=" << uwb_output_pos_offset_.transpose()
                  << " output_target=" << uwb_output_target_offset_.transpose();
       lines.push_back(offset_oss.str());
