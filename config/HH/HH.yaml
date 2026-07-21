@@ -1,7 +1,7 @@
 common:
-  img_topic: "/camera/color/image_raw"
-  lid_topic: "/livox/mid360/lidar"
-  imu_topic: "/livox/mid360/imu"
+  img_topic: "/left_camera/image"
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
   img_en: 1
   lidar_en: 1
   ros_driver_bug_fix: false
@@ -36,14 +36,13 @@ deterministic_debug:
   image_buffer_sort_en: true
 
 extrin_calib:
-  extrinsic_T: [-0.011, -0.02329, 0.04412]
+  extrinsic_T: [0.04165, 0.02326, -0.0284]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-
-  # M3DGR Outdoor01: mid360 -> D435i color camera.
-  Rcl: [ 0.0722207, -0.9973870, -0.0020542,
-         0.5210050,  0.0394820, -0.8526402,
-         0.8504930,  0.0605080,  0.5224945]
-  Pcl: [-0.0442358, -0.4117120, 0.1685680]
+  # LidarToCamera 
+  Rcl: [ -0.010986, -0.999937,  0.002338,
+        -0.007770, -0.002253, -0.999967,
+        0.999909, -0.011004, -0.007745]
+  Pcl: [ -0.061281,  0.036577, -0.038252]
 
  
 time_offset: 
@@ -52,16 +51,20 @@ time_offset:
   exposure_time_init: 0.0
 
 preprocess:
-  point_filter_num: 2
-  filter_size_surf: 0.25
+  point_filter_num: 1
+  filter_size_surf: 0.1
   lidar_type: 1 # Livox Avia LiDAR
-  scan_line: 4
-  blind: 0.5
+  scan_line: 6
+  blind: 0.8
 
+voxel_safety:
+  # Livox Avia long-range returns are valid up to this dataset-specific safety limit.
+  lidar_max_range_m: 450.0
+  
 vio:
   max_iterations: 5 # 提高视觉EKF迭代次数，优先把可用帧跑起来
   outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
-  visual_map_prune_en: true
+  visual_map_prune_en: false
   visual_map_max_voxels: 1800 # 视觉体素硬上限；到上限后淘汰最早的非当前子图体素
   visual_map_max_points_per_voxel: 10 # 每个视觉体素最多保留点数；满后用新点替换更早的点
   visual_map_max_total_points: 20000 # 视觉点总量硬上限；满后按frame id淘汰最早的点
@@ -93,7 +96,7 @@ vio:
   image_quality_tile_rows: 6 # 更细的分块，更容易发现局部强光坏区
   image_quality_tile_cols: 6
   patch_size: 8
-  patch_pyrimid_level: 3
+  patch_pyrimid_level: 4
   normal_en: true
   raycast_en: false
   inverse_composition_en: false
@@ -103,48 +106,14 @@ vio:
 imu:
   imu_en: true
   imu_int_frame: 30
-  acc_cov: 0.8 # 0.2
-  gyr_cov: 0.5 # 0.5
-  b_acc_cov: 0.001 # 0.1
-  b_gyr_cov: 0.001 # 0.1
+  acc_cov: 0.05
+  gyr_cov: 0.03
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
 
 uwb:
   enable: false
   update_en: false
-  summary_log_en: true
-  debug_log_en: true
-  range_debug_log_en: true
-  summary_to_console: true
-  debug_to_console: false
-  summary_to_file: true
-  debug_to_file: true
-  statistics_log_interval: 20
-  update_epsilon: 1.0e-8
-  source: "file"
-  replay_file: "/home/gulu/Downloads/uwb/m3/uwb_synthetic_from_scans_pos39_start203_accurate_time_2or3anchors.txt"
-  replay_start_offset_s: 0.0
-  replay_match_threshold_s: 0.05
-  mode: "external_anchors"
-  anchor_frame_align_en: true
-  min_anchors_for_update: 3
-  prefer_anchors: 4
-  two_anchor_policy_when_total_anchors_gt2: "dry_run"
-  anchors:
-    - id: 0
-      flag: 1
-      position: [1.94292, -8.03734, 0.0]
-    - id: 1
-      flag: 1
-      position: [62.0403, -4.8435, 0.0]
-    - id: 2
-      flag: 1
-      position: [57.76, 44.2927, 0.0]
-    - id: 3
-      flag: 1
-      position: [0.161242, 42.1851, 0.0]
-  tag_offset_body: [0.0, 0.0, 0.0]
-  tag_offset_convergence_step_m: 1.0e-4
-  tag_offset_convergence_count: 20
 
 lio:
   max_iterations: 3
@@ -187,7 +156,7 @@ uav:
 
 gps:
   # Set true only after confirming the real GNSS serial device and protocol below.
-  enable: true
+  enable: false
   update_en: false
 
   source: "serial"
@@ -287,9 +256,9 @@ publish:
   blind_rgb_points: 0.0
 
 debug:
-  print_console_timing_en: true # 终端耗时表输出
+  print_console_timing_en: false # 终端耗时表输出
   print_console_timing_stride: 1
-  vio_console_timing_print_en: true
+  vio_console_timing_print_en: false
   vio_console_timing_print_stride: 1
 
 evo:
@@ -320,22 +289,4 @@ udp_report:
 
 aruco_landmarks:
   aruco_landmarks_en: false
-  width: 0.8
-  height: 0.6
-  marker_size: 0.16
-  delta_width_qr_center: 0.28 # Half the distance between the centers of two markers in the horizontal direction 
-  delta_height_qr_center: 0.18 # Half the distance between the centers of two markers in the vertical direction
-  markers:
-    - id: 1
-      flag: 0      #0表示该地标的世界坐标无效
-      #position: [1.0, 2.0, 1.5]
-    - id: 2
-      flag: 0
-      #position: [10.0, 2.0, 1.5]
-    - id: 3
-      flag: 0
-      #position: [20.0, 2.0, 1.5]
-    - id: 4
-      flag: 0
-      #position: [30.0, 2.0, 1.5]
-    
+ 

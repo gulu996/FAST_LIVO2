@@ -1,0 +1,14 @@
+cam_model: Pinhole
+#AGV-LVGO-01
+cam_width: 2448
+cam_height: 2048
+scale: 0.5
+cam_fx: 2445.705575
+cam_fy: 2449.750238
+cam_cx: 1201.803743
+cam_cy: 1045.419633
+cam_d0: -0.064443
+cam_d1: 0.159101
+cam_d2: -0.001519
+cam_d3: 0.000541
+

@@ -1,0 +1,6 @@
+<launch>
+  <arg name="config_file" default="$(find fast_livo)/config/rtk_fixed_lag_backend.yaml" />
+  <rosparam command="load" file="$(arg config_file)" />
+  <node pkg="fast_livo" type="rtk_fixed_lag_backend_node"
+        name="rtk_fixed_lag_backend" output="screen" />
+</launch>

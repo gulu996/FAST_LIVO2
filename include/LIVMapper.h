@@ -18,11 +18,14 @@ which is included as part of this source code package.
 #include "vio.h"
 #include "preprocess.h"
 #include "uwb_manager.h"
+#include "voxel_filter_utils.h"
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 #include <nav_msgs/Path.h>
 #include <netinet/in.h>
 #include <vikit/camera_loader.h>
+
+#include <cstdint>
 
 class LIVMapper
 {
@@ -40,6 +43,7 @@ public:
   void handleLIO();
   void applyUwbUpdate(const char *stage);
   void applyGnssUpdate(const char *stage);
+  bool publishRawBackendOdometry();
   void handleUwbRelocalizationConfirmed(UwbUpdateResult &result, const char *stage);
   void advanceUwbOutputCorrection();
   V3D outputPosition() const;
@@ -96,6 +100,7 @@ public:
   double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0, last_timestamp_img = -1.0;
   double filter_size_surf_min = 0;
   double filter_size_pcd = 0;
+  double voxel_lidar_max_range_m_ = 450.0;
   double _first_lidar_time = 0.0;
   double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 
@@ -238,8 +243,6 @@ public:
 
   ofstream fout_pre, fout_out, fout_pcd_pos, fout_points;
 
-  pcl::VoxelGrid<PointType> downSizeFilterSurf;
-
   V3D euler_cur;
 
   LidarMeasureGroup LidarMeasures;
@@ -269,12 +272,21 @@ public:
   ros::Publisher pubLaserCloudEffect;
   ros::Publisher pubLaserCloudMap;
   ros::Publisher pubOdomAftMapped;
+  ros::Publisher pubRawBackendOdom;
   ros::Publisher pubPath;
   ros::Publisher pubLaserCloudDyn;
   ros::Publisher pubLaserCloudDynRmed;
   ros::Publisher pubLaserCloudDynDbg;
   image_transport::Publisher pubImage;
   ros::Publisher mavros_pose_publisher;
+  std::string raw_backend_odom_topic_ = "/backend/livo_odom_raw";
+  std::string raw_backend_odom_frame_id_ = "odom";
+  std::string raw_backend_body_frame_id_ = "body";
+  std::int64_t last_raw_backend_odom_stamp_ns_ = -1;
+  std::uint64_t raw_backend_odom_attempted_ = 0;
+  std::uint64_t raw_backend_odom_published_ = 0;
+  std::uint64_t raw_backend_odom_duplicate_ = 0;
+  std::uint64_t raw_backend_odom_non_monotonic_ = 0;
   ros::Timer imu_prop_timer;
 
   int frame_num = 0;

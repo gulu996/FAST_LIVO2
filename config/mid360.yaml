@@ -129,7 +129,7 @@ imu:
   b_gyr_cov: 0.001 # 0.1
 
 uwb:
-  enable: false # UWB总开关；true才启动串口/文件读取。
+  enable: true # UWB总开关；true才启动串口/文件读取。
   update_en: true # UWB融合开关；true会用测距修正FAST-LIVO状态，调参/看日志时可先关。
   summary_log_en: true # 每次处理先输出一条UWB_RESULT结论。
   debug_log_en: true # 保留门限、更新量和协方差等分类调试日志。

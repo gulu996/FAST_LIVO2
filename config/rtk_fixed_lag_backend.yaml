@@ -1,0 +1,67 @@
+rtk_backend:
+  enable: true
+
+  raw_odom_topic: "/backend/livo_odom_raw"
+  gnss_odom_topic: "/gnss/enu_odom"
+  gnss_status_topic: "/gnss/status"
+
+  optimized_odom_topic: "/rtk_backend/optimized_odom"
+  optimized_path_topic: "/rtk_backend/optimized_path"
+  map_to_odom_topic: "/rtk_backend/map_to_odom"
+  status_topic: "/rtk_backend/status"
+
+  lag_seconds: 20.0
+
+  keyframe_translation_m: 0.8
+  keyframe_rotation_deg: 8.0
+  keyframe_max_interval_s: 1.0
+
+  raw_odom_buffer_seconds: 5.0
+  max_raw_odom_interpolation_gap_s: 0.15
+  reuse_existing_node_time_diff_s: 0.02
+  gnss_node_min_interval_s: 0.20
+  max_active_states: 300
+
+  alignment_min_pairs: 20
+  alignment_min_baseline_m: 8.0
+  alignment_max_pair_time_diff_s: 0.05
+  alignment_max_rmse_m: 0.5
+
+  antenna_lever_arm_body_m: [0.0, 0.0, 0.0]
+
+  min_gnss_sigma_xy_m: 0.03
+  min_gnss_sigma_z_m: 0.05
+  max_gnss_sigma_xy_m: 2.0
+  max_gnss_sigma_z_m: 3.0
+
+  max_gnss_residual_m: 3.0
+  max_gnss_nis: 11.34
+
+  robust_kernel: "huber"
+  huber_delta: 2.5
+
+  # GTSAM Pose3 tangent order is rotation xyz, then translation xyz.
+  livo_translation_sigma_m: 0.05
+  livo_rotation_sigma_rad: 0.01
+
+  prior_translation_sigma_m: 0.10
+  prior_roll_pitch_sigma_rad: 0.05
+  prior_yaw_sigma_rad: 0.20
+
+  frame_id: "map"
+  odom_frame_id: "odom"
+  body_frame_id: "body"
+
+  log_interval_s: 1.0
+
+  save_results: true
+  output_directory: "/tmp/fast_livo_rtk"
+  raw_online_file: "livo_raw_online.tum"
+  optimized_online_file: "rtk_optimized_online.tum"
+  optimized_final_file: "rtk_optimized_final.tum"
+  gnss_file: "gnss_enu.tum"
+  status_csv_file: "rtk_backend_status.csv"
+  flush_interval_s: 1.0
+
+  save_text_log: true
+  text_log_file: "rtk_backend.log"

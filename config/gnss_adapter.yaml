@@ -1,0 +1,51 @@
+gnss_adapter:
+  enable: true
+  input_topic: "/ublox_driver/receiver_pvt"
+
+  output_odom_topic: "/gnss/enu_odom"
+  output_status_topic: "/gnss/status"
+
+  # manual: configured LLA; first_fixed: first state-machine-confirmed RTK Fixed;
+  # average_fixed: ECEF average of confirmed, consecutive RTK Fixed samples.
+  origin_mode: "manual"
+  origin_lla: [22.5299731, 113.9331154, 39.324]
+  origin_average_count: 30
+
+  min_num_sv: 10
+  max_num_sv: 100
+  max_pdop: 3.0
+  max_h_acc_m: 0.30
+  max_v_acc_m: 0.50
+  max_vel_acc_mps: 1.0
+
+  # Non-positive receiver fields are rejected by default. Set false to ignore only
+  # that gate; NaN/Inf remain invalid and an explicit throttled warning is emitted.
+  reject_nonpositive_pdop: true
+  reject_nonpositive_vel_acc: true
+
+  # Receiver accuracy fields are standard deviations; Odometry stores variances.
+  min_sigma_xy_m: 0.03
+  min_sigma_z_m: 0.05
+  max_sigma_xy_m: 2.0
+  max_sigma_z_m: 3.0
+  min_sigma_vel_mps: 0.05
+
+  fixed_confirm_count: 5
+  fixed_lost_count: 3
+  recovery_confirm_count: 10
+
+  max_time_gap_s: 0.5
+  require_monotonic_time: true
+
+  accept_rtk_fixed: true
+  accept_rtk_float: false
+  accept_differential: false
+  accept_single: false
+
+  frame_id: "map"
+  child_frame_id: "gnss_antenna"
+  log_interval_s: 1.0
+
+  # Reserved for a later factor-graph antenna lever-arm model; unused here.
+  antenna_lever_arm_body: [0.0, 0.0, 0.0]
+

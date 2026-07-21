@@ -257,6 +257,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
 
   nh.param<double>("preprocess/blind", p_pre->blind, 0.01);
   nh.param<double>("preprocess/filter_size_surf", filter_size_surf_min, 0.5);
+  nh.param<double>("voxel_safety/lidar_max_range_m", voxel_lidar_max_range_m_, 450.0);
   nh.param<bool>("preprocess/hilti_en", hilti_en, false);
   nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA);
   nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 6);
@@ -451,7 +452,17 @@ void LIVMapper::updateRuntimeGuard(double frame_time_s)
 
 void LIVMapper::initializeComponents(ros::NodeHandle &nh) 
 {
-  downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
+  validateVoxelLeafOrThrow(filter_size_surf_min, "preprocess/filter_size_surf");
+  validateVoxelLeafOrThrow(filter_size_pcd, "pcd_save/filter_size_pcd");
+  if (!std::isfinite(voxel_lidar_max_range_m_) || voxel_lidar_max_range_m_ <= 0.0)
+    throw std::runtime_error("Invalid voxel_safety/lidar_max_range_m");
+  ROS_INFO("[VOXEL_CONFIG] tag=VOXEL_FRAME leaf=[%.6f %.6f %.6f] frame=lidar/body max_range_m=%.3f",
+           filter_size_surf_min, filter_size_surf_min, filter_size_surf_min, voxel_lidar_max_range_m_);
+  ROS_INFO("[VOXEL_CONFIG] tags=VOXEL_PUBLISH_RGB,VOXEL_PUBLISH_INTENSITY,VOXEL_SAVE leaf=[%.6f %.6f %.6f] frames=world/global",
+           filter_size_pcd, filter_size_pcd, filter_size_pcd);
+  if (filter_size_surf_min < 0.02 || filter_size_surf_min > 1.0)
+    ROS_WARN("[VOXEL_CONFIG] preprocess/filter_size_surf=%.6f is outside the suggested LIO range [0.02, 1.0] m",
+             filter_size_surf_min);
   extT << VEC_FROM_ARRAY(extrinT);
   extR << MAT_FROM_ARRAY(extrinR);
 
@@ -632,6 +643,16 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>("/cloud_effected", 100);
   pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>("/mapping/globalMap", 100);
   pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/aft_mapped_to_init", 10);
+  nh.param<std::string>("rtk_backend/raw_odom_topic", raw_backend_odom_topic_,
+                        raw_backend_odom_topic_);
+  nh.param<std::string>("rtk_backend/odom_frame_id",
+                        raw_backend_odom_frame_id_,
+                        raw_backend_odom_frame_id_);
+  nh.param<std::string>("rtk_backend/body_frame_id",
+                        raw_backend_body_frame_id_,
+                        raw_backend_body_frame_id_);
+  pubRawBackendOdom =
+      nh.advertise<nav_msgs::Odometry>(raw_backend_odom_topic_, 100);
   pubPath = nh.advertise<nav_msgs::Path>("/mapping/path", 10);
   plane_pub = nh.advertise<visualization_msgs::Marker>("/planner_normal", 1);
   voxel_pub = nh.advertise<visualization_msgs::MarkerArray>("/voxels", 1);
@@ -643,6 +664,48 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubImuPropOdom = nh.advertise<nav_msgs::Odometry>("/LIVO2/imu_propagate", 10000);
   imu_prop_timer = nh.createTimer(ros::Duration(0.004), &LIVMapper::imu_prop_callback, this);
   voxelmap_manager->voxel_map_pub_= nh.advertise<visualization_msgs::MarkerArray>("/planes", 10000);
+}
+
+bool LIVMapper::publishRawBackendOdometry()
+{
+  nav_msgs::Odometry odometry;
+  odometry.header.stamp.fromSec(LidarMeasures.last_lio_update_time);
+  odometry.header.frame_id = raw_backend_odom_frame_id_;
+  odometry.child_frame_id = raw_backend_body_frame_id_;
+  odometry.pose.pose.position.x = _state.pos_end.x();
+  odometry.pose.pose.position.y = _state.pos_end.y();
+  odometry.pose.pose.position.z = _state.pos_end.z();
+  Eigen::Quaterniond quaternion(_state.rot_end);
+  quaternion.normalize();
+  odometry.pose.pose.orientation.w = quaternion.w();
+  odometry.pose.pose.orientation.x = quaternion.x();
+  odometry.pose.pose.orientation.y = quaternion.y();
+  odometry.pose.pose.orientation.z = quaternion.z();
+
+  ++raw_backend_odom_attempted_;
+  const std::int64_t stamp_ns =
+      static_cast<std::int64_t>(odometry.header.stamp.toNSec());
+  if (last_raw_backend_odom_stamp_ns_ >= 0 &&
+      stamp_ns <= last_raw_backend_odom_stamp_ns_)
+  {
+    if (stamp_ns == last_raw_backend_odom_stamp_ns_)
+      ++raw_backend_odom_duplicate_;
+    else
+      ++raw_backend_odom_non_monotonic_;
+    ROS_INFO_STREAM_THROTTLE(
+        5.0, "[RAW_BACKEND_ODOM] suppressed duplicate="
+                 << raw_backend_odom_duplicate_
+                 << " non_monotonic=" << raw_backend_odom_non_monotonic_
+                 << " attempted=" << raw_backend_odom_attempted_
+                 << " published=" << raw_backend_odom_published_
+                 << " last_stamp_ns=" << last_raw_backend_odom_stamp_ns_);
+    return false;
+  }
+
+  last_raw_backend_odom_stamp_ns_ = stamp_ns;
+  pubRawBackendOdom.publish(odometry);
+  ++raw_backend_odom_published_;
+  return true;
 }
 
 void LIVMapper::handleFirstFrame() 
@@ -1036,6 +1099,7 @@ void LIVMapper::handleVIO()
       vio_manager->has_last_visual_guard_pos = true;
     }
 
+    publishRawBackendOdometry();
     applyUwbUpdate("VIO-skip");
     applyGnssUpdate("VIO-skip");
     advanceUwbOutputCorrection();
@@ -1092,6 +1156,7 @@ void LIVMapper::handleVIO()
   snapStateForDeterminism(_state);
   vio_manager->updateFrameState(_state);
   updateVisualObservationHints();
+  publishRawBackendOdometry();
   applyUwbUpdate("VIO");
   applyGnssUpdate("VIO");
   advanceUwbOutputCorrection();
@@ -1238,7 +1303,7 @@ void LIVMapper::handleLIO()
            << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
            << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << endl;
            
-  if (feats_undistort->empty() || (feats_undistort == nullptr)) 
+  if (!feats_undistort || feats_undistort->empty())
   {
     std::cout << "[ LIO ]: No point!!!" << std::endl;
     return;
@@ -1246,8 +1311,17 @@ void LIVMapper::handleLIO()
 
   double t0 = omp_get_wtime();
 
-  downSizeFilterSurf.setInputCloud(feats_undistort);
-  downSizeFilterSurf.filter(*feats_down_body);
+  VoxelSafetyContext voxel_context;
+  voxel_context.coordinate_frame = "lidar/body (undistorted current frame)";
+  voxel_context.enforce_max_range = true;
+  voxel_context.max_range_m = voxel_lidar_max_range_m_;
+  if (!safeVoxelFilter<PointType>(feats_undistort, feats_down_body,
+                                  Eigen::Vector3f::Constant(static_cast<float>(filter_size_surf_min)),
+                                  "VOXEL_FRAME", voxel_context))
+  {
+    ROS_ERROR_THROTTLE(5.0, "[VOXEL_REJECT] tag=VOXEL_FRAME action=skip_lio_frame");
+    return;
+  }
   if (deterministic_lio_feature_sort_en_)
   {
     std::sort(feats_down_body->points.begin(), feats_down_body->points.end(),
@@ -1279,6 +1353,7 @@ void LIVMapper::handleLIO()
   _pv_list = voxelmap_manager->pv_list_;
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
+  publishRawBackendOdometry();
   applyUwbUpdate("LIO");
   applyGnssUpdate("LIO");
   advanceUwbOutputCorrection();
@@ -1477,10 +1552,15 @@ void LIVMapper::savePCD()
     if (img_en)
     {
       pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-      pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
-      voxel_filter.setInputCloud(pcl_wait_save);
-      voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
-      voxel_filter.filter(*downsampled_cloud);
+      VoxelSafetyContext voxel_context;
+      voxel_context.coordinate_frame = "world/global saved map";
+      if (!safeVoxelFilter<pcl::PointXYZRGB>(pcl_wait_save, downsampled_cloud,
+                                             Eigen::Vector3f::Constant(static_cast<float>(filter_size_pcd)),
+                                             "VOXEL_SAVE", voxel_context))
+      {
+        ROS_ERROR("[VOXEL_REJECT] tag=VOXEL_SAVE action=abort_map_save");
+        return;
+      }
  
       pcd_writer.writeBinary(downsampled_points_dir, *downsampled_cloud); // Save the raw point cloud data
       pcd_writer.writeBinary(downsampled_points_dir2, *downsampled_cloud); 
@@ -2472,12 +2552,19 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
 
       if (global_map_pub)
       {
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_wait_save_filter(new pcl::PointCloud<pcl::PointXYZRGB>);  
-        pcl::VoxelGrid<pcl::PointXYZRGB> downSizeFilterMap;
-        downSizeFilterMap.setInputCloud(laserCloudWorldRGB);  //当前帧
-        //downSizeFilterMap.setInputCloud(pcl_wait_save);     //整个地图
-        downSizeFilterMap.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
-        downSizeFilterMap.filter(*pcl_wait_save_filter);
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_wait_save_filter(new pcl::PointCloud<pcl::PointXYZRGB>);
+        VoxelSafetyContext voxel_context;
+        voxel_context.coordinate_frame = "world/current RGB frame";
+        voxel_context.enforce_max_range = true;
+        voxel_context.max_range_m = voxel_lidar_max_range_m_;
+        voxel_context.range_origin = _state.pos_end;
+        if (!safeVoxelFilter<pcl::PointXYZRGB>(laserCloudWorldRGB, pcl_wait_save_filter,
+                                               Eigen::Vector3f::Constant(static_cast<float>(filter_size_pcd)),
+                                               "VOXEL_PUBLISH_RGB", voxel_context))
+        {
+          ROS_ERROR_THROTTLE(5.0, "[VOXEL_REJECT] tag=VOXEL_PUBLISH_RGB action=skip_global_map_append");
+          pcl_wait_save_filter->clear();
+        }
         
         //*pcl_wait_save += *laserCloudWorldRGB;          //总地图添加未过滤点云
         *pcl_wait_save += *pcl_wait_save_filter;        //添加过滤后的点云
@@ -2503,11 +2590,18 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes,c
       if (global_map_pub)
       {
         pcl::PointCloud<PointType>::Ptr pcl_wait_save_filter(new pcl::PointCloud<PointType>);
-        pcl::VoxelGrid<PointType> downSizeFilterMap;
-        downSizeFilterMap.setInputCloud(pcl_w_wait_pub);  //当前帧
-        //downSizeFilterMap.setInputCloud(pcl_wait_save);     //整个地图
-        downSizeFilterMap.setLeafSize(filter_size_pcd, filter_size_pcd, filter_size_pcd);
-        downSizeFilterMap.filter(*pcl_wait_save_filter);
+        VoxelSafetyContext voxel_context;
+        voxel_context.coordinate_frame = "world/current intensity frame";
+        voxel_context.enforce_max_range = true;
+        voxel_context.max_range_m = voxel_lidar_max_range_m_;
+        voxel_context.range_origin = _state.pos_end;
+        if (!safeVoxelFilter<PointType>(pcl_w_wait_pub, pcl_wait_save_filter,
+                                        Eigen::Vector3f::Constant(static_cast<float>(filter_size_pcd)),
+                                        "VOXEL_PUBLISH_INTENSITY", voxel_context))
+        {
+          ROS_ERROR_THROTTLE(5.0, "[VOXEL_REJECT] tag=VOXEL_PUBLISH_INTENSITY action=skip_global_map_append");
+          pcl_wait_save_filter->clear();
+        }
         
         //*pcl_wait_save_intensity += *pcl_w_wait_pub;          //总地图添加未过滤点云
         *pcl_wait_save_intensity += *pcl_wait_save_filter;        //添加过滤后的点云

@@ -81,6 +81,7 @@ endif()
 
 # Find catkin and required dependencies
 find_package(catkin REQUIRED COMPONENTS
+  gnss_comm
   geometry_msgs
   nav_msgs
   sensor_msgs
@@ -97,18 +98,65 @@ find_package(catkin REQUIRED COMPONENTS
   image_transport
 )
 
+add_message_files(
+  FILES
+  GnssStatus.msg
+  RtkBackendStatus.msg
+)
+
+generate_messages(
+  DEPENDENCIES
+  geometry_msgs
+  std_msgs
+)
+
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
+find_package(GTSAM REQUIRED)
+if(NOT GTSAM_INCLUDE_DIRS)
+  set(GTSAM_INCLUDE_DIRS ${GTSAM_INCLUDE_DIR})
+endif()
+if(NOT GTSAM_LIBRARIES)
+  set(GTSAM_LIBRARIES gtsam)
+endif()
+
+set(GTSAM_UNSTABLE_ROOT "" CACHE PATH
+    "Prefix containing gtsam_unstable headers and library")
+find_path(GTSAM_UNSTABLE_INCLUDE_DIR
+  NAMES gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h
+  HINTS
+    ${GTSAM_UNSTABLE_ROOT}
+    $ENV{HOME}/.local/gtsam-unstable-root/usr/local
+    /usr/local
+  PATH_SUFFIXES include
+)
+find_library(GTSAM_UNSTABLE_LIBRARY
+  NAMES gtsam_unstable
+  HINTS
+    ${GTSAM_UNSTABLE_ROOT}
+    $ENV{HOME}/.local/gtsam-unstable-root/usr/local
+    /usr/local
+  PATH_SUFFIXES lib
+)
+if(NOT GTSAM_UNSTABLE_INCLUDE_DIR OR NOT GTSAM_UNSTABLE_LIBRARY)
+  message(FATAL_ERROR
+    "IncrementalFixedLagSmoother requires the GTSAM unstable component. "
+    "Missing gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h or "
+    "libgtsam_unstable. Rebuild GTSAM with GTSAM_BUILD_UNSTABLE=ON and set "
+    "GTSAM_UNSTABLE_ROOT to its install prefix.")
+endif()
+message(STATUS "GTSAM unstable include: ${GTSAM_UNSTABLE_INCLUDE_DIR}")
+message(STATUS "GTSAM unstable library: ${GTSAM_UNSTABLE_LIBRARY}")
 
 set(Sophus_LIBRARIES libSophus.so)
 
 # Define the catkin package
 catkin_package(
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime cv_bridge vikit_common vikit_ros image_transport
-  DEPENDS EIGEN3 PCL OpenCV Sophus
+  CATKIN_DEPENDS gnss_comm geometry_msgs nav_msgs sensor_msgs roscpp rospy std_msgs message_runtime cv_bridge vikit_common vikit_ros image_transport
+  DEPENDS EIGEN3 PCL OpenCV Sophus GTSAM
 )
 
 # Include directories for dependencies
@@ -118,6 +166,8 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${Sophus_INCLUDE_DIRS}
+  ${GTSAM_INCLUDE_DIR}
+  ${GTSAM_UNSTABLE_INCLUDE_DIR}
   include
 )
 
@@ -128,12 +178,28 @@ add_library(pre src/preprocess.cpp)
 add_library(imu_proc src/IMU_Processing.cpp)
 add_library(uwb src/uwb_manager.cpp)
 add_library(gnss src/gnss_manager.cpp)
+add_library(gnss_adapter src/gnss_adapter.cpp)
+add_library(rtk_fixed_lag_backend src/rtk_fixed_lag_backend.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 
 # Add the main executable
 add_executable(fastlivo_mapping src/main.cpp)
 add_executable(gnss_manager_self_test src/gnss_manager_self_test.cpp)
 add_executable(uwb_manager_self_test src/uwb_manager_self_test.cpp)
+add_executable(gnss_adapter_node src/gnss_adapter_node.cpp)
+add_executable(gnss_adapter_self_test src/gnss_adapter_self_test.cpp)
+add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
+add_executable(rtk_fixed_lag_backend_self_test src/rtk_fixed_lag_backend_self_test.cpp)
+add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
+
+add_dependencies(gnss_adapter ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(gnss_adapter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(gnss_adapter_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(rtk_fixed_lag_backend ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(rtk_fixed_lag_backend_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(rtk_fixed_lag_backend_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+target_link_libraries(gnss_adapter ${catkin_LIBRARIES})
 
 # Link libraries to the executable
 target_link_libraries(fastlivo_mapping
@@ -167,6 +233,39 @@ target_link_libraries(uwb_manager_self_test
   ${OpenCV_LIBRARIES}
   ${Sophus_LIBRARIES}
   ${Boost_LIBRARIES}
+)
+
+target_link_libraries(gnss_adapter_node
+  gnss_adapter
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(gnss_adapter_self_test
+  gnss_adapter
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(rtk_fixed_lag_backend
+  ${catkin_LIBRARIES}
+  gtsam
+  ${GTSAM_UNSTABLE_LIBRARY}
+)
+
+target_link_libraries(rtk_fixed_lag_backend_node
+  rtk_fixed_lag_backend
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(rtk_fixed_lag_backend_self_test
+  rtk_fixed_lag_backend
+  ${catkin_LIBRARIES}
+  gtsam
+  ${GTSAM_UNSTABLE_LIBRARY}
+)
+
+target_link_libraries(voxel_filter_self_test
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
 )
 
 if(OpenMP_CXX_FOUND)

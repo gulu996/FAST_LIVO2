@@ -1,0 +1,13 @@
+<launch>
+  <arg name="config_file" default="$(find fast_livo)/config/gnss_adapter.yaml" />
+  <arg name="input_topic" default="/ublox_driver/receiver_pvt" />
+  <arg name="output_odom_topic" default="/gnss/enu_odom" />
+  <arg name="output_status_topic" default="/gnss/status" />
+
+  <rosparam command="load" file="$(arg config_file)" />
+  <param name="gnss_adapter/input_topic" value="$(arg input_topic)" />
+  <param name="gnss_adapter/output_odom_topic" value="$(arg output_odom_topic)" />
+  <param name="gnss_adapter/output_status_topic" value="$(arg output_status_topic)" />
+
+  <node pkg="fast_livo" type="gnss_adapter_node" name="gnss_adapter" output="screen" />
+</launch>

@@ -1,0 +1,60 @@
+std_msgs/Header header
+
+bool initialized
+bool alignment_ready
+
+uint32 active_keyframes
+uint32 active_factors
+uint32 active_livo_factors
+uint32 active_gnss_factors
+uint32 max_active_states_observed
+uint64 total_nodes_created
+uint64 marginalized_nodes
+
+uint64 raw_odom_received
+uint64 raw_odom_published
+uint64 raw_odom_duplicate
+uint64 raw_odom_non_monotonic
+time last_raw_odom_stamp
+
+uint64 tf_published
+uint64 tf_duplicate_skipped
+time last_tf_stamp
+
+uint64 gnss_received
+uint64 gnss_accepted
+uint64 gnss_rejected
+uint64 gnss_factors
+uint64 livo_factors
+uint64 gnss_waiting
+uint64 gnss_time_rejected
+uint64 gnss_quality_rejected
+uint64 gnss_too_old_for_buffer
+uint64 gnss_interpolation_gap_too_large
+uint64 gnss_interpolation_invalid
+uint64 gnss_late_out_of_order
+uint64 gnss_rate_limited
+uint64 gnss_duplicate_timestamp
+uint64 gnss_no_active_graph_state
+
+float64 last_gnss_dt
+float64 last_gnss_residual
+float64 last_gnss_nis
+float64 optimization_time_ms
+float64 optimization_average_ms
+float64 optimization_max_ms
+float64 interpolation_average_gap_s
+float64 interpolation_max_gap_s
+float64 oldest_state_age_s
+float64 lag_seconds
+time oldest_timestamp
+time newest_timestamp
+
+float64 alignment_yaw_deg
+geometry_msgs/Vector3 alignment_translation
+float64 alignment_rmse
+uint32 alignment_pair_count
+float64 alignment_baseline
+
+string last_reject_reason
+string backend_error
