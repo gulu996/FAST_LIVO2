@@ -23,6 +23,8 @@
 
 namespace fast_livo_backend {
 
+struct RtkFixedLagBackendSelfTestAccess;
+
 class GnssPositionArmFactor final
     : public gtsam::NoiseModelFactorN<gtsam::Pose3> {
  public:
@@ -45,6 +47,7 @@ class GnssPositionArmFactor final
 struct AlignmentPair {
   gtsam::Point3 odom_position;
   gtsam::Point3 enu_position;
+  std::int64_t gnss_stamp_ns = -1;
 };
 
 struct AlignmentResult {
@@ -132,6 +135,9 @@ class RtkFixedLagBackend {
                               std::string *reject_reason);
 
  private:
+  friend struct RtkFixedLagBackendSelfTestAccess;
+  RtkFixedLagBackend() = default;
+
   struct RawOdomSample {
     ros::Time stamp;
     gtsam::Pose3 pose;
@@ -182,6 +188,8 @@ class RtkFixedLagBackend {
   void processAcceptedGnss(const nav_msgs::Odometry &odometry);
   void insertPendingGnss(const GnssMeasurement &measurement);
   void tryCollectAlignmentPairs();
+  void transitionPendingGnssAfterAlignment(
+      std::int64_t alignment_cutoff_stamp_ns);
   void resetAlignmentCollection(const std::string &reason);
   bool tryFinishAlignment();
   bool initializeGraph(const RawOdomSample &sample);
@@ -207,7 +215,10 @@ class RtkFixedLagBackend {
   void refreshEstimateAndPublish(bool publish_current = true);
   void pruneRawOdomBuffer();
   void rejectGnss(const std::string &reason, double residual_m = 0.0,
-                  double nis = 0.0);
+                  double nis = 0.0,
+                  const ros::Time *measurement_stamp = nullptr);
+  std::int64_t gnssConservationDelta() const;
+  std::uint64_t gnssSilentDropCount() const;
   void publishStatus();
 
   void queueRawPose(const RawOdomSample &sample);
@@ -282,9 +293,17 @@ class RtkFixedLagBackend {
   std::uint64_t gnss_rate_limited_ = 0;
   std::uint64_t gnss_duplicate_timestamp_ = 0;
   std::uint64_t gnss_no_active_state_ = 0;
+  std::uint64_t alignment_gnss_used_ = 0;
+  std::uint64_t alignment_transition_to_graph_pending_ = 0;
+  std::uint64_t alignment_transition_rejected_ = 0;
+  std::uint64_t alignment_transition_waiting_ = 0;
+  std::uint64_t gnss_duplicate_factor_count_ = 0;
+  std::uint64_t gnss_odom_only_rejected_ = 0;
   std::int64_t last_enqueued_gnss_stamp_ns_ = -1;
   std::int64_t last_processed_gnss_stamp_ns_ = -1;
+  std::int64_t alignment_last_used_gnss_stamp_ns_ = -1;
   std::int64_t last_gnss_triggered_node_stamp_ns_ = -1;
+  std::int64_t last_added_gnss_factor_stamp_ns_ = -1;
   double last_gnss_dt_s_ = 0.0;
   double last_gnss_residual_m_ = 0.0;
   double last_gnss_nis_ = 0.0;

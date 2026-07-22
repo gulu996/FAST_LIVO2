@@ -179,6 +179,7 @@ add_library(imu_proc src/IMU_Processing.cpp)
 add_library(uwb src/uwb_manager.cpp)
 add_library(gnss src/gnss_manager.cpp)
 add_library(gnss_adapter src/gnss_adapter.cpp)
+add_library(gnss_fault_injector src/gnss_fault_injector.cpp)
 add_library(rtk_fixed_lag_backend src/rtk_fixed_lag_backend.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 
@@ -188,6 +189,8 @@ add_executable(gnss_manager_self_test src/gnss_manager_self_test.cpp)
 add_executable(uwb_manager_self_test src/uwb_manager_self_test.cpp)
 add_executable(gnss_adapter_node src/gnss_adapter_node.cpp)
 add_executable(gnss_adapter_self_test src/gnss_adapter_self_test.cpp)
+add_executable(gnss_fault_injector_node src/gnss_fault_injector_node.cpp)
+add_executable(gnss_fault_injector_self_test src/gnss_fault_injector_self_test.cpp)
 add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
 add_executable(rtk_fixed_lag_backend_self_test src/rtk_fixed_lag_backend_self_test.cpp)
 add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
@@ -195,11 +198,15 @@ add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
 add_dependencies(gnss_adapter ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(gnss_fault_injector ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(gnss_fault_injector_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(gnss_fault_injector_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(gnss_adapter ${catkin_LIBRARIES})
+target_link_libraries(gnss_fault_injector ${catkin_LIBRARIES})
 
 # Link libraries to the executable
 target_link_libraries(fastlivo_mapping
@@ -242,6 +249,16 @@ target_link_libraries(gnss_adapter_node
 
 target_link_libraries(gnss_adapter_self_test
   gnss_adapter
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(gnss_fault_injector_node
+  gnss_fault_injector
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(gnss_fault_injector_self_test
+  gnss_fault_injector
   ${catkin_LIBRARIES}
 )
 

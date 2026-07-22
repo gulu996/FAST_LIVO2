@@ -38,6 +38,9 @@ constexpr char kGnssLateOutOfOrder[] = "GNSS_LATE_OUT_OF_ORDER";
 constexpr char kGnssRateLimited[] = "GNSS_RATE_LIMITED";
 constexpr char kDuplicateGnssTimestamp[] = "DUPLICATE_GNSS_TIMESTAMP";
 constexpr char kNoActiveGraphState[] = "NO_ACTIVE_GRAPH_STATE";
+constexpr char kAlignmentTransitionTooOld[] =
+    "GNSS_ALIGNMENT_TRANSITION_TOO_OLD";
+constexpr char kAlignmentReset[] = "GNSS_ALIGNMENT_RESET";
 
 double clamp(double value, double minimum, double maximum) {
   return std::max(minimum, std::min(value, maximum));
@@ -136,17 +139,68 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     archiveActiveStates();
+    const std::size_t waiting_graph = pending_factor_gnss_.size();
+    const std::size_t waiting_alignment = pending_alignment_gnss_.size();
+    const std::size_t waiting_status = pending_status_.size();
+    const std::size_t waiting_odom = pending_gnss_odom_.size();
+    if (waiting_graph + waiting_alignment + waiting_status + waiting_odom !=
+        0) {
+      std::ostringstream waiting_detail;
+      waiting_detail << "graph=" << waiting_graph
+                     << " alignment=" << waiting_alignment
+                     << " status=" << waiting_status
+                     << " odom_unpaired=" << waiting_odom;
+      if (!pending_factor_gnss_.empty()) {
+        waiting_detail
+            << " graph_first_stamp_ns="
+            << stampNanoseconds(pending_factor_gnss_.front().stamp)
+            << " graph_last_stamp_ns="
+            << stampNanoseconds(pending_factor_gnss_.back().stamp);
+      }
+      queueTextEvent("GNSS_WAITING_AT_END_OF_STREAM", waiting_detail.str());
+    }
+    const std::int64_t conservation_delta = gnssConservationDelta();
+    const std::uint64_t silent_drop_count = gnssSilentDropCount();
+    if (conservation_delta != 0) {
+      if (backend_error_.empty()) {
+        backend_error_ = silent_drop_count != 0
+                             ? "GNSS_SILENT_DROP_DETECTED"
+                             : "GNSS_CONSERVATION_MISMATCH";
+      }
+      std::ostringstream error_detail;
+      error_detail << "count=" << silent_drop_count
+                   << " conservation_delta=" << conservation_delta;
+      queueTextEvent("GNSS_CONSERVATION_ERROR", error_detail.str());
+    }
     std::ostringstream detail;
     detail << "total_nodes=" << total_nodes_created_
            << " marginalized_nodes=" << marginalized_nodes_
            << " total_livo_factors=" << livo_factor_count_
            << " total_gnss_factors=" << gnss_factor_count_
+           << " total_gnss_received=" << gnss_received_
+           << " total_gnss_rejected=" << gnss_rejected_
+           << " gnss_odom_only_rejected=" << gnss_odom_only_rejected_
            << " raw_received=" << raw_odom_received_
            << " raw_accepted=" << raw_odom_published_
            << " raw_duplicate=" << raw_odom_duplicate_
            << " raw_non_monotonic=" << raw_odom_non_monotonic_
            << " tf_published=" << tf_published_
-           << " tf_duplicate_skipped=" << tf_duplicate_skipped_;
+           << " tf_duplicate_skipped=" << tf_duplicate_skipped_
+           << " alignment_gnss_used=" << alignment_gnss_used_
+           << " alignment_transition_to_graph_pending="
+           << alignment_transition_to_graph_pending_
+           << " alignment_transition_rejected="
+           << alignment_transition_rejected_
+           << " alignment_transition_waiting="
+           << alignment_transition_waiting_
+           << " gnss_duplicate_factor_count="
+           << gnss_duplicate_factor_count_
+           << " gnss_waiting_graph=" << waiting_graph
+           << " gnss_waiting_alignment=" << waiting_alignment
+           << " gnss_waiting_status=" << waiting_status
+           << " gnss_waiting_odom_unpaired=" << waiting_odom
+           << " gnss_silent_drop_count=" << silent_drop_count
+           << " gnss_conservation_delta=" << conservation_delta;
     queueTextEvent("BACKEND_SUMMARY", detail.str());
     queueStatusCsv();
     batch = takePendingFileBatch();
@@ -415,7 +469,14 @@ void RtkFixedLagBackend::initializeResultFiles() {
            "last_gnss_dt,last_gnss_residual,last_gnss_nis,optimization_ms,"
            "optimization_average_ms,optimization_max_ms,"
            "interpolation_average_gap_s,interpolation_max_gap_s,"
-           "last_reject_reason,backend_error\n";
+           "last_reject_reason,backend_error,total_gnss_rejected,"
+           "gnss_odom_only_rejected,"
+           "alignment_gnss_used,alignment_last_used_gnss_stamp_ns,"
+           "alignment_transition_to_graph_pending,"
+           "alignment_transition_rejected,alignment_transition_waiting,"
+           "gnss_waiting_alignment,gnss_waiting_status,"
+           "gnss_duplicate_factor_count,gnss_silent_drop_count,"
+           "gnss_conservation_delta\n";
   }
 }
 
@@ -671,21 +732,24 @@ void RtkFixedLagBackend::gnssStatusCallback(
     }
     ++gnss_quality_rejected_;
     rejectGnss(message->reject_reason.empty() ? "NOT_RTK_FIXED"
-                                              : message->reject_reason);
+                                              : message->reject_reason,
+               0.0, 0.0, &message->header.stamp);
     publishStatus();
     return;
   }
 
   const std::uint64_t stamp_ns = message->header.stamp.toNSec();
   if (pending_status_.count(stamp_ns) != 0) {
-    rejectGnss(kDuplicateGnssTimestamp);
+    rejectGnss(kDuplicateGnssTimestamp, 0.0, 0.0,
+               &message->header.stamp);
     publishStatus();
     return;
   }
   pending_status_[stamp_ns] = *message;
   tryPairGnssMessages(stamp_ns);
   while (pending_status_.size() > kMaximumUnpairedGnssMessages) {
-    rejectGnss("STATUS_ODOM_MISMATCH");
+    rejectGnss("STATUS_ODOM_MISMATCH", 0.0, 0.0,
+               &pending_status_.begin()->second.header.stamp);
     pending_status_.erase(pending_status_.begin());
   }
   publishStatus();
@@ -697,7 +761,9 @@ void RtkFixedLagBackend::gnssOdomCallback(
   newest_sensor_stamp_ = std::max(newest_sensor_stamp_, message->header.stamp);
   const std::uint64_t stamp_ns = message->header.stamp.toNSec();
   if (pending_gnss_odom_.count(stamp_ns) != 0) {
-    rejectGnss(kDuplicateGnssTimestamp);
+    ++gnss_odom_only_rejected_;
+    rejectGnss(kDuplicateGnssTimestamp, 0.0, 0.0,
+               &message->header.stamp);
     publishStatus();
     return;
   }
@@ -727,7 +793,8 @@ void RtkFixedLagBackend::processAcceptedGnss(
       stamp_ns <= last_enqueued_gnss_stamp_ns_) {
     rejectGnss(stamp_ns == last_enqueued_gnss_stamp_ns_
                    ? kDuplicateGnssTimestamp
-                   : kGnssLateOutOfOrder);
+                   : kGnssLateOutOfOrder,
+               0.0, 0.0, &odometry.header.stamp);
     return;
   }
 
@@ -740,7 +807,8 @@ void RtkFixedLagBackend::processAcceptedGnss(
       covariance_y <= 0.0 || covariance_z <= 0.0 ||
       !std::isfinite(position.x) || !std::isfinite(position.y) ||
       !std::isfinite(position.z)) {
-    rejectGnss("INVALID_COVARIANCE_OR_POSITION");
+    rejectGnss("INVALID_COVARIANCE_OR_POSITION", 0.0, 0.0,
+               &odometry.header.stamp);
     return;
   }
 
@@ -839,7 +907,8 @@ void RtkFixedLagBackend::tryCollectAlignmentPairs() {
             stampDifference(std::prev(upper)->stamp, measurement->stamp));
       if (nearest_difference_s >
           config_.alignment_max_pair_time_diff_s) {
-        rejectGnss(kInterpolationGapTooLarge);
+        rejectGnss(kInterpolationGapTooLarge, 0.0, 0.0,
+                   &measurement->stamp);
         last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
         measurement = pending_alignment_gnss_.erase(measurement);
         continue;
@@ -851,16 +920,20 @@ void RtkFixedLagBackend::tryCollectAlignmentPairs() {
     if (!interpolateRawPose(measurement->stamp, &raw_pose, &interval_s,
                             &reason)) {
       if (reason == kWaitingForRawOdom) break;
-      rejectGnss(reason);
+      rejectGnss(reason, 0.0, 0.0, &measurement->stamp);
       last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
       measurement = pending_alignment_gnss_.erase(measurement);
       continue;
     }
 
+    const std::int64_t measurement_stamp_ns =
+        stampNanoseconds(measurement->stamp);
     alignment_pairs_.push_back(AlignmentPair{
         raw_pose.transformFrom(config_.antenna_lever_arm_body_m),
-        measurement->position});
-    last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
+        measurement->position, measurement_stamp_ns});
+    ++alignment_gnss_used_;
+    alignment_last_used_gnss_stamp_ns_ = measurement_stamp_ns;
+    last_processed_gnss_stamp_ns_ = measurement_stamp_ns;
     measurement = pending_alignment_gnss_.erase(measurement);
     // ponytail: startup-only fixed storage cap; a future streaming alignment
     // estimator is the upgrade path for multi-minute stationary starts.
@@ -871,8 +944,78 @@ void RtkFixedLagBackend::tryCollectAlignmentPairs() {
     }
   }
 
-  if (tryFinishAlignment() && !initialized_ && !raw_odom_buffer_.empty())
-    initializeGraph(raw_odom_buffer_.back());
+  if (tryFinishAlignment()) {
+    if (!initialized_ && !raw_odom_buffer_.empty())
+      initializeGraph(raw_odom_buffer_.back());
+    if (initialized_ && !backend_halted_) processPendingGnss();
+  }
+}
+
+void RtkFixedLagBackend::transitionPendingGnssAfterAlignment(
+    std::int64_t alignment_cutoff_stamp_ns) {
+  if (pending_alignment_gnss_.empty()) {
+    std::ostringstream detail;
+    detail << "last_used_alignment_gnss_stamp_ns="
+           << alignment_cutoff_stamp_ns
+           << " pending_before=0 used_for_alignment="
+           << alignment_.pair_count
+           << " moved_to_graph_pending=0 rejected=0 remaining_waiting=0";
+    queueTextEvent("RTK_ALIGNMENT_TRANSITION", detail.str());
+    ROS_INFO_STREAM("[RTK_ALIGNMENT_TRANSITION] " << detail.str());
+    return;
+  }
+
+  std::stable_sort(
+      pending_alignment_gnss_.begin(), pending_alignment_gnss_.end(),
+      [](const GnssMeasurement &left, const GnssMeasurement &right) {
+        return left.stamp < right.stamp;
+      });
+  const std::size_t pending_before = pending_alignment_gnss_.size();
+  const std::int64_t oldest_raw_stamp_ns =
+      stampNanoseconds(raw_odom_buffer_.front().stamp);
+  const std::int64_t newest_raw_stamp_ns =
+      stampNanoseconds(raw_odom_buffer_.back().stamp);
+  std::size_t moved_to_graph_pending = 0;
+  std::size_t rejected = 0;
+  std::size_t remaining_waiting = 0;
+  std::int64_t previous_stamp_ns = -1;
+  while (!pending_alignment_gnss_.empty()) {
+    GnssMeasurement measurement = pending_alignment_gnss_.front();
+    pending_alignment_gnss_.pop_front();
+    const std::int64_t measurement_stamp_ns =
+        stampNanoseconds(measurement.stamp);
+    if (measurement_stamp_ns != previous_stamp_ns &&
+        measurement_stamp_ns > alignment_cutoff_stamp_ns &&
+        measurement_stamp_ns >= oldest_raw_stamp_ns) {
+      insertPendingGnss(measurement);
+      ++moved_to_graph_pending;
+      if (measurement_stamp_ns > newest_raw_stamp_ns) ++remaining_waiting;
+      previous_stamp_ns = measurement_stamp_ns;
+      continue;
+    }
+
+    ++alignment_transition_rejected_;
+    ++rejected;
+    const char *reason = measurement_stamp_ns == previous_stamp_ns
+                             ? kDuplicateGnssTimestamp
+                             : kAlignmentTransitionTooOld;
+    rejectGnss(reason, 0.0, 0.0, &measurement.stamp);
+    last_processed_gnss_stamp_ns_ = measurement_stamp_ns;
+    previous_stamp_ns = measurement_stamp_ns;
+  }
+
+  alignment_transition_to_graph_pending_ += moved_to_graph_pending;
+  alignment_transition_waiting_ += remaining_waiting;
+  std::ostringstream detail;
+  detail << "last_used_alignment_gnss_stamp_ns="
+         << alignment_cutoff_stamp_ns
+         << " pending_before=" << pending_before
+         << " used_for_alignment=" << alignment_.pair_count
+         << " moved_to_graph_pending=" << moved_to_graph_pending
+         << " rejected=" << rejected
+         << " remaining_waiting=" << remaining_waiting;
+  queueTextEvent("RTK_ALIGNMENT_TRANSITION", detail.str());
+  ROS_INFO_STREAM("[RTK_ALIGNMENT_TRANSITION] " << detail.str());
 }
 
 void RtkFixedLagBackend::resetAlignmentCollection(
@@ -883,8 +1026,13 @@ void RtkFixedLagBackend::resetAlignmentCollection(
         "[RTK_BACKEND_ALIGNMENT_RESET] reason=" << reason
         << " pairs=" << alignment_pairs_.size());
   }
+  for (const GnssMeasurement &measurement : pending_alignment_gnss_) {
+    rejectGnss(kAlignmentReset, 0.0, 0.0, &measurement.stamp);
+    last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement.stamp);
+  }
   alignment_pairs_.clear();
   pending_alignment_gnss_.clear();
+  alignment_last_used_gnss_stamp_ns_ = -1;
 }
 
 bool RtkFixedLagBackend::tryFinishAlignment() {
@@ -920,13 +1068,24 @@ bool RtkFixedLagBackend::tryFinishAlignment() {
       gtsam::Rot3::Rz(candidate.yaw_rad), candidate.translation);
   alignment_ = candidate;
   last_reject_reason_.clear();
-  pending_alignment_gnss_.clear();
+  if (alignment_pairs_.empty() ||
+      alignment_pairs_.back().gnss_stamp_ns < 0) {
+    alignment_.valid = false;
+    backend_error_ = "ALIGNMENT_CUTOFF_STAMP_MISSING";
+    return false;
+  }
+  alignment_last_used_gnss_stamp_ns_ =
+      alignment_pairs_.back().gnss_stamp_ns;
+  transitionPendingGnssAfterAlignment(
+      alignment_last_used_gnss_stamp_ns_);
   std::ostringstream detail;
   detail << "yaw_deg=" << candidate.yaw_rad * kRadToDeg
          << " translation=[" << candidate.translation.transpose() << "]"
          << " rmse=" << candidate.rmse_m
          << " pairs=" << candidate.pair_count
-         << " baseline=" << candidate.baseline_m;
+         << " baseline=" << candidate.baseline_m
+         << " last_used_alignment_gnss_stamp_ns="
+         << alignment_last_used_gnss_stamp_ns_;
   queueTextEvent("ALIGNMENT_SUCCESS", detail.str());
   ROS_INFO_STREAM("[RTK_BACKEND_ALIGNMENT] ready=1 " << detail.str());
   return true;
@@ -1058,7 +1217,8 @@ void RtkFixedLagBackend::processPendingGnss() {
       break;
     }
     if (measurement->stamp < raw_odom_buffer_.front().stamp) {
-      rejectGnss(kGnssTooOldForBuffer);
+      rejectGnss(kGnssTooOldForBuffer, 0.0, 0.0,
+                 &measurement->stamp);
       last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
       measurement = pending_factor_gnss_.erase(measurement);
       continue;
@@ -1070,7 +1230,8 @@ void RtkFixedLagBackend::processPendingGnss() {
     if (!interpolateRawPose(measurement->stamp, &interpolated_raw_pose,
                             &interpolation_gap_s, &interpolation_reason)) {
       if (interpolation_reason == kWaitingForRawOdom) break;
-      rejectGnss(interpolation_reason);
+      rejectGnss(interpolation_reason, 0.0, 0.0,
+                 &measurement->stamp);
       last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
       measurement = pending_factor_gnss_.erase(measurement);
       continue;
@@ -1081,7 +1242,8 @@ void RtkFixedLagBackend::processPendingGnss() {
         std::max(interpolation_gap_max_s_, interpolation_gap_s);
 
     if (!initialized_ || keyframes_.empty() || !smoother_) {
-      rejectGnss(kNoActiveGraphState);
+      rejectGnss(kNoActiveGraphState, 0.0, 0.0,
+                 &measurement->stamp);
       last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
       measurement = pending_factor_gnss_.erase(measurement);
       continue;
@@ -1093,7 +1255,8 @@ void RtkFixedLagBackend::processPendingGnss() {
     bool node_created = false;
     if (!keyframe) {
       if (measurement->stamp <= keyframes_.back().stamp) {
-        rejectGnss(kGnssLateOutOfOrder);
+        rejectGnss(kGnssLateOutOfOrder, 0.0, 0.0,
+                   &measurement->stamp);
         last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
         measurement = pending_factor_gnss_.erase(measurement);
         continue;
@@ -1104,7 +1267,8 @@ void RtkFixedLagBackend::processPendingGnss() {
                               last_gnss_triggered_node_stamp_ns_) *
                   1e-9 <
               config_.gnss_node_min_interval_s) {
-        rejectGnss(kGnssRateLimited);
+        rejectGnss(kGnssRateLimited, 0.0, 0.0,
+                   &measurement->stamp);
         last_processed_gnss_stamp_ns_ = measurement_ns;
         measurement = pending_factor_gnss_.erase(measurement);
         continue;
@@ -1114,7 +1278,8 @@ void RtkFixedLagBackend::processPendingGnss() {
       if (!createGraphNode(
               RawOdomSample{measurement->stamp, interpolated_raw_pose}, true,
               &created_key)) {
-        rejectGnss(kNoActiveGraphState);
+        rejectGnss(kNoActiveGraphState, 0.0, 0.0,
+                   &measurement->stamp);
         last_processed_gnss_stamp_ns_ = measurement_ns;
         measurement = pending_factor_gnss_.erase(measurement);
         continue;
@@ -1124,7 +1289,8 @@ void RtkFixedLagBackend::processPendingGnss() {
       keyframe = findKeyframe(created_key);
       association_dt_s = 0.0;
       if (!keyframe) {
-        rejectGnss(kNoActiveGraphState);
+        rejectGnss(kNoActiveGraphState, 0.0, 0.0,
+                   &measurement->stamp);
         refreshEstimateAndPublish();
         last_processed_gnss_stamp_ns_ = measurement_ns;
         measurement = pending_factor_gnss_.erase(measurement);
@@ -1142,18 +1308,31 @@ void RtkFixedLagBackend::processPendingGnss() {
   const std::size_t maximum_pending =
       static_cast<std::size_t>(config_.max_active_states) * 10;
   while (pending_factor_gnss_.size() > maximum_pending) {
-    rejectGnss(kGnssTooOldForBuffer);
+    rejectGnss(kGnssTooOldForBuffer, 0.0, 0.0,
+               &pending_factor_gnss_.front().stamp);
     pending_factor_gnss_.pop_front();
   }
 }
 
 bool RtkFixedLagBackend::addGnssFactor(
     const GnssMeasurement &measurement, const Keyframe &keyframe) {
+  const std::int64_t measurement_stamp_ns =
+      stampNanoseconds(measurement.stamp);
+  if (last_added_gnss_factor_stamp_ns_ >= 0 &&
+      measurement_stamp_ns <= last_added_gnss_factor_stamp_ns_) {
+    const bool duplicate =
+        measurement_stamp_ns == last_added_gnss_factor_stamp_ns_;
+    if (duplicate) ++gnss_duplicate_factor_count_;
+    rejectGnss(duplicate ? kDuplicateGnssTimestamp : kGnssLateOutOfOrder,
+               0.0, 0.0, &measurement.stamp);
+    return false;
+  }
+
   gtsam::Pose3 pose = keyframe.optimized_pose;
   try {
     pose = smoother_->calculateEstimate<gtsam::Pose3>(keyframe.key);
   } catch (const std::exception &) {
-    rejectGnss(kNoActiveGraphState);
+    rejectGnss(kNoActiveGraphState, 0.0, 0.0, &measurement.stamp);
     return false;
   }
 
@@ -1169,22 +1348,26 @@ bool RtkFixedLagBackend::addGnssFactor(
       measurement.sigmas.array().square().matrix();
   const Eigen::LDLT<gtsam::Matrix3> decomposition(innovation_covariance);
   if (decomposition.info() != Eigen::Success) {
-    rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, 0.0);
+    rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, 0.0,
+               &measurement.stamp);
     return false;
   }
   const double nis = residual.dot(decomposition.solve(residual));
   if (!std::isfinite(nis) || nis < 0.0) {
-    rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, nis);
+    rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, nis,
+               &measurement.stamp);
     return false;
   }
   last_gnss_residual_m_ = residual_m;
   last_gnss_nis_ = nis;
   if (residual_m > config_.max_gnss_residual_m) {
-    rejectGnss("GNSS_RESIDUAL_TOO_LARGE", residual_m, nis);
+    rejectGnss("GNSS_RESIDUAL_TOO_LARGE", residual_m, nis,
+               &measurement.stamp);
     return false;
   }
   if (nis > config_.max_gnss_nis) {
-    rejectGnss("GNSS_NIS_TOO_LARGE", residual_m, nis);
+    rejectGnss("GNSS_NIS_TOO_LARGE", residual_m, nis,
+               &measurement.stamp);
     return false;
   }
 
@@ -1201,12 +1384,14 @@ bool RtkFixedLagBackend::addGnssFactor(
       noise));
   if (!updateSmoother(factors, gtsam::Values(),
                       gtsam::FixedLagSmoother::KeyTimestampMap())) {
-    rejectGnss("OPTIMIZATION_FAILED", residual_m, nis);
+    rejectGnss("OPTIMIZATION_FAILED", residual_m, nis,
+               &measurement.stamp);
     return false;
   }
 
   ++gnss_accepted_;
   ++gnss_factor_count_;
+  last_added_gnss_factor_stamp_ns_ = measurement_stamp_ns;
   last_reject_reason_.clear();
   queueGnssPosition(measurement);
   std::ostringstream detail;
@@ -1423,7 +1608,8 @@ void RtkFixedLagBackend::pruneRawOdomBuffer() {
 }
 
 void RtkFixedLagBackend::rejectGnss(const std::string &reason,
-                                    double residual_m, double nis) {
+                                    double residual_m, double nis,
+                                    const ros::Time *measurement_stamp) {
   ++gnss_rejected_;
   if (reason == kGnssTooOldForBuffer) {
     ++gnss_too_old_;
@@ -1445,6 +1631,8 @@ void RtkFixedLagBackend::rejectGnss(const std::string &reason,
     ++gnss_time_rejected_;
   } else if (reason == kNoActiveGraphState) {
     ++gnss_no_active_state_;
+  } else if (reason == kAlignmentTransitionTooOld) {
+    ++gnss_time_rejected_;
   }
   last_reject_reason_ = reason;
   if (reason == "GNSS_RESIDUAL_TOO_LARGE" ||
@@ -1454,14 +1642,34 @@ void RtkFixedLagBackend::rejectGnss(const std::string &reason,
     last_gnss_residual_m_ = residual_m;
     last_gnss_nis_ = nis;
   }
+  const ros::Time rejected_stamp =
+      measurement_stamp ? *measurement_stamp : newest_sensor_stamp_;
   std::ostringstream detail;
   detail << "reason=" << reason << " stamp=" << std::setprecision(15)
-         << newest_sensor_stamp_.toSec() << " residual=" << residual_m
+         << rejected_stamp.toSec() << " stamp_ns="
+         << stampNanoseconds(rejected_stamp) << " residual=" << residual_m
          << " nis=" << nis;
   queueTextEvent("GNSS_REJECTED", detail.str());
   ROS_WARN_STREAM_THROTTLE(config_.log_interval_s,
                            "[RTK_BACKEND_GNSS_REJECT] " << detail.str()
                            << " total=" << gnss_rejected_);
+}
+
+std::int64_t RtkFixedLagBackend::gnssConservationDelta() const {
+  const std::uint64_t accounted =
+      (gnss_rejected_ - gnss_odom_only_rejected_) +
+      alignment_gnss_used_ + gnss_factor_count_ +
+      static_cast<std::uint64_t>(pending_status_.size()) +
+      static_cast<std::uint64_t>(pending_alignment_gnss_.size()) +
+      static_cast<std::uint64_t>(pending_factor_gnss_.size());
+  if (gnss_received_ >= accounted)
+    return static_cast<std::int64_t>(gnss_received_ - accounted);
+  return -static_cast<std::int64_t>(accounted - gnss_received_);
+}
+
+std::uint64_t RtkFixedLagBackend::gnssSilentDropCount() const {
+  const std::int64_t delta = gnssConservationDelta();
+  return delta > 0 ? static_cast<std::uint64_t>(delta) : 0;
 }
 
 void RtkFixedLagBackend::statusTimerCallback(const ros::TimerEvent &) {
@@ -1479,6 +1687,15 @@ void RtkFixedLagBackend::statusTimerCallback(const ros::TimerEvent &) {
           << " total_nodes=" << total_nodes_created_
           << " gnss_waiting=" << pending_factor_gnss_.size()
           << " gnss_factors=" << gnss_factor_count_
+          << " alignment_gnss_used=" << alignment_gnss_used_
+          << " alignment_transition_to_graph_pending="
+          << alignment_transition_to_graph_pending_
+          << " alignment_transition_rejected="
+          << alignment_transition_rejected_
+          << " alignment_transition_waiting="
+          << alignment_transition_waiting_
+          << " gnss_silent_drop_count=" << gnssSilentDropCount()
+          << " gnss_conservation_delta=" << gnssConservationDelta()
           << " livo_factors=" << livo_factor_count_
           << " raw_duplicate=" << raw_odom_duplicate_
           << " raw_non_monotonic=" << raw_odom_non_monotonic_
@@ -1634,6 +1851,7 @@ void RtkFixedLagBackend::queueStatusCsv() {
           ? 0.0
           : interpolation_gap_sum_s_ /
                 static_cast<double>(interpolation_count_);
+  const std::int64_t conservation_delta = gnssConservationDelta();
   std::ostringstream line;
   line << std::fixed << std::setprecision(9) << ros::WallTime::now().toSec()
        << "," << ros::Time::now().toSec() << ","
@@ -1655,7 +1873,16 @@ void RtkFixedLagBackend::queueStatusCsv() {
        << last_gnss_nis_ << "," << optimization_time_ms_ << ","
        << optimization_average << "," << optimization_time_max_ms_ << ","
        << interpolation_average << "," << interpolation_gap_max_s_ << ","
-       << csvField(last_reject_reason_) << "," << csvField(backend_error_);
+       << csvField(last_reject_reason_) << "," << csvField(backend_error_)
+       << "," << gnss_rejected_ << "," << gnss_odom_only_rejected_ << ","
+       << alignment_gnss_used_ << ","
+       << alignment_last_used_gnss_stamp_ns_ << ","
+       << alignment_transition_to_graph_pending_ << ","
+       << alignment_transition_rejected_ << ","
+       << alignment_transition_waiting_ << ","
+       << pending_alignment_gnss_.size() << "," << pending_status_.size()
+       << "," << gnss_duplicate_factor_count_ << ","
+       << gnssSilentDropCount() << "," << conservation_delta;
   pending_file_batch_.status_lines.push_back(line.str());
 }
 

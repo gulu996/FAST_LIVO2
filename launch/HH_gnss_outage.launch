@@ -1,0 +1,78 @@
+<launch>
+  <!-- Keep the relay in the D0 baseline too: enable=false means passthrough. -->
+  <arg name="cmd_name" default="" />
+  <arg name="rviz" default="true" />
+  <arg name="use_sim_time" default="false" />
+
+  <arg name="gnss_adapter_enable" default="true" />
+  <arg name="gnss_reference_adapter_enable" default="true" />
+  <arg name="rtk_backend_enable" default="false" />
+  <arg name="gnss_adapter_config_file"
+       default="$(find fast_livo)/config/gnss_adapter.yaml" />
+  <arg name="rtk_backend_config_file"
+       default="$(find fast_livo)/config/rtk_fixed_lag_backend.yaml" />
+
+  <arg name="gnss_raw_pvt_topic" default="/ublox_driver/receiver_pvt" />
+  <arg name="gnss_fault_pvt_topic" default="/gnss_fault/receiver_pvt" />
+  <arg name="gnss_fault_status_topic" default="/gnss_fault/status" />
+  <arg name="gnss_fusion_odom_topic" default="/gnss/enu_odom" />
+  <arg name="gnss_fusion_status_topic" default="/gnss/status" />
+  <arg name="gnss_reference_odom_topic" default="/gnss_reference/enu_odom" />
+  <arg name="gnss_reference_status_topic" default="/gnss_reference/status" />
+
+  <arg name="gnss_fault_enable" default="false" />
+  <arg name="gnss_fault_mode" default="passthrough" />
+  <arg name="gnss_fault_start" default="0.0" />
+  <arg name="gnss_fault_end" default="0.0" />
+  <arg name="gnss_fault_use_message_time" default="true" />
+  <arg name="gnss_fault_log_every_faulted_message" default="false" />
+  <arg name="gnss_fault_event_log_file"
+       default="/tmp/fast_livo_rtk/gnss_fault_events.csv" />
+  <arg name="gnss_fault_status_csv_file"
+       default="/tmp/fast_livo_rtk/gnss_fault_status.csv" />
+
+  <node pkg="fast_livo" type="gnss_fault_injector_node"
+        name="gnss_fault_injector" output="screen">
+    <param name="enable" value="$(arg gnss_fault_enable)" />
+    <param name="input_topic" value="$(arg gnss_raw_pvt_topic)" />
+    <param name="output_topic" value="$(arg gnss_fault_pvt_topic)" />
+    <param name="mode" value="$(arg gnss_fault_mode)" />
+    <param name="start_stamp" value="$(arg gnss_fault_start)" />
+    <param name="end_stamp" value="$(arg gnss_fault_end)" />
+    <param name="use_message_time" value="$(arg gnss_fault_use_message_time)" />
+    <param name="log_every_faulted_message"
+           value="$(arg gnss_fault_log_every_faulted_message)" />
+    <param name="status_topic" value="$(arg gnss_fault_status_topic)" />
+    <param name="event_log_file" value="$(arg gnss_fault_event_log_file)" />
+    <param name="status_csv_file" value="$(arg gnss_fault_status_csv_file)" />
+  </node>
+
+  <group ns="gnss_fusion" if="$(arg gnss_adapter_enable)">
+    <include file="$(find fast_livo)/launch/gnss_adapter.launch">
+      <arg name="config_file" value="$(arg gnss_adapter_config_file)" />
+      <arg name="input_topic" value="$(arg gnss_fault_pvt_topic)" />
+      <arg name="output_odom_topic" value="$(arg gnss_fusion_odom_topic)" />
+      <arg name="output_status_topic" value="$(arg gnss_fusion_status_topic)" />
+    </include>
+  </group>
+
+  <group ns="gnss_reference" if="$(arg gnss_reference_adapter_enable)">
+    <include file="$(find fast_livo)/launch/gnss_adapter.launch">
+      <arg name="config_file" value="$(arg gnss_adapter_config_file)" />
+      <arg name="input_topic" value="$(arg gnss_raw_pvt_topic)" />
+      <arg name="output_odom_topic" value="$(arg gnss_reference_odom_topic)" />
+      <arg name="output_status_topic" value="$(arg gnss_reference_status_topic)" />
+    </include>
+  </group>
+
+  <include file="$(find fast_livo)/launch/HH.launch">
+    <arg name="cmd_name" value="$(arg cmd_name)" />
+    <arg name="rviz" value="$(arg rviz)" />
+    <arg name="use_sim_time" value="$(arg use_sim_time)" />
+    <!-- The two namespaced instances above are the only GNSS adapters here. -->
+    <arg name="gnss_adapter_enable" value="false" />
+    <arg name="rtk_backend_enable" value="$(arg rtk_backend_enable)" />
+    <arg name="rtk_backend_config_file"
+         value="$(arg rtk_backend_config_file)" />
+  </include>
+</launch>
